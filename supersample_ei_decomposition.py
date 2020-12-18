@@ -141,11 +141,8 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
     # first calculate what the fixed step sizes are for each system
     # this requires calculating A^T A and finding the eigenvalues
     at_a = batched_a_matrix.permute((0, 2, 1)) @ batched_a_matrix  # shape (batch, n_waveforms, n_waveforms)
-    print(at_a.shape)
-    print("Calculating eigenvalues")
     at_a_numpy = at_a.cpu().numpy()
     eigenvalues_np, _ = np.linalg.eigh(at_a_numpy)
-    print("Done calculating numpy eigenvalues")
     eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
     print(eigenvalues.shape)
 
@@ -156,7 +153,9 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
     convergence_factor = 0.5 * (max_eigenvalue - min_eigenvalue)  # shape (batch, )
 
     # boundaries for the step size
-    step_size = 1.0 / min_eigenvalue  # has shape (batch, )
+    #step_size = 1.0 / min_eigenvalue  # has shape (batch, )
+    step_size = 2.5e-1
+    print(step_size)
 
     # Order of 1e6 3x3 systems is too much to fit on GPU
     # so we will need to batch solve the systems
@@ -185,11 +184,10 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
 
         # main loop for the algorithm
         for step_num in range(max_iter):
-            print(step_num)
 
             # apply the step and proximal operator
-            next_x_step = batched_x_vector - step_size[:, None, None] * gradient
-            next_x_step = torch.clamp_min(0.0, next_x_step)  # shape (batch, n_waveforms, n_cells * n_channels)
+            next_x_step = batched_x_vector - step_size * gradient
+            next_x_step = torch.clamp(next_x_step, min=0.0)  # shape (batch, n_waveforms, n_cells * n_channels)
 
             ax_minus_b = batched_a_matrix_chunk @ batched_x_vector - batched_targest_flat_permute[None, :, :]
             # shape (batch, n_samples, n_cells * n_channels)
@@ -200,13 +198,16 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
 
             step_distance = torch.norm(next_x_step - batched_x_vector, dim=1)  # shape (batch, n_cells * n_channels)
             convergence_bound = convergence_factor[:, None] * step_distance
-            worst_bound = torch.max(convergence_bound)[0, 0]
+            worst_bound = torch.max(convergence_bound).item()
+
+            if (step_num % 17 == 0):
+                print(step_num, worst_bound, converge_epsilon)
 
             batched_x_vector = next_x_step
             if worst_bound < converge_epsilon:
                 break
 
-        ax_minus_b = batched_a_matrix_chunk @ batched_x_vector - batched_targets_flattened[None, :, :]
+        ax_minus_b = batched_a_matrix_chunk @ batched_x_vector - batched_targets_flat_permute[None, :, :]
         # shape (batch, n_samples, n_cells * n_channels)
         objective_value = 0.5 * torch.sum(ax_minus_b * ax_minus_b, dim=1)
         # shape (batch, n_cells * n_channels)
@@ -252,6 +253,6 @@ if __name__ == '__main__':
 
     objective_fn, x_vals = torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets_torch,
                                                                              canonical_waveforms_with_shifts_torch,
-                                                                             50,
+                                                                             10000,
                                                                              1e-3,
                                                                              device)
