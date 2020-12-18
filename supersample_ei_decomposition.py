@@ -197,7 +197,7 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
             #   (batch, n_waveforms, n_cells * n_channels)
 
             step_distance = torch.norm(next_x_step - batched_x_vector, dim=1)  # shape (batch, n_cells * n_channels)
-            convergence_bound = convergence_factor[:, None] * step_distance
+            convergence_bound = convergence_factor[batch_low:batch_high, None] * step_distance
             worst_bound = torch.max(convergence_bound).item()
 
             if (step_num % 17 == 0):
@@ -207,7 +207,7 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
             if worst_bound < converge_epsilon:
                 break
 
-        ax_minus_b = batched_a_matrix_chunk @ batched_x_vector - batched_targets_flat_permute[None, :, :]
+        ax_minus_b = batched_a_matrix_chunk @ batched_x_vector - batched_targest_flat_permute[None, :, :]
         # shape (batch, n_samples, n_cells * n_channels)
         objective_value = 0.5 * torch.sum(ax_minus_b * ax_minus_b, dim=1)
         # shape (batch, n_cells * n_channels)
@@ -243,7 +243,7 @@ if __name__ == '__main__':
     canonical_waveforms_unshifted = np.array([normalized_dendritic, normalized_somatic, normalized_axonic],
                                              dtype=np.float32)  # shape (n_waveforms, n_samples)
     canonical_waveforms_with_shifts = bspline_interpolate_waveforms(canonical_waveforms_unshifted,
-                                                                    np.r_[-10.0:10.0:1])
+                                                                    np.r_[-10.0:10.0:0.25])
 
     canonical_waveforms_with_shifts_torch = torch.tensor(canonical_waveforms_with_shifts,
                                                          dtype=torch.float32,
