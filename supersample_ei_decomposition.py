@@ -137,10 +137,17 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
     # first calculate what the fixed step sizes are for each system
     # this requires calculating A^T A and finding the eigenvalues
     at_a = batched_a_matrix.permute((0, 2, 1)) @ batched_a_matrix  # shape (batch, n_waveforms, n_waveforms)
-    eigenvalues, _ = torch.linalg.eigh(at_a)
+    print(at_a.shape)
+    print("Calculating eigenvalues")
+    at_a_numpy = at_a.cpu().numpy()
+    eigenvalues_np, _ = np.linalg.eigh(at_a_numpy)
+    print("Done calculating numpy eigenvalues")
+    eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
+    print(eigenvalues.shape)
+
     # eigenvalues has shape (batch, n_waveforms)
-    max_eigenvalue = torch.max(eigenvalues, dim=1)  # shape (batch, )
-    min_eigenvalue = torch.min(eigenvalues, dim=1)  # shape (batch, )
+    max_eigenvalue, _ = torch.max(eigenvalues, dim=1)  # shape (batch, )
+    min_eigenvalue, _ = torch.min(eigenvalues, dim=1)  # shape (batch, )
 
     convergence_factor = 0.5 * (max_eigenvalue - min_eigenvalue)  # shape (batch, )
 
@@ -153,7 +160,8 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
                                    device=device)
     torch.nn.init.uniform_(batched_x_vector, 0, x_unif_init_ceiling)
 
-    ax_minus_b = batched_a_matrix @ batched_x_vector - batched_targets_flattened[None, :, :]
+    ax_minus_b = batched_a_matrix @ batched_x_vector
+    print(ax_minus_b.shape, batched_targets_flattened[None, :, :].shape)
     # shape (batch, n_samples, n_cells * n_channels)
 
     gradient = batched_a_matrix.permute(0, 2, 1) @ ax_minus_b
@@ -162,6 +170,7 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
 
     # main loop for the algorithm
     for step_num in range(max_iter):
+        print(step_num)
 
         # apply the step and proximal operator
         next_x_step = batched_x_vector - step_size[:, None, None] * gradient
@@ -216,7 +225,7 @@ if __name__ == '__main__':
     canonical_waveforms_unshifted = np.array([normalized_dendritic, normalized_somatic, normalized_axonic],
                                              dtype=np.float32) # shape (n_waveforms, n_samples)
     canonical_waveforms_with_shifts = bspline_interpolate_waveforms(canonical_waveforms_unshifted,
-                                                                    np.r_[-10.0:20.0:0.2])
+                                                                    np.r_[-10.0:10.0:1])
 
     canonical_waveforms_with_shifts_torch = torch.tensor(canonical_waveforms_with_shifts,
                                                          dtype=torch.float32,
