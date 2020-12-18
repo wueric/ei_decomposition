@@ -55,7 +55,8 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
                                                       max_iter: int,
                                                       converge_epsilon: float,
                                                       device: torch.device,
-                                                      x_unif_init_ceiling: float = 10.0) \
+                                                      x_unif_init_ceiling: float = 10.0,
+                                                      batch_one_iter=8192) \
         -> Tuple[torch.Tensor, torch.Tensor]:
     '''
     Implementation with fixed step size
@@ -131,8 +132,11 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
     #   which is much easier to handle with torch semantics
     #   batch = n_shifts * ... * n_shifts
     all_basis_shape = all_basis_matrix.shape
+
     batched_a_matrix = all_basis_matrix.reshape((-1, all_basis_shape[-2], all_basis_shape[-1]))
-    batch_size = batched_a_matrix.shape[0]
+    # shape (batch, n_samples, n_waveforms)
+
+    n_problems = batched_a_matrix.shape[0]
 
     # first calculate what the fixed step sizes are for each system
     # this requires calculating A^T A and finding the eigenvalues
@@ -154,53 +158,66 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets: torch.Ten
     # boundaries for the step size
     step_size = 1.0 / min_eigenvalue  # has shape (batch, )
 
-    # randomly initialize x
-    batched_x_vector = torch.empty((batch_size, n_waveforms, n_cells * n_channels),
-                                   dtype=torch.float32,
-                                   device=device)
-    torch.nn.init.uniform_(batched_x_vector, 0, x_unif_init_ceiling)
+    # Order of 1e6 3x3 systems is too much to fit on GPU
+    # so we will need to batch solve the systems
+    solved_objective_values = torch.zeros((n_problems, n_channels * n_cells), dtype=torch.float32, device=device)
+    solved_weights = torch.zeros((n_problems, n_waveforms, n_channels * n_cells), dtype=torch.float32, device=device)
 
-    ax_minus_b = batched_a_matrix @ batched_x_vector
-    print(ax_minus_b.shape, batched_targets_flattened[None, :, :].shape)
-    # shape (batch, n_samples, n_cells * n_channels)
+    for batch_low in range(0, n_problems, batch_one_iter):
 
-    gradient = batched_a_matrix.permute(0, 2, 1) @ ax_minus_b
-    # has shape (batch, n_waveforms, n_samples) x (batch, n_samples, n_cells * n_channels) =
-    #   (batch, n_waveforms, n_cells * n_channels)
+        batch_high = min(batch_low + batch_one_iter, n_problems)
+        batch_size = batch_high - batch_low
 
-    # main loop for the algorithm
-    for step_num in range(max_iter):
-        print(step_num)
+        batched_a_matrix_chunk = batched_a_matrix[batch_low:batch_high,:,:]
 
-        # apply the step and proximal operator
-        next_x_step = batched_x_vector - step_size[:, None, None] * gradient
-        next_x_step = torch.clamp_min(0.0, next_x_step)  # shape (batch, n_waveforms, n_cells * n_channels)
+        # randomly initialize x
+        batched_x_vector = torch.empty((batch_size, n_waveforms, n_cells * n_channels),
+                                       dtype=torch.float32,
+                                       device=device)
+        torch.nn.init.uniform_(batched_x_vector, 0, x_unif_init_ceiling)
 
-        ax_minus_b = batched_a_matrix @ batched_x_vector - batched_targets_flattened[None, :, :]
+        ax_minus_b = batched_a_matrix_chunk @ batched_x_vector - batched_targest_flat_permute[None, :, :]
         # shape (batch, n_samples, n_cells * n_channels)
 
-        gradient = batched_a_matrix.permute(0, 2, 1) @ ax_minus_b
+        gradient = batched_a_matrix_chunk.permute(0, 2, 1) @ ax_minus_b
         # has shape (batch, n_waveforms, n_samples) x (batch, n_samples, n_cells * n_channels) =
         #   (batch, n_waveforms, n_cells * n_channels)
 
-        step_distance = torch.norm(next_x_step - batched_x_vector, dim=1)  # shape (batch, n_cells * n_channels)
-        convergence_bound = convergence_factor[:, None] * step_distance
-        worst_bound = torch.max(convergence_bound)[0, 0]
+        # main loop for the algorithm
+        for step_num in range(max_iter):
+            print(step_num)
 
-        batched_x_vector = next_x_step
-        if worst_bound < converge_epsilon:
-            break
+            # apply the step and proximal operator
+            next_x_step = batched_x_vector - step_size[:, None, None] * gradient
+            next_x_step = torch.clamp_min(0.0, next_x_step)  # shape (batch, n_waveforms, n_cells * n_channels)
 
-    ax_minus_b = batched_a_matrix @ batched_x_vector - batched_targets_flattened[None, :, :]
-    # shape (batch, n_samples, n_cells * n_channels)
-    objective_value = 0.5 * torch.sum(ax_minus_b * ax_minus_b, dim=1)
-    # shape (batch, n_cells * n_channels)
+            ax_minus_b = batched_a_matrix_chunk @ batched_x_vector - batched_targest_flat_permute[None, :, :]
+            # shape (batch, n_samples, n_cells * n_channels)
 
-    return objective_value, batched_x_vector
+            gradient = batched_a_matrix_chunk.permute(0, 2, 1) @ ax_minus_b
+            # has shape (batch, n_waveforms, n_samples) x (batch, n_samples, n_cells * n_channels) =
+            #   (batch, n_waveforms, n_cells * n_channels)
+
+            step_distance = torch.norm(next_x_step - batched_x_vector, dim=1)  # shape (batch, n_cells * n_channels)
+            convergence_bound = convergence_factor[:, None] * step_distance
+            worst_bound = torch.max(convergence_bound)[0, 0]
+
+            batched_x_vector = next_x_step
+            if worst_bound < converge_epsilon:
+                break
+
+        ax_minus_b = batched_a_matrix_chunk @ batched_x_vector - batched_targets_flattened[None, :, :]
+        # shape (batch, n_samples, n_cells * n_channels)
+        objective_value = 0.5 * torch.sum(ax_minus_b * ax_minus_b, dim=1)
+        # shape (batch, n_cells * n_channels)
+
+        solved_objective_values[batch_low:batch_high,:] = objective_value
+        solved_weights[batch_low:batch_high,:,:] = batched_x_vector
+
+    return solved_objective_values, solved_weights
 
 
 if __name__ == '__main__':
-
     device = torch.device('cuda')
 
     # for now, don't bother with argparse since we still don't have an automatic way
@@ -223,7 +240,7 @@ if __name__ == '__main__':
     normalized_axonic = ei_example[axonic_electrode, :] / np.linalg.norm(ei_example[axonic_electrode, :])
 
     canonical_waveforms_unshifted = np.array([normalized_dendritic, normalized_somatic, normalized_axonic],
-                                             dtype=np.float32) # shape (n_waveforms, n_samples)
+                                             dtype=np.float32)  # shape (n_waveforms, n_samples)
     canonical_waveforms_with_shifts = bspline_interpolate_waveforms(canonical_waveforms_unshifted,
                                                                     np.r_[-10.0:10.0:1])
 
@@ -231,7 +248,7 @@ if __name__ == '__main__':
                                                          dtype=torch.float32,
                                                          device=device)
 
-    batched_targets_torch = torch.tensor(ei_example[None,:,:], dtype=torch.float32, device=device)
+    batched_targets_torch = torch.tensor(ei_example[None, :, :], dtype=torch.float32, device=device)
 
     objective_fn, x_vals = torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets_torch,
                                                                              canonical_waveforms_with_shifts_torch,
