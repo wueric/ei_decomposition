@@ -10,6 +10,8 @@ from typing import List, Dict, Tuple, Callable
 
 import pickle
 
+import tqdm
+
 
 def bspline_interpolate_waveforms(waveforms: np.ndarray,
                                   bspl_valid_shifts: np.ndarray) -> np.ndarray:
@@ -168,7 +170,8 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets_np: np.nda
     # so we will need to batch solve the systems
     solved_objective_values = torch.zeros((n_problems, n_channels * n_cells), dtype=torch.float32, device=device)
     solved_weights = torch.zeros((n_problems, n_waveforms, n_channels * n_cells), dtype=torch.float32, device=device)
-
+    
+    pbar = tqdm.tqdm(total=int(np.round(n_problems / batch_one_iter)))
     for batch_low in range(0, n_problems, batch_one_iter):
 
         batch_high = min(batch_low + batch_one_iter, n_problems)
@@ -209,8 +212,8 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets_np: np.nda
             convergence_bound = convergence_factor[batch_low:batch_high, None] * step_distance_square_mag
             worst_bound = torch.max(convergence_bound).item()
 
-            if (step_num % 17 == 0):
-                print(step_num, worst_bound, converge_epsilon)
+            #if (step_num % 31 == 0):
+            #    print(step_num, worst_bound, converge_epsilon)
 
             batched_x_vector = next_x_step
             if worst_bound < converge_epsilon:
@@ -223,6 +226,8 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets_np: np.nda
 
         solved_objective_values[batch_low:batch_high, :] = objective_value
         solved_weights[batch_low:batch_high, :, :] = batched_x_vector
+
+        pbar.update(1)
 
     # now unpack and interpret the values
     # first step is we have to unflatten the whole thing...
@@ -242,12 +247,21 @@ def torch_fixed_step_size_waveform_nonneg_orthant_min(batched_targets_np: np.nda
 
     # now we've solved for which problems are the best
     best_problem_indices = np.unravel_index(objective_argmin_np, n_problems_shape)
+    best_problem_indices_array = np.array(best_problem_indices)
 
     # now get the weights corresponding to each problem
-    best_weights = solved_weights_orig_shape_np[objective_argmin_np, :, :]
+    solved_weights_for_select = solved_weights_orig_shape_np.transpose([2, 3, 0, 1])
+    # shape (n_cells, n_channels, n_problems, n_waveforms)
+    solved_weights_for_select = solved_weights_for_select.reshape((-1, n_problems, n_waveforms))
+    # shape (n_cells * n_channels, n_problems, n_waveforms)
+
+    argmin_to_take = objective_argmin_np.reshape((-1,))
+    best_weights_flattened = solved_weights_for_select[np.r_[0:argmin_to_take.shape[0]],argmin_to_take,:]
+    # shape (n_cells * n_channels, n_waveforms)
+    best_weights = best_weights_flattened.reshape((n_cells, n_channels, n_waveforms))
 
     # ignore the last index
-    return objective_min_value_np, np.array(best_problem_indices), best_weights.transpose([1, 2, 0])
+    return objective_min_value_np, best_problem_indices_array, best_weights.transpose([2, 0, 1])
 
 
 if __name__ == '__main__':
@@ -280,13 +294,14 @@ if __name__ == '__main__':
     objective_val, best_indices, weights = torch_fixed_step_size_waveform_nonneg_orthant_min(ei_example[None, :, :],
                                                                                              canonical_waveforms_with_shifts,
                                                                                              10000,
-                                                                                             1e-5,
+                                                                                             1e-3,
                                                                                              device)
     save_dict = {
+        'basis' : canonical_waveforms_with_shifts,
         'objective' : objective_val,
         'best_indices' : best_indices,
         'weights' : weights
     }
 
-    with open('test.p') as pfile:
+    with open('test.p', 'wb') as pfile:
         pickle.dump(save_dict, pfile)
