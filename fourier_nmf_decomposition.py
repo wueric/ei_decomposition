@@ -430,7 +430,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
 
         # shape (n_observations, n_canonical_waveforms, n_timepoints)
-        canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, axis=2)
+        canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2)
         print(canonical_waveform_ft.shape, canonical_waveforms_shifted.shape)
 
         # shape (n_observations, n_canonical_waveforms)
@@ -450,7 +450,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         )
 
         # real valued np.ndarray, shape (n_canonical_waveforms, n_samples)
-        iter_canonical_waveform_td = np.real(np.fft.ifft(iter_canonical_waveform_ft, axis=1))
+        iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=1))
 
         # shape (n_observations, n_canonical_waveforms)
         print("Iter {0}, Delay estimation".format(iter_count))
