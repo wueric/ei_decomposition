@@ -137,6 +137,7 @@ def nonnegative_least_squares_optimize_amplitudes(observation_matrix_np: np.ndar
 def fourier_complex_least_squares_optimize_waveforms2(amplitude_matrix_real_np: np.ndarray,
                                                       phase_delays_np: np.ndarray,
                                                       ft_complex_observations_np: np.ndarray,
+                                                      n_true_frequencies : int,
                                                       device) -> np.ndarray:
     '''
 
@@ -145,17 +146,17 @@ def fourier_complex_least_squares_optimize_waveforms2(amplitude_matrix_real_np: 
     :param phase_delays_np: integer sample delays for each canonical waveform, for each observation
         shape (n_observations, n_canonical_waveforms)
     :param ft_complex_observations_np: complex-valued Fourier transform of the observed data,
-        shape (n_observations, n_frequencies = n_samples)
+        shape (n_observations, n_rfft_frequencies)
+    :param n_true_frequencies : int, number of frequencies = n_samples for the normal FFT
+        (not the number of rFFT frequencies)
     :param device:
     :return: tuple of real component, imaginary component of canonical waveform Fourier transform
-        each has shape (n_canonical_waveforms, n_frequencies)
+        each has shape (n_canonical_waveforms, n_rfft_frequencies)
     '''
-
-    _, n_frequencies = ft_complex_observations_np.shape
 
     # complex-valued, shape (n_observations, n_canonical_waveforms, n_frequencies)
     complex_phase_matrix = generate_fourier_phase_shift_matrices(phase_delays_np,
-                                                                 n_frequencies)
+                                                                 n_true_frequencies)
 
     # complex-valued, shape (n_observations, n_canonical_waveforms, n_frequencies)
     rhs_submatrix_prediv = amplitude_matrix_real_np[:, :, None] * ft_complex_observations_np[:, None, :]
@@ -208,7 +209,8 @@ def fit_shifts_all_but_one_template_match(observed_ft: np.ndarray,
                                           real_amplitude_matrix_np: np.ndarray,
                                           ft_canonical: np.ndarray,
                                           previous_shifts_integer: np.ndarray,
-                                          valid_phase_shifts: np.ndarray) -> np.ndarray:
+                                          valid_phase_shifts: np.ndarray,
+                                          n_true_frequencies : int) -> np.ndarray:
     '''
     Crude approximate all-but-one template match.
 
@@ -227,9 +229,10 @@ def fit_shifts_all_but_one_template_match(observed_ft: np.ndarray,
         shape (n_canonical_waveforms, n_frequencies)
     :param previous_shifts_integer: previous canonical waveform shifts, shape (n_observations, n_canonical_waveforms)
     :param valid_phase_shifts: allowed phase shifts that we can test, shape (n_valid_phase_shifts, )
+    :param n_true_frequencies: int, number of regular FFT frequencies (not the number of rFFT frequencies)
     :return: timeshifts, shape (n_observations, n_canonical_waveforms)
     '''
-    n_observations, n_frequencies = observed_ft.shape
+    n_observations, _ = observed_ft.shape
     _, n_canonical_waveforms = real_amplitude_matrix_np.shape
 
     output_timeshifts = np.zeros((n_observations, n_canonical_waveforms), dtype=np.int32)
@@ -237,11 +240,11 @@ def fit_shifts_all_but_one_template_match(observed_ft: np.ndarray,
 
     # shape (n_valid_phase_shifts, n_frequencies)
     phaseshift_all_allowed_matrices = generate_fourier_phase_shift_matrices(valid_phase_shifts,
-                                                                            n_frequencies)
+                                                                            n_true_frequencies)
 
     # shape (n_observations, n_canonical_waveforms, n_frequencies)
     phase_shift_matrices = generate_fourier_phase_shift_matrices(previous_shifts_integer,
-                                                                 n_frequencies)
+                                                                 n_true_frequencies)
 
     # shape (n_observations, n_canonical_waveforms, n_frequencies)
     phase_shifted_canonical_ft = phase_shift_matrices * ft_canonical[None, :, :]
@@ -320,7 +323,8 @@ def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,
 def debug_evaluate_error(observed_ft: np.ndarray,
                          fit_real_amplitudes: np.ndarray,
                          canonical_waveform_ft: np.ndarray,
-                         time_shifts: np.ndarray) -> Tuple[float, float, float]:
+                         time_shifts: np.ndarray,
+                         n_true_frequencies: int) -> Tuple[float, float, float]:
     '''
 
     :param observed_ft: Fourier transform of observed data, complex-valued,
@@ -331,21 +335,25 @@ def debug_evaluate_error(observed_ft: np.ndarray,
         shape (n_canonical_waveforms, n_frequencies)
     :param time_shifts: Time shifts required for each canonical waveform to fit each observation,
         shape (n_observations, n_canonical_waveforms)
+    :param n_true_frequencies: int, the number of normal FFT frequencies (not the number of
+        rFFT frequencies)
     :return: MSE error, real valued time domain power, imaginary valued time domain power
     '''
-    n_observations, n_frequencies = observed_ft.shape
+    n_observations, _ = observed_ft.shape
 
     # shape (n_observations, n_canonical_waveforms, n_frequencies)
     time_shift_matrices = generate_fourier_phase_shift_matrices(time_shifts,
-                                                                n_frequencies)
+                                                                n_true_frequencies)
 
     # shape (n_observations, n_canonical_waveforms, n_frequencies)
     shifted_no_scale_ft = canonical_waveform_ft[None, :, :] * time_shift_matrices
 
     model_ft = np.squeeze(fit_real_amplitudes[:, None, :] @ shifted_no_scale_ft, axis=1)
 
-    real_power = np.linalg.norm(np.real(model_ft)) ** 2
-    imag_power = np.linalg.norm(np.imag(model_ft)) ** 2
+    model_td = np.fft.irfft(model_ft, n=n_true_frequencies, axis=1)
+
+    real_power = np.linalg.norm(np.real(model_td)) ** 2
+    imag_power = np.linalg.norm(np.imag(model_td)) ** 2
 
     diff = observed_ft - model_ft
     errors = np.linalg.norm(diff, axis=1)
@@ -446,6 +454,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
             iter_real_amplitudes,
             prev_iter_delays,
             observations_fourier_transform,
+            n_frequencies_not_rfft,
             device
         )
 
@@ -458,7 +467,8 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                                                                    iter_real_amplitudes,
                                                                    iter_canonical_waveform_ft,
                                                                    prev_iter_delays,
-                                                                   valid_sample_shifts)
+                                                                   valid_sample_shifts,
+                                                                   n_frequencies_not_rfft)
 
         # calculate progress metrics
         # (probably best done in Fourier domain, doesn't require clever shifting and can
@@ -466,7 +476,8 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         mse, real_power, imag_power = debug_evaluate_error(observations_fourier_transform,
                                                            iter_real_amplitudes,
                                                            iter_canonical_waveform_ft,
-                                                           iter_sample_delays)
+                                                           iter_sample_delays,
+                                                           n_frequencies_not_rfft)
         print("Iteration {0}: MSE {1}, real_power {2}, imag_power {3}".format(iter_count, mse, real_power, imag_power))
 
         # now update the loop variables
