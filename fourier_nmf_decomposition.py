@@ -306,7 +306,7 @@ def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,
     phase_radians_slice = tuple(phase_radians_slice)
 
     # this has value f/F
-    frequencies = np.fft.fftfreq(n_frequencies)  # shape (n_frequencies, )
+    frequencies = np.fft.rfftfreq(n_frequencies)  # shape (n_frequencies, )
 
     # this is 2 * pi * f / F
     phase_radians = 2 * np.pi * frequencies  # shape (n_frequencies, )
@@ -380,7 +380,6 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
     '''
 
     n_observations, n_samples = waveform_data_matrix.shape
-    n_frequencies = n_samples
 
     prev_iter_real_amplitude_A = np.zeros((n_observations, n_canonical_waveforms),
                                           dtype=np.float32)
@@ -403,7 +402,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
     # compute the Fourier transform of the observed data once, ahead of time
     # shape (n_observations, n_frequencies)
     print("Calculating observed Fourier transforms")
-    observations_fourier_transform = np.fft.fft(waveform_data_matrix, axis=1)
+    observations_fourier_transform = np.fft.rfft(waveform_data_matrix, axis=1)
 
     print("Beginning optimization loop")
     for iter_count in range(n_iter):
@@ -419,18 +418,19 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
         # shape (n_canonical_waveforms, n_frequencies)
         print("Iter {0}, Canonical waveform fft, {1}".format(iter_count, prev_iter_waveform_td.shape))
-        canonical_waveform_ft = np.fft.fft(prev_iter_waveform_td, axis=1)
+        canonical_waveform_ft = np.fft.rfft(prev_iter_waveform_td, axis=1)
+        n_frequencies_rfft = canonical_waveform_ft.shape[1]
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
         print("Iter {0}, phase shift mat generation, {1}".format(iter_count, prev_iter_waveform_td.shape))
         delay_phase_shift_mat = generate_fourier_phase_shift_matrices(prev_iter_delays,
-                                                                      n_frequencies)
+                                                                      n_frequencies_rfft)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
         canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
 
         # shape (n_observations, n_canonical_waveforms, n_timepoints)
-        canonical_waveforms_shifted = np.real(np.fft.ifft(canonical_waveform_shift_ft, axis=2))
+        canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, axis=2)
         print(canonical_waveform_ft.shape, canonical_waveforms_shifted.shape)
 
         # shape (n_observations, n_canonical_waveforms)
