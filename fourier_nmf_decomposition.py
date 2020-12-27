@@ -313,7 +313,6 @@ def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,
 
     # this is -j * 2 * pi * tau * f / F
     complex_exponential_argument = -1j * sample_delays[sample_delays_slice] * phase_radians[phase_radians_slice]
-    # shape (n_canonical_waveforms, n_frequencies, sample_delays)
 
     return np.exp(complex_exponential_argument)
 
@@ -380,6 +379,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
     '''
 
     n_observations, n_samples = waveform_data_matrix.shape
+    n_frequencies_not_rfft = n_samples
 
     prev_iter_real_amplitude_A = np.zeros((n_observations, n_canonical_waveforms),
                                           dtype=np.float32)
@@ -419,12 +419,12 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         # shape (n_canonical_waveforms, n_frequencies)
         print("Iter {0}, Canonical waveform fft, {1}".format(iter_count, prev_iter_waveform_td.shape))
         canonical_waveform_ft = np.fft.rfft(prev_iter_waveform_td, axis=1)
-        n_frequencies_rfft = canonical_waveform_ft.shape[1]
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
         print("Iter {0}, phase shift mat generation, {1}".format(iter_count, prev_iter_waveform_td.shape))
         delay_phase_shift_mat = generate_fourier_phase_shift_matrices(prev_iter_delays,
-                                                                      n_frequencies_rfft)
+                                                                      n_frequencies_not_rfft)
+        print(canonical_waveform_ft.shape, delay_phase_shift_mat.shape)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
         canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
