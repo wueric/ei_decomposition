@@ -100,7 +100,7 @@ def nonnegative_least_squares_optimize_amplitudes(observation_matrix_np: np.ndar
     # we make step_size smaller to be safe
     step_size = 1.0 / (2 * max_eigenvalue)  # has shape (n_observations, )
 
-    ax_minus_b = shifted_basis_t @ amplitudes[:, :, None] - observe_mat_t[:, :, None]
+    ax_minus_b = shifted_basis_t @ amplitudes[:, :, None] - observe_mat[:, :, None]
     # shape (n_observations, n_timepoints, 1)
 
     # (n_observations, n_canonical_waveforms, n_timepoints) x (n_observations, n_timepoints, 1)
@@ -113,7 +113,7 @@ def nonnegative_least_squares_optimize_amplitudes(observation_matrix_np: np.ndar
         next_amplitudes = torch.clamp(amplitudes - step_size[:, None] * gradient,
                                       min=0.0)
 
-        ax_minus_b = shifted_basis_t @ next_amplitudes[:, :, None] - observe_mat_t[:, :, None]
+        ax_minus_b = shifted_basis_t @ next_amplitudes[:, :, None] - observe_mat[:, :, None]
         # shape (n_observations, n_timepoints, 1)
 
         # (n_observations, n_canonical_waveforms, n_timepoints) x (n_observations, n_timepoints, 1)
@@ -182,7 +182,7 @@ def fourier_complex_least_squares_optimize_waveforms2(amplitude_matrix_real_np: 
     lu_factor_at_a, lu_pivots_at_a = torch.lu(at_a)
 
     # shape (2, n_canonical_waveforms, n_frequencies)
-    sols_componentwise = torch.lu_solve(rhs_stack, lu_factor_at_a, lu_factor_at_a)
+    sols_componentwise = torch.lu_solve(rhs_stack, lu_factor_at_a, lu_pivots_at_a)
 
     real_sols = sols_componentwise[0, :, :].cpu().numpy()
     imag_sols = sols_componentwise[1, :, :].cpu().numpy()
@@ -343,7 +343,7 @@ def debug_evaluate_error(observed_ft: np.ndarray,
     # shape (n_observations, n_canonical_waveforms, n_frequencies)
     shifted_no_scale_ft = canonical_waveform_ft[None, :, :] * time_shift_matrices
 
-    model_ft = fit_real_amplitudes[:, :, None] @ shifted_no_scale_ft
+    model_ft = np.squeeze(fit_real_amplitudes[:, None, :] @ shifted_no_scale_ft, axis=1)
 
     real_power = np.linalg.norm(np.real(model_ft)) ** 2
     imag_power = np.linalg.norm(np.imag(model_ft)) ** 2
@@ -384,7 +384,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
     prev_iter_real_amplitude_A = np.zeros((n_observations, n_canonical_waveforms),
                                           dtype=np.float32)
-    prev_iter_waveform_td = np.zeros((n_observations, n_canonical_waveforms, n_samples),
+    prev_iter_waveform_td = np.zeros((n_canonical_waveforms, n_samples),
                                      dtype=np.float32)
     prev_iter_delays = np.zeros((n_observations, n_canonical_waveforms),
                                 dtype=np.float32)
@@ -418,7 +418,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         #       to solve for the shifts
 
         # shape (n_canonical_waveforms, n_frequencies)
-        print("Iter {0}, Canonical waveform ft, {1}".format(iter_count, prev_iter_waveform_td.shape))
+        print("Iter {0}, Canonical waveform fft, {1}".format(iter_count, prev_iter_waveform_td.shape))
         canonical_waveform_ft = np.fft.fft(prev_iter_waveform_td, axis=1)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
@@ -427,11 +427,11 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                                                                       n_frequencies)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
-        print(delay_phase_shift_mat.shape, prev_iter_waveform_td.shape, canonical_waveform_ft.shape)
         canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
 
         # shape (n_observations, n_canonical_waveforms, n_timepoints)
         canonical_waveforms_shifted = np.real(np.fft.ifft(canonical_waveform_shift_ft, axis=2))
+        print(canonical_waveform_ft.shape, canonical_waveforms_shifted.shape)
 
         # shape (n_observations, n_canonical_waveforms)
         print("Iter {0}, Nonnegative least squares".format(iter_count))
@@ -444,7 +444,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         print("Iter {0}, Waveform complex least squares".format(iter_count))
         iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms2(
             iter_real_amplitudes,
-            delay_phase_shift_mat,
+            prev_iter_delays,
             observations_fourier_transform,
             device
         )
