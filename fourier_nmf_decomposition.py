@@ -423,7 +423,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
         print("Iter {0}, phase shift mat generation, {1}".format(iter_count, prev_iter_waveform_td.shape))
-        delay_phase_shift_mat = generate_fourier_phase_shift_matrices(prev_iter_waveform_td,
+        delay_phase_shift_mat = generate_fourier_phase_shift_matrices(prev_iter_delays,
                                                                       n_frequencies)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
