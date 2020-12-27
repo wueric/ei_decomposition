@@ -384,7 +384,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
     prev_iter_real_amplitude_A = np.zeros((n_observations, n_canonical_waveforms),
                                           dtype=np.float32)
-    prev_iter_waveform_td = np.zeros((n_canonical_waveforms, n_samples),
+    prev_iter_waveform_td = np.zeros((n_observations, n_canonical_waveforms, n_samples),
                                      dtype=np.float32)
     prev_iter_delays = np.zeros((n_observations, n_canonical_waveforms),
                                 dtype=np.float32)
@@ -402,8 +402,10 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
     # compute the Fourier transform of the observed data once, ahead of time
     # shape (n_observations, n_frequencies)
+    print("Calculating observed Fourier transforms")
     observations_fourier_transform = np.fft.fft(waveform_data_matrix, axis=1)
 
+    print("Beginning optimization loop")
     for iter_count in range(n_iter):
         # within each iteration, we have a three step optimization
         # (1) Given fixed canonical waveforms and integer shifts,
@@ -416,25 +418,30 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         #       to solve for the shifts
 
         # shape (n_canonical_waveforms, n_frequencies)
+        print("Iter {0}, Canonical waveform ft, {1}".format(iter_count, prev_iter_waveform_td.shape))
         canonical_waveform_ft = np.fft.fft(prev_iter_waveform_td, axis=1)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
+        print("Iter {0}, phase shift mat generation, {1}".format(iter_count, prev_iter_waveform_td.shape))
         delay_phase_shift_mat = generate_fourier_phase_shift_matrices(prev_iter_waveform_td,
                                                                       n_frequencies)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
+        print(delay_phase_shift_mat.shape, prev_iter_waveform_td.shape, canonical_waveform_ft.shape)
         canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
 
         # shape (n_observations, n_canonical_waveforms, n_timepoints)
         canonical_waveforms_shifted = np.real(np.fft.ifft(canonical_waveform_shift_ft, axis=2))
 
         # shape (n_observations, n_canonical_waveforms)
+        print("Iter {0}, Nonnegative least squares".format(iter_count))
         iter_real_amplitudes = nonnegative_least_squares_optimize_amplitudes(waveform_data_matrix,
                                                                              prev_iter_real_amplitude_A,
                                                                              canonical_waveforms_shifted,
                                                                              device)
 
         # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
+        print("Iter {0}, Waveform complex least squares".format(iter_count))
         iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms2(
             iter_real_amplitudes,
             delay_phase_shift_mat,
@@ -446,6 +453,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         iter_canonical_waveform_td = np.real(np.fft.ifft(iter_canonical_waveform_ft, axis=1))
 
         # shape (n_observations, n_canonical_waveforms)
+        print("Iter {0}, Delay estimation".format(iter_count))
         iter_sample_delays = fit_shifts_all_but_one_template_match(observations_fourier_transform,
                                                                    iter_real_amplitudes,
                                                                    iter_canonical_waveform_ft,
@@ -474,6 +482,7 @@ if __name__ == '__main__':
 
     # for now, don't bother with argparse since we still don't have an automatic way
     # to pick canonical waveforms
+    print("Loading data")
     dataset = vl.load_vision_data('/Volumes/Lab/Users/ericwu/yass-ei/2018-03-01-0/data001',
                                   'data001',
                                   include_params=True,
@@ -489,13 +498,16 @@ if __name__ == '__main__':
     channels_sufficient_magnitude = eis_stacked[eis_sufficient_magnitude]
 
     # now 5x bspline supersample
+    print("Bspline supersample")
     bspline_supersampled = bspline_upsample_waveforms(channels_sufficient_magnitude, 5)
 
     # now zero pad before and after
+    print("Zero padding")
     padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
                                                   [(40, 40), (0, 0)],
                                                   mode='constant')
 
+    print("Decomposition optimization")
     a, b, c = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
                                   3,
                                   np.r_[-40:40],

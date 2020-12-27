@@ -281,7 +281,11 @@ if __name__ == '__main__':
     somatic_electrode = 61
     axonic_electrode = 300
 
+    cell_to_fit = 1187
+
     ei_example = dataset.get_ei_for_cell(example_cell).ei
+    ei_to_fit = dataset.get_ei_for_cell(cell_to_fit).ei
+
     normalized_dendritic = ei_example[dendritic_electrode, :] / np.linalg.norm(ei_example[dendritic_electrode, :])
     normalized_somatic = ei_example[somatic_electrode, :] / np.linalg.norm(ei_example[somatic_electrode, :])
     normalized_axonic = ei_example[axonic_electrode, :] / np.linalg.norm(ei_example[axonic_electrode, :])
@@ -291,10 +295,10 @@ if __name__ == '__main__':
     canonical_waveforms_with_shifts = bspline_interpolate_waveforms(canonical_waveforms_unshifted,
                                                                     np.r_[-10.0:10.0:0.25])
 
-    objective_val, best_indices, weights = torch_fixed_step_size_waveform_nonneg_orthant_min(ei_example[None, :, :],
+    objective_val, best_indices, weights = torch_fixed_step_size_waveform_nonneg_orthant_min(ei_to_fit[None, :, :],
                                                                                              canonical_waveforms_with_shifts,
                                                                                              10000,
-                                                                                             1e-3,
+                                                                                             1e-2,
                                                                                              device)
     save_dict = {
         'basis' : canonical_waveforms_with_shifts,
@@ -303,5 +307,5 @@ if __name__ == '__main__':
         'weights' : weights
     }
 
-    with open('test.p', 'wb') as pfile:
+    with open('test{0}.p'.format(cell_to_fit), 'wb') as pfile:
         pickle.dump(save_dict, pfile)
