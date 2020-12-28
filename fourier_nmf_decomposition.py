@@ -6,11 +6,13 @@ import torch
 
 import argparse
 
-from typing import List, Dict, Tuple, Callable
+from typing import List, Dict, Tuple, Sequence, Optional
 
 import pickle
 
 import tqdm
+
+from collections import namedtuple
 
 
 def bspline_upsample_waveforms(waveforms: np.ndarray,
@@ -42,6 +44,7 @@ def nonnegative_least_squares_optimize_amplitudes(observation_matrix_np: np.ndar
                                                   amplitude_matrix_real_np: np.ndarray,
                                                   shifted_canonical_basis_np: np.ndarray,
                                                   device: torch.device,
+                                                  l1_regularization_lambda: Optional[float] = None,
                                                   max_iter=100,
                                                   converge_epsilon=1e-3) \
         -> np.ndarray:
@@ -106,6 +109,8 @@ def nonnegative_least_squares_optimize_amplitudes(observation_matrix_np: np.ndar
     # (n_observations, n_canonical_waveforms, n_timepoints) x (n_observations, n_timepoints, 1)
     # = (n_observations, n_canonical_waveforms, 1) -> (n_observations, n_canonical_waveforms)
     gradient = torch.squeeze(shifted_basis @ ax_minus_b, -1)
+    if l1_regularization_lambda is not None:
+        gradient += l1_regularization_lambda
 
     for iter_count in range(max_iter):
 
@@ -119,6 +124,9 @@ def nonnegative_least_squares_optimize_amplitudes(observation_matrix_np: np.ndar
         # (n_observations, n_canonical_waveforms, n_timepoints) x (n_observations, n_timepoints, 1)
         # = (n_observations, n_canonical_waveforms, 1) -> (n_observations, n_canonical_waveforms)
         gradient = torch.squeeze(shifted_basis @ ax_minus_b, -1)
+
+        if l1_regularization_lambda is not None:
+            gradient += l1_regularization_lambda
 
         step_distance = next_amplitudes - amplitudes  # shape (n_observations, n_canonical_waveforms)
         step_distance_square_mag = torch.sum(step_distance * step_distance,
@@ -248,7 +256,7 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
 
     # real-valued, shape (2, n_canonical_waveforms, n_rfft_frequencies)
     ft_canonical_torch = torch.tensor(np.stack([ft_canonical.real, ft_canonical.imag],
-                                                     axis=0),
+                                               axis=0),
                                       dtype=torch.float32,
                                       device=device)
 
@@ -259,8 +267,8 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
 
     # real-valued, shape (2, n_valid_phase_shifts, n_rfft_frequencies)
     phaseshift_all_allowed_torch = torch.tensor(np.stack([phaseshift_all_allowed_matrices.real,
-                                                                phaseshift_all_allowed_matrices.imag],
-                                                               axis=0),
+                                                          phaseshift_all_allowed_matrices.imag],
+                                                         axis=0),
                                                 dtype=torch.float32,
                                                 device=device)
 
@@ -271,7 +279,7 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
 
     # real-valued, shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
     phase_shift_torch = torch.tensor(np.stack([phase_shift_matrices.real, phase_shift_matrices.imag],
-                                                    axis=0),
+                                              axis=0),
                                      dtype=torch.float32,
                                      device=device)
 
@@ -493,6 +501,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                         valid_sample_shifts: np.ndarray,
                         n_iter: int,
                         device: torch.device,
+                        l1_regularization_lambda: Optional[float] = None,
                         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
                         waveform_initialization_range: Tuple[float, float] = (-1.0, 1.0)) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -564,14 +573,15 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2)
 
         # shape (n_observations, n_canonical_waveforms)
-        #print("Iter {0}, Nonnegative least squares".format(iter_count))
+        # print("Iter {0}, Nonnegative least squares".format(iter_count))
         iter_real_amplitudes = nonnegative_least_squares_optimize_amplitudes(waveform_data_matrix,
                                                                              prev_iter_real_amplitude_A,
                                                                              canonical_waveforms_shifted,
-                                                                             device)
+                                                                             device,
+                                                                             l1_regularization_lambda=l1_regularization_lambda)
 
         # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
-        #print("Iter {0}, Waveform complex least squares".format(iter_count))
+        # print("Iter {0}, Waveform complex least squares".format(iter_count))
         iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms2(
             iter_real_amplitudes,
             prev_iter_delays,
@@ -584,7 +594,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=1))
 
         # shape (n_observations, n_canonical_waveforms)
-        #print("Iter {0}, Delay estimation".format(iter_count))
+        # print("Iter {0}, Delay estimation".format(iter_count))
         iter_sample_delays = torch_fit_integer_shifts_all_but_one_template_match(observations_fourier_transform,
                                                                                  iter_real_amplitudes,
                                                                                  iter_canonical_waveform_ft,
@@ -601,23 +611,85 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                                                            iter_canonical_waveform_ft,
                                                            iter_sample_delays,
                                                            n_frequencies_not_rfft)
-        #print("Iteration {0}: MSE {1}, real_power {2}, imag_power {3}".format(iter_count, mse, real_power, imag_power))
+        # print("Iteration {0}: MSE {1}, real_power {2}, imag_power {3}".format(iter_count, mse, real_power, imag_power))
 
         # now rescale the waveforms and amplitudes
         # such that the waveforms each have L2 norm 1
-        
+
         # shape (n_canonical_waveforms, )
         raw_optimized_waveform_magnitude = np.linalg.norm(prev_iter_waveform_td, axis=1)
 
         # now update the loop variables
         prev_iter_delays = iter_sample_delays
-        prev_iter_real_amplitude_A = iter_real_amplitudes / raw_optimized_waveform_magnitude[None,:]
-        prev_iter_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:,None]
+        prev_iter_real_amplitude_A = iter_real_amplitudes / raw_optimized_waveform_magnitude[None, :]
+        prev_iter_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
 
-        pbar.set_postfix({'MSE' : mse})
+        pbar.set_postfix({'MSE': mse})
         pbar.update(1)
 
     return prev_iter_real_amplitude_A, prev_iter_waveform_td, prev_iter_delays
+
+
+EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
+
+
+def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
+                                          n_basis_vectors: int = 3,
+                                          l1_regularize_lambda: float = 1e-1,
+                                          snr_abs_threshold: float = 5.0,
+                                          supersample_factor: int = 5,
+                                          shifts: Tuple[int, int] = (-50, 50),
+                                          maxiter_decomp: int = 25) -> Tuple[Dict[int, EIDecomposition], np.ndarray]:
+    matrix_indices_by_cell_id = {}  # type: Dict[int, Tuple[slice, Sequence[int]]]
+    to_concat = []  # type: List[np.ndarray]
+
+    temp_cell_order = list(eis_by_cell_id.keys())
+
+    cat_low = 0
+    for cell_id in temp_cell_order:
+        ei_mat = eis_by_cell_id[cell_id]
+
+        chans_sufficient_magnitude = np.max(np.abs(ei_mat), axis=1) > snr_abs_threshold
+        n_chans_sufficient = np.sum(channels_sufficient_magnitude)  # type: int
+
+        readback_slice = slice(cat_low, cat_low + n_chans_sufficient)
+        matrix_indices_by_cell_id[cell_id] = (readback_slice, chans_sufficient_magnitude)
+        to_concat.append(chans_sufficient_magnitude)
+
+        cat_low += n_chans_sufficient
+
+    ei_data_mat = np.concatenate(to_concat, axis=0)
+    bspline_supersampled = bspline_upsample_waveforms(ei_data_mat, supersample_factor)
+
+    # now zero pad before and after
+    padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
+                                                  [shifts, (0, 0)],
+                                                  mode='constant')
+
+    amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
+                                                        n_basis_vectors,
+                                                        np.r_[shifts[0]:shifts[1]],
+                                                        maxiter_decomp,
+                                                        device,
+                                                        l1_regularization_lambda=l1_regularize_lambda)
+
+    # now unpack the results
+    result_dict = {}  # type: Dict[int, EIDecomposition]
+    for cell_id in temp_cell_order:
+        orig_ei_mat = eis_by_cell_id[cell_id]
+        n_channels = orig_ei_mat.shape[0]
+
+        slice_section, sufficient_snr = matrix_indices_by_cell_id[cell_id]
+
+        amplitude_matrix = np.zeros((n_channels, n_basis_vectors), dtype=np.float32)
+        amplitude_matrix[sufficient_snr, :] = amplitude_matrix[slice_section, :]
+
+        delay_vector = np.zeros((n_channels, n_basis_vectors), dtype=np.int32)
+        delay_vector[sufficient_snr, :] = delays[slice_section, :]
+
+        result_dict[cell_id] = (amplitude_matrix, delay_vector)
+
+    return result_dict, waveforms
 
 
 if __name__ == '__main__':
@@ -634,34 +706,15 @@ if __name__ == '__main__':
 
     example_on_parasols = dataset.get_all_cells_of_type('ON parasol')
 
-    eis_for_cell = [dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols]
-    eis_stacked = np.concatenate(eis_for_cell, axis=0)
-    eis_sufficient_magnitude = np.max(np.abs(eis_stacked), axis=1) > 2.0
+    eis_by_cell_id = {cell_id : dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols}
 
-    channels_sufficient_magnitude = eis_stacked[eis_sufficient_magnitude]
-
-    # now 5x bspline supersample
-    print("Bspline supersample")
-    bspline_supersampled = bspline_upsample_waveforms(channels_sufficient_magnitude, 5)
-
-    # now zero pad before and after
-    print("Zero padding")
-    padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
-                                                  [(50, 50), (0, 0)],
-                                                  mode='constant')
-
-    print("Decomposition optimization")
-    amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
-                                                        3,
-                                                        np.r_[-50:50],
-                                                        25,
-                                                        device)
+    decomposition_dict, basis_waveforms = decompose_cells_by_fitted_compartment(eis_by_cell_id,
+                                                                                l1_regularize_lambda=1e-1)
 
     with open('joint_fitting.p', 'wb') as joint_fit_file:
         pickle_dict = {
-            'amplitudes': amplitudes,
-            'waveforms': waveforms,
-            'delays': delays
+            'decomposition': decomposition_dict,
+            'waveforms': basis_waveforms,
         }
 
         pickle.dump(pickle_dict, joint_fit_file)
