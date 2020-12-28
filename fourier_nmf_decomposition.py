@@ -619,7 +619,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         # such that the waveforms each have L2 norm 1
 
         # shape (n_canonical_waveforms, )
-        raw_optimized_waveform_magnitude = np.linalg.norm(prev_iter_waveform_td, axis=1)
+        raw_optimized_waveform_magnitude = np.linalg.norm(iter_canonical_waveform_td, axis=1)
 
         # now update the loop variables
         prev_iter_delays = iter_sample_delays
