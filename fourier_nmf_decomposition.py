@@ -239,7 +239,7 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
     _, n_canonical_waveforms = real_amplitude_matrix_np.shape
 
     # real-valued, shape (2, n_observations, n_rfft_frequencies)
-    observed_ft_torch = torch.tensor(np.concatenate([observed_ft.real, observed_ft.imag], axis=0),
+    observed_ft_torch = torch.tensor(np.stack([observed_ft.real, observed_ft.imag], axis=0),
                                      dtype=torch.float32,
                                      device=device)
 
@@ -247,7 +247,7 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
     real_amplitude_matrix_torch = torch.tensor(real_amplitude_matrix_np, dtype=torch.float32, device=device)
 
     # real-valued, shape (2, n_canonical_waveforms, n_rfft_frequencies)
-    ft_canonical_torch = torch.tensor(np.concatenate([ft_canonical.real, ft_canonical.imag],
+    ft_canonical_torch = torch.tensor(np.stack([ft_canonical.real, ft_canonical.imag],
                                                      axis=0),
                                       dtype=torch.float32,
                                       device=device)
@@ -258,7 +258,7 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
                                                                             n_true_frequencies)
 
     # real-valued, shape (2, n_valid_phase_shifts, n_rfft_frequencies)
-    phaseshift_all_allowed_torch = torch.tensor(np.concatenate([phaseshift_all_allowed_matrices.real,
+    phaseshift_all_allowed_torch = torch.tensor(np.stack([phaseshift_all_allowed_matrices.real,
                                                                 phaseshift_all_allowed_matrices.imag],
                                                                axis=0),
                                                 dtype=torch.float32,
@@ -270,7 +270,7 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
                                                                  n_true_frequencies)
 
     # real-valued, shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
-    phase_shift_torch = torch.tensor(np.concatenate([phase_shift_matrices.real, phase_shift_matrices.imag],
+    phase_shift_torch = torch.tensor(np.stack([phase_shift_matrices.real, phase_shift_matrices.imag],
                                                     axis=0),
                                      dtype=torch.float32,
                                      device=device)
@@ -278,11 +278,11 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
     # complex-valued, multiplication (x + ai) (y + bi) = xy - ab + (xb + ay)i
     # shape (2, n_observations, n_canonical_waveforms, n_rfft_frequencies)
     phase_shifted_canonical_ft_torch = torch.stack([
-        phase_shift_matrices[0, :, :, :] * ft_canonical_torch[0, None, :, :] - \
-        phase_shift_matrices[1, :, :, :] * ft_canonical_torch[1, None, :, :],
+        phase_shift_torch[0, :, :, :] * ft_canonical_torch[0, None, :, :] - \
+        phase_shift_torch[1, :, :, :] * ft_canonical_torch[1, None, :, :],
 
-        phase_shift_matrices[1, :, :, :] * ft_canonical_torch[0, None, :, :] + \
-        phase_shift_matrices[0, :, :, :] * ft_canonical_torch[1, None, :, :]
+        phase_shift_torch[1, :, :, :] * ft_canonical_torch[0, None, :, :] + \
+        phase_shift_torch[0, :, :, :] * ft_canonical_torch[1, None, :, :]
     ], dim=0)
 
     # real * complex multiplication
@@ -310,11 +310,11 @@ def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
 
         # shape (2, n_observations, n_allowed_shifts, n_frequencies)
         possible_shifts_ft_scaled = torch.stack([
-            possible_ft_scaled[0, :, None, :] * phaseshift_all_allowed_matrices[0, None, :, :] - \
-            possible_ft_scaled[1, :, None, :] * phaseshift_all_allowed_matrices[1, None, :, :],
+            possible_ft_scaled[0, :, None, :] * phaseshift_all_allowed_torch[0, None, :, :] - \
+            possible_ft_scaled[1, :, None, :] * phaseshift_all_allowed_torch[1, None, :, :],
 
-            possible_ft_scaled[0, :, None, :] * phaseshift_all_allowed_matrices[1, None, :, :] + \
-            possible_ft_scaled[1, :, None, :] * phaseshift_all_allowed_matrices[0, None, :, :]
+            possible_ft_scaled[0, :, None, :] * phaseshift_all_allowed_torch[1, None, :, :] + \
+            possible_ft_scaled[1, :, None, :] * phaseshift_all_allowed_torch[0, None, :, :]
         ], dim=0)
 
         # shape (2, n_observations, n_allowed_shifts, n_frequencies)
@@ -535,10 +535,10 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
     # compute the Fourier transform of the observed data once, ahead of time
     # shape (n_observations, n_frequencies)
-    print("Calculating observed Fourier transforms")
     observations_fourier_transform = np.fft.rfft(waveform_data_matrix, axis=1)
 
     print("Beginning optimization loop")
+    pbar = tqdm.tqdm(total=n_iter)
     for iter_count in range(n_iter):
         # within each iteration, we have a three step optimization
         # (1) Given fixed canonical waveforms and integer shifts,
@@ -551,31 +551,27 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         #       to solve for the shifts
 
         # shape (n_canonical_waveforms, n_frequencies)
-        print("Iter {0}, Canonical waveform fft, {1}".format(iter_count, prev_iter_waveform_td.shape))
         canonical_waveform_ft = np.fft.rfft(prev_iter_waveform_td, axis=1)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
-        print("Iter {0}, phase shift mat generation, {1}".format(iter_count, prev_iter_waveform_td.shape))
         delay_phase_shift_mat = generate_fourier_phase_shift_matrices(prev_iter_delays,
                                                                       n_frequencies_not_rfft)
-        print(canonical_waveform_ft.shape, delay_phase_shift_mat.shape)
 
         # shape (n_observations, n_canonical_waveforms, n_frequencies)
         canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
 
         # shape (n_observations, n_canonical_waveforms, n_timepoints)
         canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2)
-        print(canonical_waveform_ft.shape, canonical_waveforms_shifted.shape)
 
         # shape (n_observations, n_canonical_waveforms)
-        print("Iter {0}, Nonnegative least squares".format(iter_count))
+        #print("Iter {0}, Nonnegative least squares".format(iter_count))
         iter_real_amplitudes = nonnegative_least_squares_optimize_amplitudes(waveform_data_matrix,
                                                                              prev_iter_real_amplitude_A,
                                                                              canonical_waveforms_shifted,
                                                                              device)
 
         # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
-        print("Iter {0}, Waveform complex least squares".format(iter_count))
+        #print("Iter {0}, Waveform complex least squares".format(iter_count))
         iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms2(
             iter_real_amplitudes,
             prev_iter_delays,
@@ -588,7 +584,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
         iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=1))
 
         # shape (n_observations, n_canonical_waveforms)
-        print("Iter {0}, Delay estimation".format(iter_count))
+        #print("Iter {0}, Delay estimation".format(iter_count))
         iter_sample_delays = torch_fit_integer_shifts_all_but_one_template_match(observations_fourier_transform,
                                                                                  iter_real_amplitudes,
                                                                                  iter_canonical_waveform_ft,
@@ -605,12 +601,21 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                                                            iter_canonical_waveform_ft,
                                                            iter_sample_delays,
                                                            n_frequencies_not_rfft)
-        print("Iteration {0}: MSE {1}, real_power {2}, imag_power {3}".format(iter_count, mse, real_power, imag_power))
+        #print("Iteration {0}: MSE {1}, real_power {2}, imag_power {3}".format(iter_count, mse, real_power, imag_power))
+
+        # now rescale the waveforms and amplitudes
+        # such that the waveforms each have L2 norm 1
+        
+        # shape (n_canonical_waveforms, )
+        raw_optimized_waveform_magnitude = np.linalg.norm(prev_iter_waveform_td, axis=1)
 
         # now update the loop variables
         prev_iter_delays = iter_sample_delays
-        prev_iter_real_amplitude_A = iter_real_amplitudes
-        prev_iter_waveform_td = iter_canonical_waveform_td
+        prev_iter_real_amplitude_A = iter_real_amplitudes / raw_optimized_waveform_magnitude[None,:]
+        prev_iter_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:,None]
+
+        pbar.set_postfix({'MSE' : mse})
+        pbar.update(1)
 
     return prev_iter_real_amplitude_A, prev_iter_waveform_td, prev_iter_delays
 
@@ -631,7 +636,7 @@ if __name__ == '__main__':
 
     eis_for_cell = [dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols]
     eis_stacked = np.concatenate(eis_for_cell, axis=0)
-    eis_sufficient_magnitude = np.max(np.abs(eis_stacked), axis=1) > 5.0
+    eis_sufficient_magnitude = np.max(np.abs(eis_stacked), axis=1) > 2.0
 
     channels_sufficient_magnitude = eis_stacked[eis_sufficient_magnitude]
 
@@ -642,14 +647,14 @@ if __name__ == '__main__':
     # now zero pad before and after
     print("Zero padding")
     padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
-                                                  [(40, 40), (0, 0)],
+                                                  [(50, 50), (0, 0)],
                                                   mode='constant')
 
     print("Decomposition optimization")
     amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
                                                         3,
                                                         np.r_[-50:50],
-                                                        500,
+                                                        25,
                                                         device)
 
     with open('joint_fitting.p', 'wb') as joint_fit_file:
