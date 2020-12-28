@@ -532,12 +532,14 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                                 dtype=np.float32)
 
     # we do random initialization of all of the variables
+
     prev_iter_real_amplitude_A[:, :] = np.random.uniform(amplitude_initialize_range[0],
                                                          amplitude_initialize_range[1],
                                                          size=prev_iter_real_amplitude_A.shape)
-    prev_iter_waveform_td[:, :] = np.random.uniform(waveform_initialization_range[0],
-                                                    waveform_initialization_range[1],
-                                                    size=prev_iter_waveform_td.shape)
+
+    rand_choice_data_waveform = np.random.randint(0, n_observations, size=n_canonical_waveforms)
+    prev_iter_waveform_td[:,:] = waveform_data_matrix[rand_choice_data_waveform,:]
+
     prev_iter_delays[:, :] = np.random.randint(np.min(valid_sample_shifts),
                                                np.max(valid_sample_shifts),
                                                size=prev_iter_delays.shape)
@@ -621,7 +623,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
         # now update the loop variables
         prev_iter_delays = iter_sample_delays
-        prev_iter_real_amplitude_A = iter_real_amplitudes / raw_optimized_waveform_magnitude[None, :]
+        prev_iter_real_amplitude_A = iter_real_amplitudes * raw_optimized_waveform_magnitude[None, :]
         prev_iter_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
 
         pbar.set_postfix({'MSE': mse})
@@ -637,8 +639,8 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
                                           n_basis_vectors: int = 3,
                                           l1_regularize_lambda: float = 1e-1,
                                           snr_abs_threshold: float = 5.0,
-                                          supersample_factor: int = 5,
-                                          shifts: Tuple[int, int] = (-50, 50),
+                                          supersample_factor: int = 4,
+                                          shifts: Tuple[int, int] = (-100, 100),
                                           maxiter_decomp: int = 25) -> Tuple[Dict[int, EIDecomposition], np.ndarray]:
     matrix_indices_by_cell_id = {}  # type: Dict[int, Tuple[slice, Sequence[int]]]
     to_concat = []  # type: List[np.ndarray]
@@ -654,7 +656,7 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
 
         readback_slice = slice(cat_low, cat_low + n_chans_sufficient)
         matrix_indices_by_cell_id[cell_id] = (readback_slice, chans_sufficient_magnitude)
-        to_concat.append(chans_sufficient_magnitude)
+        to_concat.append(ei_mat[chans_sufficient_magnitude, :])
 
         cat_low += n_chans_sufficient
 
@@ -663,7 +665,7 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
 
     # now zero pad before and after
     padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
-                                                  [shifts, (0, 0)],
+                                                  [(abs(shifts[0]), abs(shifts[1])), (0, 0)],
                                                   mode='constant')
 
     amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
@@ -682,7 +684,7 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
         slice_section, sufficient_snr = matrix_indices_by_cell_id[cell_id]
 
         amplitude_matrix = np.zeros((n_channels, n_basis_vectors), dtype=np.float32)
-        amplitude_matrix[sufficient_snr, :] = amplitude_matrix[slice_section, :]
+        amplitude_matrix[sufficient_snr, :] = amplitudes[slice_section, :]
 
         delay_vector = np.zeros((n_channels, n_basis_vectors), dtype=np.int32)
         delay_vector[sufficient_snr, :] = delays[slice_section, :]
@@ -709,7 +711,7 @@ if __name__ == '__main__':
     eis_by_cell_id = {cell_id : dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols}
 
     decomposition_dict, basis_waveforms = decompose_cells_by_fitted_compartment(eis_by_cell_id,
-                                                                                l1_regularize_lambda=1e-1)
+                                                                                l1_regularize_lambda=10.0)
 
     with open('joint_fitting.p', 'wb') as joint_fit_file:
         pickle_dict = {
