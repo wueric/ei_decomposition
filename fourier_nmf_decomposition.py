@@ -137,7 +137,7 @@ def nonnegative_least_squares_optimize_amplitudes(observation_matrix_np: np.ndar
 def fourier_complex_least_squares_optimize_waveforms2(amplitude_matrix_real_np: np.ndarray,
                                                       phase_delays_np: np.ndarray,
                                                       ft_complex_observations_np: np.ndarray,
-                                                      n_true_frequencies : int,
+                                                      n_true_frequencies: int,
                                                       device) -> np.ndarray:
     '''
 
@@ -205,12 +205,140 @@ def parallel_combinatorial_template_match(observation_matrix_np: np.ndarray,
     raise NotImplementedError
 
 
+def torch_fit_integer_shifts_all_but_one_template_match(observed_ft: np.ndarray,
+                                                        real_amplitude_matrix_np: np.ndarray,
+                                                        ft_canonical: np.ndarray,
+                                                        previous_shifts_integer: np.ndarray,
+                                                        valid_phase_shifts: np.ndarray,
+                                                        n_true_frequencies: int,
+                                                        device: torch.device) -> np.ndarray:
+    '''
+        Crude approximate all-but-one template match.
+
+        Description of algorithm:
+
+            For the i^{th} canonical waveform:
+                Deconvolve all j != i canonical waveforms from the observed data
+                    using fixed amplitude and shift from previous iterations
+                Find the optimal shift for the i^{th} waveform with a zero-padded correlation
+
+        :param observation_matrix_np: observed waveforms in Fourier domain,
+            shape (n_observations, n_rfft_frequencies)
+        :param real_amplitude_matrix_np: real-valued amplitudes for each observation, each shifted canonical waveform,
+            shape (n_observations, n_canonical_waveforms)
+        :param ft_canonical: unshifted canonical waveforms,
+            shape (n_canonical_waveforms, n_rfft_frequencies)
+        :param previous_shifts_integer: previous canonical waveform shifts, shape (n_observations, n_canonical_waveforms)
+        :param valid_phase_shifts: allowed phase shifts that we can test, shape (n_valid_phase_shifts, )
+        :param n_true_frequencies: int, number of regular FFT frequencies (not the number of rFFT frequencies)
+        :param device: torch device
+        :return: timeshifts, shape (n_observations, n_canonical_waveforms)
+        '''
+
+    n_observations, _ = observed_ft.shape
+    _, n_canonical_waveforms = real_amplitude_matrix_np.shape
+
+    # real-valued, shape (2, n_observations, n_rfft_frequencies)
+    observed_ft_torch = torch.tensor(np.concatenate([observed_ft.real, observed_ft.imag], axis=0),
+                                     dtype=torch.float32,
+                                     device=device)
+
+    # shape (n_observations, n_canonical_waveforms)
+    real_amplitude_matrix_torch = torch.tensor(real_amplitude_matrix_np, dtype=torch.float32, device=device)
+
+    # real-valued, shape (2, n_canonical_waveforms, n_rfft_frequencies)
+    ft_canonical_torch = torch.tensor(np.concatenate([ft_canonical.real, ft_canonical.imag],
+                                                     axis=0),
+                                      dtype=torch.float32,
+                                      device=device)
+
+    # complex-valued,
+    # shape (n_valid_phase_shifts, n_rfft_frequencies)
+    phaseshift_all_allowed_matrices = generate_fourier_phase_shift_matrices(valid_phase_shifts,
+                                                                            n_true_frequencies)
+
+    # real-valued, shape (2, n_valid_phase_shifts, n_rfft_frequencies)
+    phaseshift_all_allowed_torch = torch.tensor(np.concatenate([phaseshift_all_allowed_matrices.real,
+                                                                phaseshift_all_allowed_matrices.imag],
+                                                               axis=0),
+                                                dtype=torch.float32,
+                                                device=device)
+
+    # complex-valued,
+    # shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    phase_shift_matrices = generate_fourier_phase_shift_matrices(previous_shifts_integer,
+                                                                 n_true_frequencies)
+
+    # real-valued, shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    phase_shift_torch = torch.tensor(np.concatenate([phase_shift_matrices.real, phase_shift_matrices.imag],
+                                                    axis=0),
+                                     dtype=torch.float32,
+                                     device=device)
+
+    # complex-valued, multiplication (x + ai) (y + bi) = xy - ab + (xb + ay)i
+    # shape (2, n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    phase_shifted_canonical_ft_torch = torch.stack([
+        phase_shift_matrices[0, :, :, :] * ft_canonical_torch[0, None, :, :] - \
+        phase_shift_matrices[1, :, :, :] * ft_canonical_torch[1, None, :, :],
+
+        phase_shift_matrices[1, :, :, :] * ft_canonical_torch[0, None, :, :] + \
+        phase_shift_matrices[0, :, :, :] * ft_canonical_torch[1, None, :, :]
+    ], dim=0)
+
+    # real * complex multiplication
+    # shape (2, n_observations, n_canonical_waveforms, n_frequencies)
+    scaled_shifted_canonical_ft_torch = torch.stack([
+        real_amplitude_matrix_torch[:, :, None] * phase_shifted_canonical_ft_torch[0, :, :, :],
+        real_amplitude_matrix_torch[:, :, None] * phase_shifted_canonical_ft_torch[1, :, :, :],
+    ])
+
+    # shape (2, n_observations, n_frequencies)
+    deconvolved_ft_torch = observed_ft_torch - torch.sum(scaled_shifted_canonical_ft_torch, dim=2)
+
+    # shape (n_observations, n_canonical_waveforms)
+    output_timeshifts = np.zeros((n_observations, n_canonical_waveforms), dtype=np.int32)
+
+    for i in range(n_canonical_waveforms):
+        # shape (2, n_observations, n_frequencies)
+        all_but_one_resid_ft = deconvolved_ft_torch + scaled_shifted_canonical_ft_torch[:, :, i, :]
+
+        # shape (2, n_observations, n_frequencies)
+        possible_ft_scaled = torch.stack([
+            real_amplitude_matrix_torch[:, i, None] * ft_canonical_torch[0, None, i, :],
+            real_amplitude_matrix_torch[:, i, None] * ft_canonical_torch[1, None, i, :]
+        ], dim=0)
+
+        # shape (2, n_observations, n_allowed_shifts, n_frequencies)
+        possible_shifts_ft_scaled = torch.stack([
+            possible_ft_scaled[0, :, None, :] * phaseshift_all_allowed_matrices[0, None, :, :] - \
+            possible_ft_scaled[1, :, None, :] * phaseshift_all_allowed_matrices[1, None, :, :],
+
+            possible_ft_scaled[0, :, None, :] * phaseshift_all_allowed_matrices[1, None, :, :] + \
+            possible_ft_scaled[1, :, None, :] * phaseshift_all_allowed_matrices[0, None, :, :]
+        ], dim=0)
+
+        # shape (2, n_observations, n_allowed_shifts, n_frequencies)
+        all_possible_subtracted = all_but_one_resid_ft[:, :, None, :] - possible_shifts_ft_scaled
+
+        # shape (n_observations, n_allowed_shifts)
+        magnitudes = torch.norm(all_possible_subtracted, dim=(0, 3))
+
+        _, min_shift_indices = torch.min(magnitudes, dim=1)
+        best_shifts_idx = min_shift_indices.cpu().numpy()
+
+        best_shifts = valid_phase_shifts[best_shifts_idx]
+
+        output_timeshifts[:, i] = best_shifts
+
+    return output_timeshifts
+
+
 def fit_shifts_all_but_one_template_match(observed_ft: np.ndarray,
                                           real_amplitude_matrix_np: np.ndarray,
                                           ft_canonical: np.ndarray,
                                           previous_shifts_integer: np.ndarray,
                                           valid_phase_shifts: np.ndarray,
-                                          n_true_frequencies : int) -> np.ndarray:
+                                          n_true_frequencies: int) -> np.ndarray:
     '''
     Crude approximate all-but-one template match.
 
@@ -235,9 +363,6 @@ def fit_shifts_all_but_one_template_match(observed_ft: np.ndarray,
     n_observations, _ = observed_ft.shape
     _, n_canonical_waveforms = real_amplitude_matrix_np.shape
 
-    output_timeshifts = np.zeros((n_observations, n_canonical_waveforms), dtype=np.int32)
-    # shape (n_observations, n_timepoints)
-
     # shape (n_valid_phase_shifts, n_frequencies)
     phaseshift_all_allowed_matrices = generate_fourier_phase_shift_matrices(valid_phase_shifts,
                                                                             n_true_frequencies)
@@ -255,6 +380,7 @@ def fit_shifts_all_but_one_template_match(observed_ft: np.ndarray,
     # shape (n_canonical_waveforms, n_frequencies)
     deconvolved_ft = observed_ft - np.sum(scaled_shifted_canonical_ft, axis=1)
 
+    # shape (n_observations, n_canonical_waveforms)
     output_timeshifts = np.zeros((n_observations, n_canonical_waveforms), dtype=np.int32)
     for i in range(n_canonical_waveforms):
         # shape (n_canonical_waveforms, n_frequencies)
@@ -463,12 +589,13 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
         # shape (n_observations, n_canonical_waveforms)
         print("Iter {0}, Delay estimation".format(iter_count))
-        iter_sample_delays = fit_shifts_all_but_one_template_match(observations_fourier_transform,
-                                                                   iter_real_amplitudes,
-                                                                   iter_canonical_waveform_ft,
-                                                                   prev_iter_delays,
-                                                                   valid_sample_shifts,
-                                                                   n_frequencies_not_rfft)
+        iter_sample_delays = torch_fit_integer_shifts_all_but_one_template_match(observations_fourier_transform,
+                                                                                 iter_real_amplitudes,
+                                                                                 iter_canonical_waveform_ft,
+                                                                                 prev_iter_delays,
+                                                                                 valid_sample_shifts,
+                                                                                 n_frequencies_not_rfft,
+                                                                                 device)
 
         # calculate progress metrics
         # (probably best done in Fourier domain, doesn't require clever shifting and can
@@ -519,9 +646,17 @@ if __name__ == '__main__':
                                                   mode='constant')
 
     print("Decomposition optimization")
-    a, b, c = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
-                                  3,
-                                  np.r_[-40:40],
-                                  500,
-                                  device)
+    amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
+                                                        3,
+                                                        np.r_[-50:50],
+                                                        500,
+                                                        device)
 
+    with open('joint_fitting.p', 'wb') as joint_fit_file:
+        pickle_dict = {
+            'amplitudes': amplitudes,
+            'waveforms': waveforms,
+            'delays': delays
+        }
+
+        pickle.dump(pickle_dict, joint_fit_file)
