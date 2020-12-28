@@ -650,7 +650,7 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
         ei_mat = eis_by_cell_id[cell_id]
 
         chans_sufficient_magnitude = np.max(np.abs(ei_mat), axis=1) > snr_abs_threshold
-        n_chans_sufficient = np.sum(channels_sufficient_magnitude)  # type: int
+        n_chans_sufficient = np.sum(chans_sufficient_magnitude)  # type: int
 
         readback_slice = slice(cat_low, cat_low + n_chans_sufficient)
         matrix_indices_by_cell_id[cell_id] = (readback_slice, chans_sufficient_magnitude)
