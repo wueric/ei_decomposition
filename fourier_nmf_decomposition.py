@@ -146,7 +146,7 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
                                                       phase_delays_np: np.ndarray,
                                                       ft_complex_observations_np: np.ndarray,
                                                       n_true_frequencies: int,
-                                                      device) -> np.ndarray:
+                                                      device: torch.device) -> np.ndarray:
     '''
 
     :param amplitude_matrix_real_np: real-valued amplitudes for each observation, each shifted canonical waveform,
@@ -213,13 +213,12 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     # shape (n_canonical_waveforms, n_frequencies)
     eq1_rhs = torch.sum(eq1_rhs_re + eq1_rhs_im, dim=0)
 
-
     # shape (n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
     eq2_group_coeff = torch.cat([-1.0 * eq1_group_imag_coeff, eq1_group_real_coeff], dim=1)
 
     # shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
-    eq2_rhs_p = real_real_phase[:,:,:] * amplitude_mat_torch[:, :, None]  * imag_observe_ft_torch[:, None, :]
-    eq2_rhs_m = imag_imag_phase[:,:,:] * amplitude_mat_torch[:, :, None] * real_observe_ft_torch[:, None, :]
+    eq2_rhs_p = real_real_phase[:, :, :] * amplitude_mat_torch[:, :, None] * imag_observe_ft_torch[:, None, :]
+    eq2_rhs_m = imag_imag_phase[:, :, :] * amplitude_mat_torch[:, :, None] * real_observe_ft_torch[:, None, :]
 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
     eq2_rhs = torch.sum(eq2_rhs_p - eq2_rhs_m, dim=0)
@@ -243,11 +242,10 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     soln_perm = soln.permute(1, 0)
 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
-    soln_real_seg  = soln[:n_canonical_waveforms,:].cpu().numpy()
-    soln_imag_seg = soln[n_canonical_waveforms:,:].cpu().numpy()
+    soln_real_seg = soln[:n_canonical_waveforms, :].cpu().numpy()
+    soln_imag_seg = soln[n_canonical_waveforms:, :].cpu().numpy()
 
     return soln_real_seg + 1j * soln_imag_seg
-
 
 
 def parallel_combinatorial_template_match(observation_matrix_np: np.ndarray,
@@ -679,6 +677,7 @@ EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
 
 
 def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
+                                          device: torch.device,
                                           n_basis_vectors: int = 3,
                                           l1_regularize_lambda: float = 0.0,
                                           snr_abs_threshold: float = 5.0,
@@ -738,7 +737,7 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
 
 
 if __name__ == '__main__':
-    device = torch.device('cuda')
+    compute_device = torch.device('cuda')
 
     # for now, don't bother with argparse since we still don't have an automatic way
     # to pick canonical waveforms
@@ -754,6 +753,7 @@ if __name__ == '__main__':
     eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols}
 
     decomposition_dict, basis_waveforms = decompose_cells_by_fitted_compartment(eis_by_cell_id,
+                                                                                compute_device,
                                                                                 l1_regularize_lambda=10.0)
 
     with open('joint_fitting.p', 'wb') as joint_fit_file:
