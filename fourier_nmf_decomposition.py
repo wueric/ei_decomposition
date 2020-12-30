@@ -142,7 +142,7 @@ def nonnegative_least_squares_optimize_amplitudes(observation_matrix_np: np.ndar
     return amplitudes.cpu().numpy()
 
 
-def fourier_complex_least_squares_optimize_waveforms2(amplitude_matrix_real_np: np.ndarray,
+def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: np.ndarray,
                                                       phase_delays_np: np.ndarray,
                                                       ft_complex_observations_np: np.ndarray,
                                                       n_true_frequencies: int,
@@ -162,39 +162,92 @@ def fourier_complex_least_squares_optimize_waveforms2(amplitude_matrix_real_np: 
         each has shape (n_canonical_waveforms, n_rfft_frequencies)
     '''
 
-    # complex-valued, shape (n_observations, n_canonical_waveforms, n_frequencies)
+    n_observations, n_canonical_waveforms = amplitude_matrix_real_np.shape
+
+    # real valued, shape (n_observations, n_canonical_waveforms)
+    amplitude_mat_torch = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
+
+    # shape (n_observations, n_rfft_frequencies)
+    real_observe_ft_torch = torch.tensor(ft_complex_observations_np.real, dtype=torch.float32, device=device)
+    imag_observe_ft_torch = torch.tensor(ft_complex_observations_np.imag, dtype=torch.float32, device=device)
+
+    # complex-valued, shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
     complex_phase_matrix = generate_fourier_phase_shift_matrices(phase_delays_np,
                                                                  n_true_frequencies)
 
-    # complex-valued, shape (n_observations, n_canonical_waveforms, n_frequencies)
-    rhs_submatrix_prediv = amplitude_matrix_real_np[:, :, None] * ft_complex_observations_np[:, None, :]
-    rhs_matrix_hadamard_div = rhs_submatrix_prediv / complex_phase_matrix
+    real_phase_mat_torch = torch.tensor(complex_phase_matrix.real, dtype=torch.float32, device=device)
+    imag_phase_mat_torch = torch.tensor(complex_phase_matrix.imag, dtype=torch.float32, device=device)
 
-    # complex-valued, shape  (n_canonical_waveforms, n_frequencies)
-    rhs_summed = np.sum(rhs_matrix_hadamard_div, axis=0)
+    # shape (n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
+    ####################### (l, k, None, f) ################# (l, None, j, f) ###########
+    real_real_phase = real_phase_mat_torch[:, :, None, :] * real_phase_mat_torch[:, None, :, :]
 
-    # real-valued, shape (n_canonical_waveforms, n_frequencies)
-    rhs_real = torch.tensor(rhs_summed.real, dtype=torch.float32, device=device)
-    rhs_complex = torch.tensor(rhs_summed.imag, dtype=torch.float32, device=device)
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is imag{P}^{(l)}_{f,k} * imag{P}^{(l)}_{f,j}
+    imag_imag_phase = imag_phase_mat_torch[:, :, None, :] * imag_phase_mat_torch[:, None, :, :]
 
-    # real-valued, shape (2, n_canonical_waveforms, n_frequencies)
-    rhs_stack = torch.stack([rhs_real, rhs_complex], dim=0)
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is imag{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
+    imag_real_phase = imag_phase_mat_torch[:, :, None, :] * real_phase_mat_torch[:, None, :, :]
 
-    # real-valued, shape (n_observations, n_canonical_waveforms)
-    amplitude_matrix = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * imag{P}^{(l)}_{f,j}
+    real_imag_phase = real_phase_mat_torch[:, :, None, :] * imag_phase_mat_torch[:, None, :, :]
 
-    # real-valued, shape (n_canonical_waveforms, n_canonical_waveforms)
-    at_a = amplitude_matrix.permute(1, 0) @ amplitude_matrix
+    # shape (n_observations, n_canonical_waveforms, n_canonical_waveforms)
+    # the (l^{th}, k^{th}, j^{th}) entry is A_{k,l} A_{j,l}
+    amplitude_outer_product = amplitude_mat_torch[:, :, None] * amplitude_mat_torch[:, None, :]
 
-    lu_factor_at_a, lu_pivots_at_a = torch.lu(at_a)
+    # shape (n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    # each different row in dim0 corresponds to a different equation
+    eq1_group_real_coeff = torch.sum((real_real_phase + imag_imag_phase) * amplitude_outer_product[:, :, :, None],
+                                     dim=0)
+    eq1_group_imag_coeff = torch.sum((imag_real_phase - real_imag_phase) * amplitude_outer_product[:, :, :, None],
+                                     dim=0)
+    # shape (n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_coeff = torch.cat([eq1_group_real_coeff, eq1_group_imag_coeff], dim=1)
 
-    # shape (2, n_canonical_waveforms, n_frequencies)
-    sols_componentwise = torch.lu_solve(rhs_stack, lu_factor_at_a, lu_pivots_at_a)
+    # shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    ################# (l, k, f) ############### (l, k, None) ########################### (l, None, f)
+    eq1_rhs_re = real_phase_mat_torch[:, :, :] * amplitude_mat_torch[:, :, None] * real_observe_ft_torch[:, None, :]
+    eq1_rhs_im = imag_phase_mat_torch[:, :, :] * amplitude_mat_torch[:, :, None] * imag_observe_ft_torch[:, None, :]
 
-    real_sols = sols_componentwise[0, :, :].cpu().numpy()
-    imag_sols = sols_componentwise[1, :, :].cpu().numpy()
+    # shape (n_canonical_waveforms, n_frequencies)
+    eq1_rhs = torch.sum(eq1_rhs_re + eq1_rhs_im, dim=0)
 
-    return real_sols + 1j * imag_sols
+
+    # shape (n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    eq2_group_coeff = torch.cat([-1.0 * eq1_group_imag_coeff, eq1_group_real_coeff], dim=1)
+
+    # shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    eq2_rhs_p = real_real_phase[:,:,:] * amplitude_mat_torch[:, :, None]  * imag_observe_ft_torch[:, None, :]
+    eq2_rhs_m = imag_imag_phase[:,:,:] * amplitude_mat_torch[:, :, None] * real_observe_ft_torch[:, None, :]
+
+    # shape (n_canonical_waveforms, n_rfft_frequencies)
+    eq2_rhs = torch.sum(eq2_rhs_p - eq2_rhs_m, dim=0)
+
+    # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    joint_coeff_permute = torch.cat([eq1_group_real_coeff, eq2_group_coeff], dim=0)
+
+    # shape (n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
+    joint_coeff = joint_coeff_permute.permute(2, 0, 1)
+
+    # shape (2 * n_canonical_waveforms, n_rfft_frequencies)
+    joint_rhs_permute = torch.cat([eq1_rhs, eq2_rhs], dim=0)
+
+    # shape (n_rfft_frequencies, 2 * n_canonical_waveforms)
+    joint_rhs = joint_coeff_permute.permute(1, 0)
+
+    # soln has shape (n_rfft_frequencies, 2 * n_canonical_waveforms)
+    soln, _ = torch.solve(joint_coeff, joint_rhs)
+
+    # shape (2 * n_canonical_waveforms, n_rfft_frequencies)
+    soln_perm = soln.permute(1, 0)
+
+    # shape (n_canonical_waveforms, n_rfft_frequencies)
+    soln_real_seg  = soln[:n_canonical_waveforms,:].cpu().numpy()
+    soln_imag_seg = soln[n_canonical_waveforms:,:].cpu().numpy()
+
+    return soln_real_seg + 1j * soln_imag_seg
+
 
 
 def parallel_combinatorial_template_match(observation_matrix_np: np.ndarray,
@@ -482,11 +535,9 @@ def debug_evaluate_error(observed_ft: np.ndarray,
 
     model_ft = np.squeeze(fit_real_amplitudes[:, None, :] @ shifted_no_scale_ft, axis=1)
 
-    model_td = np.fft.irfft(model_ft, n=n_true_frequencies, axis=1)
-
     diff = observed_ft - model_ft
     errors = np.linalg.norm(diff, axis=1)
-    mean_error = np.mean(errors)
+    mean_error = np.mean(errors)  # type: float
 
     return mean_error
 
@@ -577,7 +628,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
 
         # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
         # print("Iter {0}, Waveform complex least squares".format(iter_count))
-        iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms2(
+        iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms3(
             iter_real_amplitudes,
             prev_iter_delays,
             observations_fourier_transform,
