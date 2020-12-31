@@ -6,7 +6,7 @@ import torch
 
 import argparse
 
-from typing import List, Dict, Tuple, Sequence, Optional
+from typing import List, Dict, Tuple, Sequence, Optional, Union
 
 import pickle
 
@@ -236,7 +236,7 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     joint_rhs = joint_rhs_permute.permute(1, 0)
 
     # soln has shape (n_rfft_frequencies, 2 * n_canonical_waveforms)
-    soln, _ = torch.solve(joint_rhs[:,:,None], joint_coeff)
+    soln, _ = torch.solve(joint_rhs[:, :, None], joint_coeff)
 
     # shape (2 * n_canonical_waveforms, n_rfft_frequencies)
     soln_perm = soln.squeeze(2).permute(1, 0)
@@ -683,7 +683,22 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
                                           snr_abs_threshold: float = 5.0,
                                           supersample_factor: int = 4,
                                           shifts: Tuple[int, int] = (-100, 100),
-                                          maxiter_decomp: int = 25) -> Tuple[Dict[int, EIDecomposition], np.ndarray]:
+                                          maxiter_decomp: int = 25,
+                                          output_debug_dict: bool = False) \
+        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray],
+                 Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, np.ndarray]]]:
+    '''
+
+    :param eis_by_cell_id:
+    :param device:
+    :param n_basis_vectors:
+    :param l1_regularize_lambda:
+    :param snr_abs_threshold:
+    :param supersample_factor:
+    :param shifts:
+    :param maxiter_decomp:
+    :return:
+    '''
     matrix_indices_by_cell_id = {}  # type: Dict[int, Tuple[slice, Sequence[int]]]
     to_concat = []  # type: List[np.ndarray]
 
@@ -733,6 +748,16 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
 
         result_dict[cell_id] = (amplitude_matrix, delay_vector)
 
+    if output_debug_dict:
+        debug_dict = {
+            'amplitudes': amplitudes,
+            'waveforms': waveforms,
+            'delays': delays,
+            'raw_data': padded_channels_sufficient_magnitude
+        }
+
+        return result_dict, waveforms, debug_dict
+
     return result_dict, waveforms
 
 
@@ -750,12 +775,13 @@ if __name__ == '__main__':
 
     example_on_parasols = dataset.get_all_cells_of_type('ON parasol')
 
-    #eis_by_cell_id = { example_on_parasols[0] : dataset.get_ei_for_cell(example_on_parasols[0]).ei }
+    # eis_by_cell_id = { example_on_parasols[0] : dataset.get_ei_for_cell(example_on_parasols[0]).ei }
     eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols}
 
-    decomposition_dict, basis_waveforms = decompose_cells_by_fitted_compartment(eis_by_cell_id,
-                                                                                compute_device,
-                                                                                l1_regularize_lambda=1.0)
+    decomposition_dict, basis_waveforms, debug_dict = decompose_cells_by_fitted_compartment(eis_by_cell_id,
+                                                                                            compute_device,
+                                                                                            l1_regularize_lambda=1.0,
+                                                                                            output_debug_dict=True)
 
     with open('joint_fitting.p', 'wb') as joint_fit_file:
         pickle_dict = {
@@ -764,3 +790,5 @@ if __name__ == '__main__':
         }
 
         pickle.dump(pickle_dict, joint_fit_file)
+
+        pickle.dump(debug_dict, joint_fit_file)
