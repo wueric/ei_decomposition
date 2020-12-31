@@ -217,14 +217,14 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     eq2_group_coeff = torch.cat([-1.0 * eq1_group_imag_coeff, eq1_group_real_coeff], dim=1)
 
     # shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
-    eq2_rhs_p = real_real_phase[:, :, :] * amplitude_mat_torch[:, :, None] * imag_observe_ft_torch[:, None, :]
-    eq2_rhs_m = imag_imag_phase[:, :, :] * amplitude_mat_torch[:, :, None] * real_observe_ft_torch[:, None, :]
+    eq2_rhs_p = real_phase_mat_torch[:, :, :] * amplitude_mat_torch[:, :, None] * imag_observe_ft_torch[:, None, :]
+    eq2_rhs_m = imag_phase_mat_torch[:, :, :] * amplitude_mat_torch[:, :, None] * real_observe_ft_torch[:, None, :]
 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
     eq2_rhs = torch.sum(eq2_rhs_p - eq2_rhs_m, dim=0)
 
     # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
-    joint_coeff_permute = torch.cat([eq1_group_real_coeff, eq2_group_coeff], dim=0)
+    joint_coeff_permute = torch.cat([eq1_group_coeff, eq2_group_coeff], dim=0)
 
     # shape (n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
     joint_coeff = joint_coeff_permute.permute(2, 0, 1)
@@ -233,17 +233,17 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     joint_rhs_permute = torch.cat([eq1_rhs, eq2_rhs], dim=0)
 
     # shape (n_rfft_frequencies, 2 * n_canonical_waveforms)
-    joint_rhs = joint_coeff_permute.permute(1, 0)
+    joint_rhs = joint_rhs_permute.permute(1, 0)
 
     # soln has shape (n_rfft_frequencies, 2 * n_canonical_waveforms)
-    soln, _ = torch.solve(joint_coeff, joint_rhs)
+    soln, _ = torch.solve(joint_rhs[:,:,None], joint_coeff)
 
     # shape (2 * n_canonical_waveforms, n_rfft_frequencies)
-    soln_perm = soln.permute(1, 0)
+    soln_perm = soln.squeeze(2).permute(1, 0)
 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
-    soln_real_seg = soln[:n_canonical_waveforms, :].cpu().numpy()
-    soln_imag_seg = soln[n_canonical_waveforms:, :].cpu().numpy()
+    soln_real_seg = soln_perm[:n_canonical_waveforms, :].cpu().numpy()
+    soln_imag_seg = soln_perm[n_canonical_waveforms:, :].cpu().numpy()
 
     return soln_real_seg + 1j * soln_imag_seg
 
@@ -750,11 +750,12 @@ if __name__ == '__main__':
 
     example_on_parasols = dataset.get_all_cells_of_type('ON parasol')
 
+    #eis_by_cell_id = { example_on_parasols[0] : dataset.get_ei_for_cell(example_on_parasols[0]).ei }
     eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols}
 
     decomposition_dict, basis_waveforms = decompose_cells_by_fitted_compartment(eis_by_cell_id,
                                                                                 compute_device,
-                                                                                l1_regularize_lambda=10.0)
+                                                                                l1_regularize_lambda=1.0)
 
     with open('joint_fitting.p', 'wb') as joint_fit_file:
         pickle_dict = {
