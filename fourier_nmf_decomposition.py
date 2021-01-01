@@ -16,7 +16,7 @@ if __name__ == '__main__':
     parser.add_argument('ds_name', type=str, help='name of Vision dataset')
     parser.add_argument('cell_type', type=str, help='cell type of interest')
     parser.add_argument('output', type=str, help='path to output pickle file')
-    parser.add_argument('--maxiter', '-m', type=int, help='maximum number of iterations to run')
+    parser.add_argument('--maxiter', '-m', type=int, default=50,help='maximum number of iterations to run')
     parser.add_argument('--weight_reg', '-w', type=float, default=1e-3, help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
                         help='L2 regularization for waveform derivatives')
@@ -42,7 +42,7 @@ if __name__ == '__main__':
 
     eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols}
 
-    shift_tuple = (args.before, args.after)
+    shift_tuple = (-args.before, args.after)
 
     # 5e-3 was good
     decomposition_dict, basis_waveforms = ei_decomp.decompose_cells_by_fitted_compartment(eis_by_cell_id,
