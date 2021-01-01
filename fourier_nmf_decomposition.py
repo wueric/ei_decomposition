@@ -225,18 +225,12 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
     eq2_rhs = torch.sum(eq2_rhs_p - eq2_rhs_m, dim=0)
 
-    # interleave equations from groups 1 and 2 so that the sobolev regularization thing
-    # can be represented as addition along the diagonal of the matrix
-    joint_coeff_permute = torch.empty((2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies),
-                                      dtype=torch.float32,
-                                      device=device)
-    joint_coeff_permute[0::2, :, :] = eq1_group_coeff
-    joint_coeff_permute[1::2, :, :] = eq2_group_coeff
+    # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    joint_coeff_permute = torch.cat([eq1_group_coeff, eq2_group_coeff], dim=0)
 
     # shape (n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
     joint_coeff = joint_coeff_permute.permute(2, 0, 1)
 
-    # now deal with the Sobolev regularization if specified
     if sobolev_lambda is not None:
 
         frequencies = np.fft.rfftfreq(n_true_frequencies)  # shape (n_rfft_frequencies, )
@@ -249,15 +243,14 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
 
         diagonal_regularize = 2 * sobolev_lambda * (1 - np.cos(canonical_waveform_freq_diag))
 
-        diagonal_regularize_torch = torch.tensor(diagonal_regularize, dtype=torch.float32, device=device)
+        diagonal_regularize_torch_perm = torch.tensor(diagonal_regularize, dtype=torch.float32, device=device)
+        diagonal_regularize_torch = diagonal_regularize_torch_perm.permute(2, 0, 1)
 
         joint_coeff = joint_coeff + diagonal_regularize_torch
 
-    joint_rhs_permute = torch.empty((2 * n_canonical_waveforms, n_rfft_frequencies),
-                                    dtype=torch.float32,
-                                    device=device)
-    joint_rhs_permute[0::2, :] = eq1_rhs
-    joint_rhs_permute[1::2, :] = eq2_rhs
+
+    # shape (2 * n_canonical_waveforms, n_rfft_frequencies)
+    joint_rhs_permute = torch.cat([eq1_rhs, eq2_rhs], dim=0)
 
     # shape (n_rfft_frequencies, 2 * n_canonical_waveforms)
     joint_rhs = joint_rhs_permute.permute(1, 0)
@@ -269,8 +262,8 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     soln_perm = soln.squeeze(2).permute(1, 0)
 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
-    soln_real_seg = soln_perm[0::2, :].cpu().numpy()
-    soln_imag_seg = soln_perm[1::2, :].cpu().numpy()
+    soln_real_seg = soln_perm[:n_canonical_waveforms, :].cpu().numpy()
+    soln_imag_seg = soln_perm[n_canonical_waveforms:, :].cpu().numpy()
 
     return soln_real_seg + 1j * soln_imag_seg
 
@@ -817,8 +810,8 @@ if __name__ == '__main__':
     # 5e-3 was good
     decomposition_dict, basis_waveforms, debug_dict = decompose_cells_by_fitted_compartment(eis_by_cell_id,
                                                                                             compute_device,
-                                                                                            maxiter_decomp=50,
-                                                                                            l1_regularize_lambda=5e-3,
+                                                                                            maxiter_decomp=100,
+                                                                                            l1_regularize_lambda=1e-3,
                                                                                             sobolev_regularize_lambda=1e-3,
                                                                                             renormalize_data_waveforms=True,
                                                                                             output_debug_dict=True)
