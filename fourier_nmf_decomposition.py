@@ -684,6 +684,7 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
                                           supersample_factor: int = 4,
                                           shifts: Tuple[int, int] = (-100, 100),
                                           maxiter_decomp: int = 25,
+                                          renormalize_data_waveforms : bool = False,
                                           output_debug_dict: bool = False) \
         -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray],
                  Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, np.ndarray]]]:
@@ -722,8 +723,12 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
 
     # now zero pad before and after
     padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
-                                                  [(abs(shifts[0]), abs(shifts[1])), (0, 0)],
+                                                  [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                                   mode='constant')
+
+    if renormalize_data_waveforms:
+        mag_padded = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
+        padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:,None]
 
     amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
                                                         n_basis_vectors,
@@ -778,9 +783,12 @@ if __name__ == '__main__':
     # eis_by_cell_id = { example_on_parasols[0] : dataset.get_ei_for_cell(example_on_parasols[0]).ei }
     eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols}
 
+    # 5e-3 was good
     decomposition_dict, basis_waveforms, debug_dict = decompose_cells_by_fitted_compartment(eis_by_cell_id,
                                                                                             compute_device,
-                                                                                            l1_regularize_lambda=1.0,
+                                                                                            maxiter_decomp=50,
+                                                                                            l1_regularize_lambda=5e-3,
+                                                                                            renormalize_data_waveforms=True,
                                                                                             output_debug_dict=True)
 
     with open('joint_fitting.p', 'wb') as joint_fit_file:
