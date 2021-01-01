@@ -146,7 +146,8 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
                                                       phase_delays_np: np.ndarray,
                                                       ft_complex_observations_np: np.ndarray,
                                                       n_true_frequencies: int,
-                                                      device: torch.device) -> np.ndarray:
+                                                      device: torch.device,
+                                                      sobolev_lambda: Optional[float] = None) -> np.ndarray:
     '''
 
     :param amplitude_matrix_real_np: real-valued amplitudes for each observation, each shifted canonical waveform,
@@ -163,6 +164,7 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     '''
 
     n_observations, n_canonical_waveforms = amplitude_matrix_real_np.shape
+    _, n_rfft_frequencies = ft_complex_observations_np.shape
 
     # real valued, shape (n_observations, n_canonical_waveforms)
     amplitude_mat_torch = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
@@ -223,14 +225,39 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
     eq2_rhs = torch.sum(eq2_rhs_p - eq2_rhs_m, dim=0)
 
-    # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
-    joint_coeff_permute = torch.cat([eq1_group_coeff, eq2_group_coeff], dim=0)
+    # interleave equations from groups 1 and 2 so that the sobolev regularization thing
+    # can be represented as addition along the diagonal of the matrix
+    joint_coeff_permute = torch.empty((2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies),
+                                      dtype=torch.float32,
+                                      device=device)
+    joint_coeff_permute[0::2, :, :] = eq1_group_coeff
+    joint_coeff_permute[1::2, :, :] = eq2_group_coeff
 
     # shape (n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
     joint_coeff = joint_coeff_permute.permute(2, 0, 1)
 
-    # shape (2 * n_canonical_waveforms, n_rfft_frequencies)
-    joint_rhs_permute = torch.cat([eq1_rhs, eq2_rhs], dim=0)
+    # now deal with the Sobolev regularization if specified
+    if sobolev_lambda is not None:
+
+        frequencies = np.fft.rfftfreq(n_true_frequencies)  # shape (n_rfft_frequencies, )
+
+        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
+        canonical_waveforms_identity = np.eye(2 * n_canonical_waveforms) * 2 * np.pi
+
+        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms,, n_rfft_frequencies)
+        canonical_waveform_freq_diag = canonical_waveforms_identity[:, :, None] * frequencies[None, None, :]
+
+        diagonal_regularize = 2 * sobolev_lambda * (1 - np.cos(canonical_waveform_freq_diag))
+
+        diagonal_regularize_torch = torch.tensor(diagonal_regularize, dtype=torch.float32, device=device)
+
+        joint_coeff = joint_coeff + diagonal_regularize_torch
+
+    joint_rhs_permute = torch.empty((2 * n_canonical_waveforms, n_rfft_frequencies),
+                                    dtype=torch.float32,
+                                    device=device)
+    joint_rhs_permute[0::2, :] = eq1_rhs
+    joint_rhs_permute[1::2, :] = eq2_rhs
 
     # shape (n_rfft_frequencies, 2 * n_canonical_waveforms)
     joint_rhs = joint_rhs_permute.permute(1, 0)
@@ -242,8 +269,8 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     soln_perm = soln.squeeze(2).permute(1, 0)
 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
-    soln_real_seg = soln_perm[:n_canonical_waveforms, :].cpu().numpy()
-    soln_imag_seg = soln_perm[n_canonical_waveforms:, :].cpu().numpy()
+    soln_real_seg = soln_perm[0::2, :].cpu().numpy()
+    soln_imag_seg = soln_perm[1::2, :].cpu().numpy()
 
     return soln_real_seg + 1j * soln_imag_seg
 
@@ -546,6 +573,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                         n_iter: int,
                         device: torch.device,
                         l1_regularization_lambda: Optional[float] = None,
+                        sobolev_regularization_lambda : Optional[float] = None,
                         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0)) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     '''
@@ -631,7 +659,8 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
             prev_iter_delays,
             observations_fourier_transform,
             n_frequencies_not_rfft,
-            device
+            device,
+            sobolev_lambda=sobolev_regularization_lambda
         )
 
         # real valued np.ndarray, shape (n_canonical_waveforms, n_samples)
@@ -679,12 +708,13 @@ EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
 def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
                                           device: torch.device,
                                           n_basis_vectors: int = 3,
-                                          l1_regularize_lambda: float = 0.0,
                                           snr_abs_threshold: float = 5.0,
                                           supersample_factor: int = 4,
                                           shifts: Tuple[int, int] = (-100, 100),
                                           maxiter_decomp: int = 25,
-                                          renormalize_data_waveforms : bool = False,
+                                          renormalize_data_waveforms: bool = False,
+                                          l1_regularize_lambda: Optional[float] = None,
+                                          sobolev_regularize_lambda : Optional[float] = None,
                                           output_debug_dict: bool = False) \
         -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray],
                  Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, np.ndarray]]]:
@@ -728,14 +758,15 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
 
     if renormalize_data_waveforms:
         mag_padded = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
-        padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:,None]
+        padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:, None]
 
     amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
                                                         n_basis_vectors,
                                                         np.r_[shifts[0]:shifts[1]],
                                                         maxiter_decomp,
                                                         device,
-                                                        l1_regularization_lambda=l1_regularize_lambda)
+                                                        l1_regularization_lambda=l1_regularize_lambda,
+                                                        sobolev_regularization_lambda=sobolev_regularize_lambda)
 
     # now unpack the results
     result_dict = {}  # type: Dict[int, EIDecomposition]
@@ -788,6 +819,7 @@ if __name__ == '__main__':
                                                                                             compute_device,
                                                                                             maxiter_decomp=50,
                                                                                             l1_regularize_lambda=5e-3,
+                                                                                            sobolev_regularize_lambda=1e-3,
                                                                                             renormalize_data_waveforms=True,
                                                                                             output_debug_dict=True)
 
