@@ -555,6 +555,132 @@ def debug_evaluate_error(observed_ft: np.ndarray,
     return mean_error
 
 
+def shifted_fourier_nmf_iterative_optimization(waveform_data_matrix: np.ndarray,
+                                               initialized_canonical_waveforms: np.ndarray,
+                                               initialized_amplitudes: np.ndarray,
+                                               intialized_delays: np.ndarray,
+                                               valid_sample_shifts: np.ndarray,
+                                               n_iter: int,
+                                               device: torch.device,
+                                               l1_regularization_lambda: Optional[float] = None,
+                                               sobolev_regularization_lambda: Optional[float] = None) \
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    '''
+    Subroutine for main optimization iterations, assuming all of the variables have been
+        properly initalized by any method
+
+    Order of the algorithm
+        (1) With fixed waveforms and timeshifts, solve for the amplitudes with
+            nonnegative least squares (with optional L1 regularization)
+        (2) With fixed amplitudes and timeshifts, solve for the waveforms with
+            complex-valued least squares (with optional Sobolev gradient regularization)
+        (3) With fixed amplitudes and waveforms, solve for the timeshifts
+            with simple Fourier domain all-but-one deconvolution
+
+    :param waveform_data_matrix: np.ndarray, time domain data matrix, shape (n_observations, n_timepoints)
+    :param initialized_canonical_waveforms: np.ndarray, time domain canonical waveforms,
+        shape (n_canonical_waveforms, n_timepoints)
+    :param initialized_amplitudes: np.ndarray, initialized amplitudes, shape (n_observations, n_canonical_waveforms)
+    :param intialized_delays: np.ndarray, initialized delays, shape (n_observations, n_canonical_waveforms)
+    :param valid_sample_shifts: np.ndarray, valid sample shifts, shape (n_valid_sample_shifts)
+    :param n_iter: int, number of iterations of the optimization to run
+    :param device:
+    :param l1_regularization_lambda:
+    :param sobolev_regularization_lambda:
+    :return:
+    '''
+    n_observations, n_samples = waveform_data_matrix.shape
+    n_frequencies_not_rfft = n_samples
+
+    # compute the Fourier transform of the observed data once, ahead of time
+    # shape (n_observations, n_frequencies)
+    observations_fourier_transform = np.fft.rfft(waveform_data_matrix, axis=1)
+
+    print("Beginning optimization loop")
+    pbar = tqdm.tqdm(total=n_iter)
+
+    for iter_count in range(n_iter):
+        # within each iteration, we have a three step optimization
+        # (1) Given fixed canonical waveforms and integer shifts,
+        #       solve for real-valued amplitudes with nonnegative linear
+        #       least squares
+        # (2) Given fixed amplitudes and shifts, solve for waveforms in
+        #       frequency domain with unconstrained complex-valued
+        #       linear least squares
+        # (3) Given fixed amplitudes and waveforms, all-but-one deconvolve
+        #       to solve for the shifts
+
+        # shape (n_canonical_waveforms, n_frequencies)
+        canonical_waveform_ft = np.fft.rfft(initialized_canonical_waveforms, axis=1)
+
+        # shape (n_observations, n_canonical_waveforms, n_frequencies)
+        delay_phase_shift_mat = generate_fourier_phase_shift_matrices(intialized_delays,
+                                                                      n_frequencies_not_rfft)
+
+        # shape (n_observations, n_canonical_waveforms, n_frequencies)
+        canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
+
+        # shape (n_observations, n_canonical_waveforms, n_timepoints)
+        canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2)
+
+        # shape (n_observations, n_canonical_waveforms)
+        # print("Iter {0}, Nonnegative least squares".format(iter_count))
+        iter_real_amplitudes = nonnegative_least_squares_optimize_amplitudes(waveform_data_matrix,
+                                                                             initialized_amplitudes,
+                                                                             canonical_waveforms_shifted,
+                                                                             device,
+                                                                             l1_regularization_lambda=l1_regularization_lambda)
+
+        # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
+        # print("Iter {0}, Waveform complex least squares".format(iter_count))
+        iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms3(
+            iter_real_amplitudes,
+            intialized_delays,
+            observations_fourier_transform,
+            n_frequencies_not_rfft,
+            device,
+            sobolev_lambda=sobolev_regularization_lambda
+        )
+
+        # real valued np.ndarray, shape (n_canonical_waveforms, n_samples)
+        iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=1))
+
+        # shape (n_observations, n_canonical_waveforms)
+        # print("Iter {0}, Delay estimation".format(iter_count))
+        iter_sample_delays = torch_fit_integer_shifts_all_but_one_template_match(observations_fourier_transform,
+                                                                                 iter_real_amplitudes,
+                                                                                 iter_canonical_waveform_ft,
+                                                                                 intialized_delays,
+                                                                                 valid_sample_shifts,
+                                                                                 n_frequencies_not_rfft,
+                                                                                 device)
+
+        # calculate progress metrics
+        # (probably best done in Fourier domain, doesn't require clever shifting and can
+        #  be trivially parallelized...)
+        mse = debug_evaluate_error(observations_fourier_transform,
+                                   iter_real_amplitudes,
+                                   iter_canonical_waveform_ft,
+                                   iter_sample_delays,
+                                   n_frequencies_not_rfft)
+
+        # now rescale the waveforms and amplitudes
+        # such that the waveforms each have L2 norm 1
+
+        # shape (n_canonical_waveforms, )
+        raw_optimized_waveform_magnitude = np.linalg.norm(iter_canonical_waveform_td, axis=1)
+
+        # now update the loop variables
+        intialized_delays = iter_sample_delays
+        initialized_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude[None, :]
+        initialized_canonical_waveforms = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
+
+        pbar.set_postfix({'MSE': mse})
+        pbar.update(1)
+
+    return initialized_amplitudes, initialized_canonical_waveforms, intialized_delays
+
+
 def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                         n_canonical_waveforms: int,
                         valid_sample_shifts: np.ndarray,
@@ -565,22 +691,33 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0)) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     '''
+    Shifted Fourier-domain NMF algorithm, with randomized initialization
 
     We perform all complex number manipulations (Fourier transforms, phase shifts, etc)
         in numpy, and only manipulate separate real and complex matrices with torch.
         Pytorch complex api looks pretty terrible
 
-    :param waveform_data_matrix:
-    :param n_canonical_waveforms:
-    :param valid_sample_shifts:
-    :param n_iter:
+    Order of the optimization algorithm:
+        (0) Randomly initialize waveforms, amplitudes, and timeshifts
+
+        Then, iterate n_iter times over:
+        (1) With fixed waveforms and timeshifts, solve for the amplitudes with
+            nonnegative least squares (with optional L1 regularization)
+        (2) With fixed amplitudes and timeshifts, solve for the waveforms with
+            complex-valued least squares (with optional Sobolev gradient regularization)
+        (3) With fixed amplitudes and waveforms, solve for the timeshifts
+            with simple Fourier domain all-but-one deconvolution
+
+    :param waveform_data_matrix: np.ndarray, shape (n_waveforms, n_timepoints)
+    :param n_canonical_waveforms: int, number of canonical waveforms
+    :param valid_sample_shifts: np.ndarray, integer, contains all valid shifts to test for
+    :param n_iter: int, number of iterations of the optimization to run
     :param device:
     :param amplitude_initialize_range:
     :return:
     '''
 
     n_observations, n_samples = waveform_data_matrix.shape
-    n_frequencies_not_rfft = n_samples
 
     prev_iter_real_amplitude_A = np.zeros((n_observations, n_canonical_waveforms),
                                           dtype=np.float32)
@@ -602,92 +739,115 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                                                np.max(valid_sample_shifts),
                                                size=prev_iter_delays.shape)
 
-    # compute the Fourier transform of the observed data once, ahead of time
-    # shape (n_observations, n_frequencies)
-    observations_fourier_transform = np.fft.rfft(waveform_data_matrix, axis=1)
+    return shifted_fourier_nmf_iterative_optimization(waveform_data_matrix,
+                                                      prev_iter_waveform_td,
+                                                      prev_iter_real_amplitude_A,
+                                                      prev_iter_delays,
+                                                      valid_sample_shifts,
+                                                      n_iter,
+                                                      device,
+                                                      l1_regularization_lambda=l1_regularization_lambda,
+                                                      sobolev_regularization_lambda=sobolev_regularization_lambda)
 
-    print("Beginning optimization loop")
-    pbar = tqdm.tqdm(total=n_iter)
-    for iter_count in range(n_iter):
-        # within each iteration, we have a three step optimization
-        # (1) Given fixed canonical waveforms and integer shifts,
-        #       solve for real-valued amplitudes with nonnegative linear
-        #       least squares
-        # (2) Given fixed amplitudes and shifts, solve for waveforms in
-        #       frequency domain with unconstrained complex-valued
-        #       linear least squares
-        # (3) Given fixed amplitudes and waveforms, all-but-one deconvolve
-        #       to solve for the shifts
 
-        # shape (n_canonical_waveforms, n_frequencies)
-        canonical_waveform_ft = np.fft.rfft(prev_iter_waveform_td, axis=1)
+def simple_deconv_time_shifts(waveform_data_matrix: np.ndarray,
+                              normalized_canonical_waveforms: np.ndarray,
+                              valid_sample_shifts: np.ndarray) -> np.ndarray:
+    '''
+    Estimate time shifts by calculating cross-correlations in Fourier domain
 
-        # shape (n_observations, n_canonical_waveforms, n_frequencies)
-        delay_phase_shift_mat = generate_fourier_phase_shift_matrices(prev_iter_delays,
-                                                                      n_frequencies_not_rfft)
+    :param waveform_data_matrix: np.ndarray, shape (n_observations, n_timepoints)
+    :param normalized_canonical_waveforms: np.ndarray, shape (n_canonical_waveforms, n_timepoints)
+        already normalized such that the L2 norm for each row is 1
+    :param valid_sample_shifts: np.ndarray, all valid shifts
+    :return: delays, shape (n_observations, n_canonical_waveforms)
+    '''
 
-        # shape (n_observations, n_canonical_waveforms, n_frequencies)
-        canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
+    # shape (n_observations, n_rfft_frequencies)
+    observed_ft = np.fft.rfft(waveform_data_matrix, axis=1)
 
-        # shape (n_observations, n_canonical_waveforms, n_timepoints)
-        canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2)
+    n_observations, n_rfft_frequencies = observed_ft.shape
+    n_canonical_waveforms, n_timepoints = normalized_canonical_waveforms.shape
 
-        # shape (n_observations, n_canonical_waveforms)
-        # print("Iter {0}, Nonnegative least squares".format(iter_count))
-        iter_real_amplitudes = nonnegative_least_squares_optimize_amplitudes(waveform_data_matrix,
-                                                                             prev_iter_real_amplitude_A,
-                                                                             canonical_waveforms_shifted,
-                                                                             device,
-                                                                             l1_regularization_lambda=l1_regularization_lambda)
+    # because we are calculating a cross-correlation, we first reverse the
+    # the time domain canonical waveforms
+    canonical_td_reversed = normalized_canonical_waveforms[:, ::-1]
 
-        # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
-        # print("Iter {0}, Waveform complex least squares".format(iter_count))
-        iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms3(
-            iter_real_amplitudes,
-            prev_iter_delays,
-            observations_fourier_transform,
-            n_frequencies_not_rfft,
-            device,
-            sobolev_lambda=sobolev_regularization_lambda
-        )
+    # shape (n_canonical_waveforms, n_rfft_frequencies)
+    canonical_reverse_ft = np.fft.rfft(canonical_td_reversed, axis=1)
 
-        # real valued np.ndarray, shape (n_canonical_waveforms, n_samples)
-        iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=1))
+    # shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    cross_correlation_ft = observed_ft[:, None, :] * canonical_reverse_ft[None, :, :]
 
-        # shape (n_observations, n_canonical_waveforms)
-        # print("Iter {0}, Delay estimation".format(iter_count))
-        iter_sample_delays = torch_fit_integer_shifts_all_but_one_template_match(observations_fourier_transform,
-                                                                                 iter_real_amplitudes,
-                                                                                 iter_canonical_waveform_ft,
-                                                                                 prev_iter_delays,
-                                                                                 valid_sample_shifts,
-                                                                                 n_frequencies_not_rfft,
-                                                                                 device)
+    # shape (n_observations, n_canonical_waveforms, n_timepoints)
+    cross_correlation_td = np.fft.irfft(cross_correlation_ft, axis=2)
 
-        # calculate progress metrics
-        # (probably best done in Fourier domain, doesn't require clever shifting and can
-        #  be trivially parallelized...)
-        mse = debug_evaluate_error(observations_fourier_transform,
-                                   iter_real_amplitudes,
-                                   iter_canonical_waveform_ft,
-                                   iter_sample_delays,
-                                   n_frequencies_not_rfft)
+    # shape (n_observations, n_canonical_waveforms, n_valid_shifts)
+    valid_timeshift_cross_correlations = np.take(cross_correlation_td, valid_sample_shifts, axis=2)
 
-        # now rescale the waveforms and amplitudes
-        # such that the waveforms each have L2 norm 1
+    # shape (n_observations, n_canonical_waveforms)
+    best_timeshift_indices = np.argmax(valid_timeshift_cross_correlations, axis=2)
+    return np.take(valid_sample_shifts, best_timeshift_indices, axis=0)
 
-        # shape (n_canonical_waveforms, )
-        raw_optimized_waveform_magnitude = np.linalg.norm(iter_canonical_waveform_td, axis=1)
 
-        # now update the loop variables
-        prev_iter_delays = iter_sample_delays
-        prev_iter_real_amplitude_A = iter_real_amplitudes * raw_optimized_waveform_magnitude[None, :]
-        prev_iter_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
+def optimize_initialized_waveforms_fourier_nmf(waveform_data_matrix: np.ndarray,
+                                               initialized_canonical_waveforms: np.ndarray,
+                                               valid_sample_shifts: np.ndarray,
+                                               n_iter: int,
+                                               device: torch.device,
+                                               l1_regularization_lambda: Optional[float] = None,
+                                               sobolev_regularization_lambda: Optional[float] = None) \
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    '''
+    Modified version of the above shifted_fourier_nmf routine, where instead of randomly initializing
+        the canonical waveforms, the user instead specifies the starting waveforms
 
-        pbar.set_postfix({'MSE': mse})
-        pbar.update(1)
+    In order for this algorithm to work, we change the order of the optimization to the following:
 
-    return prev_iter_real_amplitude_A, prev_iter_waveform_td, prev_iter_delays
+        (0) Solve for the timeshifts with cross-correlation (do it in Fourier domain),
+            no all-but-one deconvolution since we have a strong prior for what the waveforms should be.
+
+        Then, iterate n_iter times over
+        (1) With fixed waveforms and timeshifts, solve for the amplitudes with
+            nonnegative least squares (with optional L1 regularization)
+        (2) With fixed amplitudes and timeshifts, solve for the waveforms with
+            complex-valued least squares (with optional Sobolev gradient regularization)
+        (3) With fixed amplitudes and waveforms, solve for the timeshifts
+            with simple Fourier domain all-but-one deconvolution
+
+    :param waveform_data_matrix: np.ndarray, shape (n_observations, n_timepoints)
+    :param initialized_canonical_waveforms: np.ndarray, shape (n_canonical_waveforms, n_timepoints)
+        already normalized such that the L2 norm for each row is 1
+    :param valid_sample_shifts:
+    :param n_iter:
+    :param device:
+    :param l1_regularization_lambda:
+    :param sobolev_regularization_lambda:
+    :param amplitude_initialize_range:
+    :return:
+    '''
+    n_observations, n_timepoints = waveform_data_matrix.shape
+    n_canonical_waveforms, _ = initialized_canonical_waveforms.shape
+
+    # first calculate the timeshifts
+    initialized_time_shifts = simple_deconv_time_shifts(waveform_data_matrix,
+                                                        initialized_canonical_waveforms,
+                                                        valid_sample_shifts)
+
+    # these initial values literally do not matter, since we're going to outright solve for
+    # the amplitudes anyway in the first step of the first iteration of the optimization step
+    initialized_amplitudes = np.zeros((n_observations, n_canonical_waveforms), dtype=np.float32)
+    initialized_amplitudes[:, :] = np.random.uniform(0.0, 10.0, size=initialized_amplitudes.shape)
+
+    return shifted_fourier_nmf_iterative_optimization(waveform_data_matrix,
+                                                      initialized_canonical_waveforms,
+                                                      initialized_amplitudes,
+                                                      initialized_time_shifts,
+                                                      valid_sample_shifts,
+                                                      n_iter,
+                                                      device,
+                                                      l1_regularization_lambda=l1_regularization_lambda,
+                                                      sobolev_regularization_lambda=sobolev_regularization_lambda)
 
 
 EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
@@ -695,7 +855,8 @@ EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
 
 def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
                                           device: torch.device,
-                                          n_basis_vectors: int = 3,
+                                          n_basis_vectors: Optional[int] = None,
+                                          initialized_basis_vectors: Optional[np.ndarray] = None,
                                           snr_abs_threshold: float = 5.0,
                                           supersample_factor: int = 4,
                                           shifts: Tuple[int, int] = (-100, 100),
@@ -711,6 +872,7 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
     :param eis_by_cell_id:
     :param device:
     :param n_basis_vectors:
+    :param initialized_basis_vectors:
     :param l1_regularize_lambda:
     :param snr_abs_threshold:
     :param supersample_factor:
@@ -718,6 +880,14 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
     :param maxiter_decomp:
     :return:
     '''
+
+    # check the inputs for correctness
+    # must either specify the number of basis waveforms, or specify initial basis waveforms outright
+    if n_basis_vectors is None and initialized_basis_vectors is None:
+        raise ValueError('Must specify either n_basis_vectors or initialized_basis_vectors')
+    elif n_basis_vectors is not None and initialized_basis_vectors is not None:
+        raise ValueError('Can specify only one of n_basis_vectors and initialized_basis_vectors')
+
     matrix_indices_by_cell_id = {}  # type: Dict[int, Tuple[slice, Sequence[int]]]
     to_concat = []  # type: List[np.ndarray]
 
@@ -748,16 +918,33 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
         mag_padded = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
         padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:, None]
 
-    amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
-                                                        n_basis_vectors,
-                                                        np.r_[shifts[0]:shifts[1]],
-                                                        maxiter_decomp,
-                                                        device,
-                                                        l1_regularization_lambda=l1_regularize_lambda,
-                                                        sobolev_regularization_lambda=sobolev_regularize_lambda)
+    if n_basis_vectors is not None:
+        amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
+                                                            n_basis_vectors,
+                                                            np.r_[shifts[0]:shifts[1]],
+                                                            maxiter_decomp,
+                                                            device,
+                                                            l1_regularization_lambda=l1_regularize_lambda,
+                                                            sobolev_regularization_lambda=sobolev_regularize_lambda)
+    else:
+
+        # also need to supersample and pad the initial basis waveforms
+        bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
+        padded_basis_waveforms_init = np.pad(bspline_supersampled_basis,
+                                             [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
+                                             mode='constant')
+        amplitudes, waveforms, delays = optimize_initialized_waveforms_fourier_nmf(
+            padded_channels_sufficient_magnitude,
+            padded_basis_waveforms_init,
+            np.r_[shifts[0]:shifts[1]],
+            maxiter_decomp,
+            device,
+            l1_regularization_lambda=l1_regularize_lambda,
+            sobolev_regularization_lambda=sobolev_regularize_lambda
+        )
 
     if renormalize_data_waveforms:
-        amplitudes = mag_padded[:,None] * amplitudes
+        amplitudes = mag_padded[:, None] * amplitudes
 
     # now unpack the results
     result_dict = {}  # type: Dict[int, EIDecomposition]
@@ -786,4 +973,3 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
         return result_dict, waveforms, debug_dict
 
     return result_dict, waveforms
-
