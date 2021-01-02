@@ -24,7 +24,7 @@ if __name__ == '__main__':
     ei_for_template = dataset.get_ei_for_cell(args.cell_id).ei
     basis_waveforms = ei_for_template[list(args.electrodes),:]
 
-    with open(args.basis_pickle) as pfile:
+    with open(args.basis_pickle, 'wb') as pfile:
         pickle_dict = {
             'basis' : basis_waveforms
         }

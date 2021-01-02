@@ -564,7 +564,7 @@ def shifted_fourier_nmf_iterative_optimization(waveform_data_matrix: np.ndarray,
                                                device: torch.device,
                                                l1_regularization_lambda: Optional[float] = None,
                                                sobolev_regularization_lambda: Optional[float] = None) \
-        -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     '''
     Subroutine for main optimization iterations, assuming all of the variables have been
         properly initalized by any method
@@ -678,7 +678,7 @@ def shifted_fourier_nmf_iterative_optimization(waveform_data_matrix: np.ndarray,
         pbar.set_postfix({'MSE': mse})
         pbar.update(1)
 
-    return initialized_amplitudes, initialized_canonical_waveforms, intialized_delays
+    return initialized_amplitudes, initialized_canonical_waveforms, intialized_delays, mse
 
 
 def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
@@ -689,7 +689,7 @@ def shifted_fourier_nmf(waveform_data_matrix: np.ndarray,
                         l1_regularization_lambda: Optional[float] = None,
                         sobolev_regularization_lambda: Optional[float] = None,
                         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0)) \
-        -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     '''
     Shifted Fourier-domain NMF algorithm, with randomized initialization
 
@@ -797,7 +797,7 @@ def optimize_initialized_waveforms_fourier_nmf(waveform_data_matrix: np.ndarray,
                                                device: torch.device,
                                                l1_regularization_lambda: Optional[float] = None,
                                                sobolev_regularization_lambda: Optional[float] = None) \
-        -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     '''
     Modified version of the above shifted_fourier_nmf routine, where instead of randomly initializing
         the canonical waveforms, the user instead specifies the starting waveforms
@@ -865,8 +865,8 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
                                           l1_regularize_lambda: Optional[float] = None,
                                           sobolev_regularize_lambda: Optional[float] = None,
                                           output_debug_dict: bool = False) \
-        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray],
-                 Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, np.ndarray]]]:
+        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, float],
+                 Tuple[Dict[int, EIDecomposition], np.ndarray, float, Dict[str, np.ndarray]]]:
     '''
 
     :param eis_by_cell_id:
@@ -919,13 +919,13 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
         padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:, None]
 
     if n_basis_vectors is not None:
-        amplitudes, waveforms, delays = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
-                                                            n_basis_vectors,
-                                                            np.r_[shifts[0]:shifts[1]],
-                                                            maxiter_decomp,
-                                                            device,
-                                                            l1_regularization_lambda=l1_regularize_lambda,
-                                                            sobolev_regularization_lambda=sobolev_regularize_lambda)
+        amplitudes, waveforms, delays, mse = shifted_fourier_nmf(padded_channels_sufficient_magnitude,
+                                                                 n_basis_vectors,
+                                                                 np.r_[shifts[0]:shifts[1]],
+                                                                 maxiter_decomp,
+                                                                 device,
+                                                                 l1_regularization_lambda=l1_regularize_lambda,
+                                                                 sobolev_regularization_lambda=sobolev_regularize_lambda)
     else:
 
         # also need to supersample and pad the initial basis waveforms
@@ -933,7 +933,7 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
         padded_basis_waveforms_init = np.pad(bspline_supersampled_basis,
                                              [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                              mode='constant')
-        amplitudes, waveforms, delays = optimize_initialized_waveforms_fourier_nmf(
+        amplitudes, waveforms, delays, mse = optimize_initialized_waveforms_fourier_nmf(
             padded_channels_sufficient_magnitude,
             padded_basis_waveforms_init,
             np.r_[shifts[0]:shifts[1]],
@@ -942,6 +942,8 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
             l1_regularization_lambda=l1_regularize_lambda,
             sobolev_regularization_lambda=sobolev_regularize_lambda
         )
+
+        n_basis_vectors = initialized_basis_vectors.shape[0]
 
     if renormalize_data_waveforms:
         amplitudes = mag_padded[:, None] * amplitudes
@@ -970,6 +972,6 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
             'raw_data': padded_channels_sufficient_magnitude
         }
 
-        return result_dict, waveforms, debug_dict
+        return result_dict, waveforms, mse, debug_dict
 
-    return result_dict, waveforms
+    return result_dict, waveforms, mse
