@@ -237,7 +237,7 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
         # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms,, n_rfft_frequencies)
         canonical_waveform_freq_diag = canonical_waveforms_identity[:, :, None] * frequencies[None, None, :]
 
-        diagonal_regularize = 2 * sobolev_lambda * (1 - np.cos(canonical_waveform_freq_diag))
+        diagonal_regularize = 2 * sobolev_lambda * np.power(1 - np.cos(canonical_waveform_freq_diag), 2)
 
         diagonal_regularize_torch_perm = torch.tensor(diagonal_regularize, dtype=torch.float32, device=device)
         diagonal_regularize_torch = diagonal_regularize_torch_perm.permute(2, 0, 1)
@@ -1063,10 +1063,10 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
                                           n_basis_vectors: Optional[int] = None,
                                           initialized_basis_vectors: Optional[np.ndarray] = None,
                                           snr_abs_threshold: float = 5.0,
-                                          supersample_factor: int = 4,
+                                          supersample_factor: int = 5,
                                           shifts: Tuple[int, int] = (-100, 100),
                                           maxiter_decomp: int = 25,
-                                          renormalize_data_waveforms: bool = False,
+                                          renormalize_data_waveforms: bool = True,
                                           l1_regularize_lambda: Optional[float] = None,
                                           sobolev_regularize_lambda: Optional[float] = None,
                                           output_debug_dict: bool = False) \

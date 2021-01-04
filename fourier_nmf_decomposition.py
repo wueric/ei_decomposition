@@ -17,11 +17,11 @@ if __name__ == '__main__':
     parser.add_argument('cell_type', type=str, help='cell type of interest')
     parser.add_argument('output', type=str, help='path to output pickle file')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
-    parser.add_argument('--maxiter', '-m', type=int, default=50, help='maximum number of iterations to run')
-    parser.add_argument('--weight_reg', '-w', type=float, default=1e-3, help='L1 regularization lambda for amplitudes')
+    parser.add_argument('--maxiter', '-m', type=int, default=25, help='maximum number of iterations to run')
+    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2, help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
                         help='L2 regularization for waveform derivatives')
-    parser.add_argument('--upsample', '-u', type=int, default=4, help='upsample factor')
+    parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
@@ -45,7 +45,6 @@ if __name__ == '__main__':
 
     shift_tuple = (-args.before, args.after)
 
-    # 5e-3 was good
     decomposition_dict, basis_waveforms, mse = ei_decomp.decompose_cells_by_fitted_compartment(eis_by_cell_id,
                                                                                                compute_device,
                                                                                                n_basis_vectors=args.nbasis,
