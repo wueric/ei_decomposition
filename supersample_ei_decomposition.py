@@ -281,7 +281,7 @@ if __name__ == '__main__':
     somatic_electrode = 61
     axonic_electrode = 300
 
-    cell_to_fit = 1187
+    cell_to_fit = 616
 
     ei_example = dataset.get_ei_for_cell(example_cell).ei
     ei_to_fit = dataset.get_ei_for_cell(cell_to_fit).ei
