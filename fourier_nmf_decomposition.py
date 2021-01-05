@@ -43,7 +43,7 @@ if __name__ == '__main__':
 
     if args.cell_list is not None:
 
-        with open(args.cell_type, 'r') as cell_id_file:
+        with open(args.cell_list, 'r') as cell_id_file:
             cell_id_list = []
             for line in cell_id_file.readlines():
                 cell_id = int(line.strip('\n'))
