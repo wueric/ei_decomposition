@@ -1,18 +1,11 @@
-import visionloader as vl
 import numpy as np
-import scipy.interpolate as interpolate
-
 import torch
+from scipy import interpolate as interpolate
 
 from typing import List, Dict, Tuple, Sequence, Optional, Union
-
-import pickle
-
-import tqdm
-
 from collections import namedtuple
 
-from scipy import interpolate as interpolate
+import tqdm
 
 
 def bspline_upsample_waveforms(waveforms: np.ndarray,
@@ -1039,10 +1032,9 @@ def optimize_initialized_waveforms_fourier_nmf(waveform_data_matrix: np.ndarray,
     observed_ft = np.fft.rfft(waveform_data_matrix, axis=1)
     ft_canonical = np.fft.rfft(initialized_canonical_waveforms, axis=1)
     initialized_time_shifts = greedy_template_match_time_shift(observed_ft,
-                                     ft_canonical,
-                                     valid_sample_shifts,
-                                     n_true_frequencies)
-
+                                                               ft_canonical,
+                                                               valid_sample_shifts,
+                                                               n_true_frequencies)
 
     # these initial values literally do not matter, since we're going to outright solve for
     # the amplitudes anyway in the first step of the first iteration of the optimization step
