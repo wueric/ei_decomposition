@@ -25,6 +25,8 @@ if __name__ == '__main__':
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
+    parser.add_argument('--cell_list', '-c', type=str, default=None,
+                        help='Override cell_type argument, instead use cell ids in specified file')
 
     args = parser.parse_args()
 
@@ -39,9 +41,18 @@ if __name__ == '__main__':
                                   include_ei=True)
     dataset_el_map = dataset.get_electrode_map()
 
-    example_on_parasols = dataset.get_all_cells_of_type(args.cell_type)
+    if args.cell_list is not None:
 
-    eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in example_on_parasols}
+        with open(args.cell_type, 'r') as cell_id_file:
+            cell_id_list = []
+            for line in cell_id_file.readlines():
+                cell_id = int(line.strip('\n'))
+                cell_id_list.append(cell_id)
+
+        eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
+    else:
+        cell_id_list = dataset.get_all_cells_of_type(args.cell_type)
+        eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
 
     shift_tuple = (-args.before, args.after)
 
