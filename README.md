@@ -2,7 +2,7 @@
 
 ## Description
 
-This algorithm decomposes the EIs into shifted superpositions of basis waveforms by iteratively optimizing the basis 
+This algorithm decomposes the EIs into scaled and shifted superpositions of basis waveforms by iteratively optimizing the basis 
 waveform shape, time shifts, and amplitudes in alternating steps. The algorithm performs the optimization over an entire
 population of cells (for example, the optimization works simultaneously over all sufficiently large amplitude electrodes
 for cells of a specified cell type). **In its simplest form, the user specifies only the number of basis waveforms and not
@@ -71,4 +71,35 @@ CUDA_VISIBLE_DEVICES=3, python fourier_nmf_decomposition.py /path/to/data/2018-0
 
 #### Return values
 
+The return values are stored in a Python pickle file. The pickle file contains two distinct dictionaries. These dictionaries
+must be loaded with consecutive calls of ```pickle.load()```.
+1. The first dictionary is the optimization parameter dictionary. It contains all of the optimization hyperparameters for
+record-keeping.
+2. The second dictionary contains the results of the optimization. The keys in this dictionary are:
+    * ```'mse'```: -> ```float``` the final MSE value over all waveforms at the end of the optimization
+    * ```'waveforms``` -> ```np.ndarray``` the basis waveforms found by the optimization. Has shape ```(n_basis_waveforms, n_timepoints)```
+    Note that because the waveforms are fit from random initialization, the compartments will occur in random order.
+    * ```'decomposition'``` -> ```Dict[int, Tuple[np.ndarray, np.ndarray]]``` Dict mapping cell id integer to the decompositions.
+    The first ```np.ndarray``` contains the amplitudes, and has shape ```(n_electrodes, n_basis_waveforms)```, with the order of
+    the columns corresponding to the order of basis waveforms in ```waveforms```. The second ```np.ndarray``` contains the shifts,
+    in units of supersampled samples, and has shape ```(n_electrodes, n_basis_waveforms)```. The order of the columns corresponds
+    to the order of the basis waveforms in ```waveforms```. Negative is forward shift, and positive is a delay.
+
 ## How it works
+
+The algorithm has the following steps
+
+1. Randomly initialize basis waveforms, shifts, and amplitudes. Basis waveforms can take any value, shifts must be within the range
+specified by the user, and amplitudes must be nonnegative.
+2. Iteratively fit by alternating between the following three steps
+    1. Given fixed basis waveforms and time shifts, solve for the scaling amplitudes on each basis waveform. This is formulated 
+    as nonnegative least squares (the amplitudes must be nonnegative), with optional L1 regularization to promote sparsity
+    among the amplitudes (electrodes often tend be just one compartment, for example, pure axonic electrodes). The problem is separable
+    over each (cell, electrode) pair, and it is solved in parallel for each.
+    2. Given fixed amplitudes and time shifts, solve for the basis waveforms in Fourier domain. Because this problem is solved
+    in Fourier domain (convenient for dealing with the time shifts, because in Fourier domain the shifts become elementwise
+    multiplication), the problem is formulated as complex linear least squares, with an extra factor to account for the shifting.
+    The problem is separable over each frequency, and is solved in parallel for each.
+    3. Given fixed amplitudes and waveforms, solve for the timeshifts with greedy deconvolution.
+    
+There is a document with mathematical details... The details are quite unpleasant...
