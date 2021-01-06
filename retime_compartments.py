@@ -8,7 +8,7 @@ from lib.ei_decomposition import generate_fourier_phase_shift_matrices
 
 ABS_MAX_FRAC = 0.05
 
-ALIGN_TO_SAMPLE_NUM = 100
+ALIGN_TO_SAMPLE_NUM = 150
 
 if __name__ == '__main__':
 
@@ -34,7 +34,7 @@ if __name__ == '__main__':
 
     alignment_threshold = np.max(abs_waveform, axis=1) * ABS_MAX_FRAC
     exceeds_threshold_sample_num = np.zeros((n_compartments, ), dtype=np.int32)
-    compartment_gt, sample_gt = np.where(abs_waveform > alignment_threshold)
+    compartment_gt, sample_gt = np.where(abs_waveform > alignment_threshold[:,None])
     for compartment_idx in range(exceeds_threshold_sample_num.shape[0]):
         min_sample = np.min(sample_gt[compartment_gt == compartment_idx])
         exceeds_threshold_sample_num[compartment_idx] = min_sample
@@ -70,7 +70,3 @@ if __name__ == '__main__':
     with open(args.output_pickle_path, 'wb') as output_pfile:
         pickle.dump(metadata_dict, output_pfile)
         pickle.dump(new_pickle_dict, output_pfile)
-
-
-
-
