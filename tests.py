@@ -19,6 +19,7 @@ if __name__ == '__main__':
 
     # for now, don't bother with argparse since we still don't have an automatic way
     # to pick canonical waveforms
+    print("Loading data")
     dataset = vl.load_vision_data('/Volumes/Lab/Users/ericwu/yass-ei/2018-03-01-0/data001',
                                   'data001',
                                   include_params=True,
@@ -53,8 +54,9 @@ if __name__ == '__main__':
     valid_phase_shifts_matrix = mg.reshape((n_canonical_waveforms, -1))
 
     random_amplitudes = np.random.uniform(0, 10,
-                                          size=(512, shift_steps.shape[0], n_canonical_waveforms))
+                                          size=(512, valid_phase_shifts_matrix.shape[1], n_canonical_waveforms))
 
+    print("Running fit")
     amplitudes, objective_values = fast_time_shifts_and_amplitudes_shared_shifts(
         np.fft.rfft(upsampled_ei, axis=1),
         np.fft.rfft(basis_upsampled, axis=1),
