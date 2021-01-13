@@ -256,6 +256,224 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     return soln_real_seg + 1j * soln_imag_seg
 
 
+def fast_time_shifts_and_amplitudes_unique_shifts(observed_ft: np.ndarray,
+                                                  ft_canonical: np.ndarray,
+                                                  unique_phase_shifts: np.ndarray,
+                                                  amplitude_matrix_real_np: np.ndarray,
+                                                  n_true_frequencies,
+                                                  max_iter: int,
+                                                  device: torch.device,
+                                                  l1_regularization_lambda: Optional[float] = None,
+                                                  convergence_epsilon: float = 1e-3) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    pass
+
+
+def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
+                                                  ft_canonical: np.ndarray,
+                                                  valid_phase_shifts: np.ndarray,
+                                                  amplitude_matrix_real_np: np.ndarray,
+                                                  n_true_frequencies: int,
+                                                  max_iter: int,
+                                                  device: torch.device,
+                                                  l1_regularization_lambda: Optional[float] = None,
+                                                  converge_epsilon: float = 1e-3) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    '''
+    Iterative coarse-to-fine search helper function
+
+    For fixed phase shifts, as defined by valid_phase_shifts, solves the nonnegative orthant least squares
+        minimization problem with optional L1 regularization, and returns all solutions and objective fn values
+
+    Notation for the below function
+
+        objective fn is 1/2 |Ax-b|^2 = 1/2 (Ax-b)^T (Ax-b)
+        gradient is A^T A x - A^T b
+
+    Implementation notes:
+
+    (A^T A)_{i,j}^{(z)} corresponds to the cross-correlation of the i^{th} canonical waveform, delayed by
+        valid_phase_shifts[i,z] number of samples, with the j^{th} canonical waveform, delayed by
+        valid_phase_shifts[j,z] number of samples
+
+    :param observed_ft: observed waveforms in Fourier domain, complex valued, shape (n_observations, n_rfft_frequencies)
+    :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
+            shape (n_canonical_waveforms, n_rfft_frequencies)
+    :param valid_phase_shifts: integer array, shape (n_canonical_waveforms, n_valid_phase_shifts)
+    :param n_true_frequencies: int
+    :return:
+    '''
+
+    n_observations, n_rfft_frequencies = observed_ft.shape
+    n_canonical_waveforms, n_valid_phase_shifts = valid_phase_shifts.shape
+
+    #### Step 1: build A^T A from circular cross correlation #####################################
+    # this one depends on relative timing for each of the canonical waveforms, so a bit tricky
+    ft_canonical_conj = np.conjugate(ft_canonical)  # shape (n_canonical_waveforms, n_rfft_frequencies)
+    circular_conv_ft = ft_canonical[:, None, :] * ft_canonical_conj[None, :, :]
+    # shape (n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+
+    circular_conv_td = np.fft.irfft(circular_conv_ft, n=n_true_frequencies, axis=2)
+    # shape (n_canonical_waveforms, n_canonical_waveforms, n_timepoints), axis 1 corresponds to the shifted waveforms
+    # relative to axis 0 fixed waveforms
+    # (i,j,t)^{th} entry corresponds to cross correlation of i^{th} canonical waveform with j^{th} canonical waveform
+    #   that has been delayed by t samples
+    # This means that circular_conv_td is not symmetric for dims (0, 1)
+
+    # now we have to build at_a matrix by grabbing the relevant pieces
+    # not so straightforward, since we care about relative timing instead of absolute timing
+    at_a_matrix_np = np.zeros((n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms),
+                              dtype=np.float32)
+    for j in range(n_canonical_waveforms):
+        relative_shift = valid_phase_shifts - valid_phase_shifts[j, :][None, :]
+        # shape (n_canonical_waveforms, n_valid_phase_shifts)
+
+        taken_piece = np.take_along_axis(circular_conv_td[j, :, :], relative_shift[:, :], axis=1)
+        # shape (n_canonical_waveforms, n_valid_phase_shifts)
+        at_a_matrix_np[:, j, :] = taken_piece.transpose((1, 0))
+
+    # shape (n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    at_a_matrix = torch.tensor(at_a_matrix_np)
+
+    ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
+    # this one depends on absolute timing so it is much easier to pack
+    data_circ_conv_ft = ft_canonical_conj[None, :, :] * observed_ft[:, None, :]
+    # shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
+
+    # shape (n_observations, n_canonical_waveforms, n_timepoints)
+    data_circ_conv_td = np.fft.irfft(data_circ_conv_ft, n=n_true_frequencies, axis=2)
+    # The (i,j,t)^{th} entry corresponds to cross correlation of the i^{th} data waveform with the j^{th} canonical
+    #   waveform that has been delayed by t samples
+
+    # we have to build A^T b from this matrix
+    # shape (n_observations, n_canonical_waveforms, n_phase_shifts)
+    at_b_perm = np.take_along_axis(data_circ_conv_td, valid_phase_shifts[None, :, :], axis=2)
+
+    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    at_b_np = at_b_perm.transpose((0, 2, 1))
+
+    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    at_b_torch = torch.tensor(at_b_np, dtype=torch.float32, device=device)
+
+    #### Step 3: set up projected gradient descent problem #######################################
+    eigenvalues_np, _ = np.linalg.eigh(at_a_matrix_np)
+    eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
+
+    # eigenvalues has shape (n_valid_phase_shifts, n_waveforms)
+    max_eigenvalue, _ = torch.max(eigenvalues, dim=1)  # shape (n_valid_phase_shifts, )
+    min_eigenvalue, _ = torch.min(eigenvalues, dim=1)  # shape (n_valid_phase_shifts, )
+
+    convergence_factor = 0.5 * (max_eigenvalue - min_eigenvalue)  # shape (n_valid_phase_shifts, )
+
+    # boundaries for the step size
+    # we have to have 0 < step_size <= 1/L where L is the largest eigenvalue
+    # we make step_size smaller to be safe
+    step_size = 1.0 / (2 * max_eigenvalue)  # has shape (n_valid_phase_shifts, )
+
+    ##### Step 4: do the projected gradient descent (no batching) ################################
+    ##### This function assumes that the batching is taken care of by the caller #################
+
+    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    amplitudes = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
+
+    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms, 1)
+    at_a_x = at_a_matrix[None, :, :, :] @ amplitudes[:, :, :, None]
+
+    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    gradient = at_a_x.squeeze(3) - at_b_torch
+    if l1_regularization_lambda is not None:
+        gradient += l1_regularization_lambda
+
+    for step_num in range(max_iter):
+
+        # shape (n_observations, n_canonical_waveforms)
+        next_amplitudes = torch.clamp(amplitudes - step_size[None, :, None] * gradient,
+                                      min=0.0)
+
+        # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        amplitudes = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
+
+        # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        at_a_x = (at_a_matrix[None, :, :, :] @ next_amplitudes[:, :, :, None]).squeeze(3)
+
+        # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        gradient = at_a_x - at_b_torch
+        if l1_regularization_lambda is not None:
+            gradient += l1_regularization_lambda
+
+        step_distance = next_amplitudes - amplitudes
+        # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        step_distance = torch.sum(step_distance * step_distance, dim=2)  # shape (n_observations, n_valid_phase_shifts)
+        convergence_bound = convergence_factor * step_distance  # shape (n_observations, n_valid_phase_shifts)
+        worst_bound = torch.max(convergence_bound).item()
+
+        amplitudes = next_amplitudes
+
+        if worst_bound < converge_epsilon:
+            break
+
+    # now we have to calculate the objective values
+    xt_at_a_x = (amplitudes[:, :, None, :] @ at_a_x[:, :, :, None]).squeeze()
+    xt_at_b = (amplitudes[:, :, None, :] @ at_b_torch[:, :, :, None]).squeeze()
+
+    partial_objective = 0.5 * xt_at_a_x + xt_at_b
+
+    return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
+
+
+def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
+                                              ft_canonical: np.ndarray,
+                                              n_true_frequencies,
+                                              valid_phase_shift_range: Tuple[int, int],
+                                              first_pass_step_size: int,
+                                              second_pass_width: int,
+                                              device: torch.device,
+                                              l1_regularization_lambda: Optional[float] = None,
+                                              converge_epsilon: float = 1e-3,
+                                              amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
+                                              max_batch_size: int = 2048) -> Tuple[np.ndarray, np.ndarray]:
+    n_observations, _ = observed_ft.shape
+    n_canonical_waveforms, n_rfft_frequencies = ft_canonical.shape
+
+    ######### Step 1: first pass, perform nonnegative least squares minimization on a coarse ###############
+    ######## grid of phase shifts, then pick the N best ####################################################
+    low_shift, high_shift = valid_phase_shift_range
+    shift_steps = np.r_[low_shift:high_shift:first_pass_step_size]
+    mg = np.stack(np.meshgrid(*[shift_steps for _ in range(n_canonical_waveforms)]), axis=0)
+    valid_phase_shifts_matrix = mg.reshape((n_canonical_waveforms, -1))
+
+    _, n_valid_phase_shifts = valid_phase_shifts_matrix.shape
+
+    amplitude_results = np.zeros((n_observations, n_valid_phase_shifts, n_canonical_waveforms),
+                                 dtype=np.float32)
+    objective_results = np.zeros((n_observations, n_valid_phase_shifts), dtype=np.float32)
+
+    for low in range(0, n_valid_phase_shifts, max_batch_size):
+        high = min(n_valid_phase_shifts, low + max_batch_size)
+
+        amplitudes_random_init = np.random.uniform(amplitude_initialize_range[0],
+                                                   amplitude_initialize_range[1],
+                                                   size=(n_observations, high - low, n_canonical_waveforms))
+
+        amplitude_batch, objective_batch = fast_time_shifts_and_amplitudes_shared_shifts(
+            observed_ft,
+            ft_canonical,
+            valid_phase_shifts_matrix[low:high, :],
+            amplitudes_random_init,
+            n_true_frequencies,
+            25,
+            device,
+            l1_regularization_lambda=l1_regularization_lambda,
+            converge_epsilon=converge_epsilon
+        )
+        amplitude_results[:, low:high, :] = amplitude_batch
+        objective_results[:, low:high] = objective_batch
+
+    # pick the N best nodes to expand in detail
+
+    return amplitude_results, objective_results
+
+
 def greedy_template_match_time_shift(observed_ft: np.ndarray,
                                      ft_canonical: np.ndarray,
                                      valid_phase_shifts: np.ndarray,
@@ -751,6 +969,75 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
     pbar.update(1)
 
     return initialized_amplitudes, initialized_canonical_waveforms, intialized_delays, mse
+
+
+def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray,
+                                                initialized_canonical_waveforms: np.ndarray,
+                                                initialized_amplitudes: np.ndarray,
+                                                intialized_delays: np.ndarray,
+                                                valid_sample_shifts: np.ndarray,
+                                                n_iter: int,
+                                                device: torch.device,
+                                                l1_regularization_lambda: Optional[float] = None,
+                                                sobolev_regularization_lambda: Optional[float] = None) \
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    '''
+    Subroutine for main optimization iterations, with different steps
+        steps. Assumes all of the variables have been
+        properly initialized by any method
+
+    Order of the algorithm
+        (1) With fixed waveforms, solve for the amplitudes and timeshifts with
+            many parallel attempts at nonnegative least squares (with optional L1 regularization),
+            and picking the best set of timeshifts and amplitudes
+        (2) With fixed amplitudes and timeshifts, solve for the waveforms with
+            complex-valued least squares (with optional Sobolev gradient regularization)
+
+    :param waveform_data_matrix: np.ndarray, time domain data matrix, shape (n_observations, n_timepoints)
+    :param initialized_canonical_waveforms: np.ndarray, time domain canonical waveforms,
+        shape (n_canonical_waveforms, n_timepoints)
+    :param initialized_amplitudes: np.ndarray, initialized amplitudes, shape (n_observations, n_canonical_waveforms)
+    :param intialized_delays: np.ndarray, initialized delays, shape (n_observations, n_canonical_waveforms)
+    :param valid_sample_shifts: np.ndarray, valid sample shifts, shape (n_valid_sample_shifts)
+    :param n_iter: int, number of iterations of the optimization to run
+    :param device:
+    :param l1_regularization_lambda:
+    :param sobolev_regularization_lambda:
+    :return:
+    '''
+
+    n_observations, n_samples = waveform_data_matrix.shape
+    n_frequencies_not_rfft = n_samples
+
+    # compute the Fourier transform of the observed data once, ahead of time
+    # shape (n_observations, n_frequencies)
+    observations_fourier_transform = np.fft.rfft(waveform_data_matrix, axis=1)
+
+    print("Beginning optimization loop")
+    pbar = tqdm.tqdm(total=n_iter)
+
+    for iter_count in range(n_iter):
+        # within each iteration, we have a three step optimization
+        # (1) Given fixed canonical waveforms and integer shifts,
+        #       solve for real-valued amplitudes with nonnegative linear
+        #       least squares
+        # (2) Given fixed amplitudes and shifts, solve for waveforms in
+        #       frequency domain with unconstrained complex-valued
+        #       linear least squares
+        # (3) Given fixed amplitudes and waveforms, all-but-one deconvolve
+        #       to solve for the shifts
+        canonical_waveform_ft = np.fft.rfft(initialized_canonical_waveforms, axis=1)
+
+        coarse_to_fine_time_shifts_and_amplitudes(observations_fourier_transform,
+                                                  canonical_waveform_ft,
+                                                  n_frequencies_not_rfft,
+                                                  (-100, 100),
+                                                  5,
+                                                  5,
+                                                  device,
+                                                  l1_regularization_lambda=l1_regularization_lambda)
+
+    pass
 
 
 def shifted_fourier_nmf_iterative_optimization(waveform_data_matrix: np.ndarray,
