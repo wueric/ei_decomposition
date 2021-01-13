@@ -309,11 +309,10 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
 
     #### Step 1: build A^T A from circular cross correlation #####################################
     # this one depends on relative timing for each of the canonical waveforms, so a bit tricky
-    ft_canonical_conj = np.conjugate(ft_canonical)  # shape (n_canonical_waveforms, n_rfft_frequencies)
-    circular_conv_ft = ft_canonical[:, None, :] * ft_canonical_conj[None, :, :]
-    # shape (n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    circular_conv_td = np.fft.irfft(ft_canonical[:, None, :] * np.conjugate(ft_canonical[None, :, :]),
+                                    n=n_true_frequencies,
+                                    axis=2)
 
-    circular_conv_td = np.fft.irfft(circular_conv_ft, n=n_true_frequencies, axis=2)
     # shape (n_canonical_waveforms, n_canonical_waveforms, n_timepoints), axis 1 corresponds to the shifted waveforms
     # relative to axis 0 fixed waveforms
     # (i,j,t)^{th} entry corresponds to cross correlation of i^{th} canonical waveform with j^{th} canonical waveform
@@ -337,11 +336,11 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
 
     ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
     # this one depends on absolute timing so it is much easier to pack
-    data_circ_conv_ft = ft_canonical_conj[None, :, :] * observed_ft[:, None, :]
-    # shape (n_observations, n_canonical_waveforms, n_rfft_frequencies)
 
     # shape (n_observations, n_canonical_waveforms, n_timepoints)
-    data_circ_conv_td = np.fft.irfft(data_circ_conv_ft, n=n_true_frequencies, axis=2)
+    data_circ_conv_td = np.fft.irfft(observed_ft[:, None, :] * np.conjugate(ft_canonical[None, :, :]),
+                                     n=n_true_frequencies,
+                                     axis=2)
     # The (i,j,t)^{th} entry corresponds to cross correlation of the i^{th} data waveform with the j^{th} canonical
     #   waveform that has been delayed by t samples
 
@@ -487,9 +486,6 @@ def greedy_template_match_time_shift(observed_ft: np.ndarray,
     '''
     n_observations, _ = observed_ft.shape
     n_canonical_waveforms, n_rfft_frequencies = ft_canonical.shape
-
-    # shape (1, n_rfft_frequencies)
-    single_phase_shift_matrix = generate_fourier_phase_shift_matrices(np.array([-1]), n_true_frequencies)
 
     # shape (n_canonical_waveforms, n_rfft_frequencies)
     ft_canonical_time_reversed = np.conjugate(ft_canonical)  # * single_phase_shift_matrix
