@@ -1,6 +1,5 @@
 import visionloader as vl
 import numpy as np
-import scipy.interpolate as interpolate
 
 import torch
 
@@ -42,11 +41,18 @@ if __name__ == '__main__':
     normalized_axonic = ei_example[axonic_electrode, :] / np.linalg.norm(ei_example[axonic_electrode, :])
 
     upsampled_ei = bspline_upsample_waveforms(ei_to_fit, 5)
+    padded_ei = np.pad(upsampled_ei,
+                       [(0, 0), (100, 100)],
+                       mode='constant')
 
     basis_stacked = np.stack([normalized_axonic, normalized_somatic, normalized_dendritic], axis=0)
     basis_upsampled = bspline_upsample_waveforms(basis_stacked, 5)
 
-    n_canonical_waveforms, n_timepoints = basis_upsampled.shape
+    padded_upsampled = np.pad(basis_upsampled,
+                              [(0, 0), (100, 100)],
+                              mode='constant')
+
+    n_canonical_waveforms, n_timepoints = padded_upsampled.shape
 
     low_shift, high_shift = (-100, 100)
     shift_steps = np.r_[low_shift:high_shift:5]
@@ -58,14 +64,14 @@ if __name__ == '__main__':
 
     print("Running fit")
     amplitudes, objective_values = fast_time_shifts_and_amplitudes_shared_shifts(
-        np.fft.rfft(upsampled_ei, axis=1),
-        np.fft.rfft(basis_upsampled, axis=1),
+        np.fft.rfft(padded_ei, axis=1),
+        np.fft.rfft(padded_upsampled, axis=1),
         valid_phase_shifts_matrix,
         random_amplitudes,
         n_timepoints,
-        100,
+        10000,
         device,
-        7.5e-2
+        l1_regularization_lambda=7.5e-2
     )
 
     save_dict = {

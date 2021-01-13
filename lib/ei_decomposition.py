@@ -333,7 +333,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
         at_a_matrix_np[:, j, :] = taken_piece.transpose((1, 0))
 
     # shape (n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
-    at_a_matrix = torch.tensor(at_a_matrix_np)
+    at_a_matrix = torch.tensor(at_a_matrix_np, dtype=torch.float32, device=device)
 
     ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
     # this one depends on absolute timing so it is much easier to pack
@@ -391,9 +391,6 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
                                       min=0.0)
 
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
-        amplitudes = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
-
-        # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         at_a_x = (at_a_matrix[None, :, :, :] @ next_amplitudes[:, :, :, None]).squeeze(3)
 
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
@@ -416,7 +413,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
     xt_at_a_x = (amplitudes[:, :, None, :] @ at_a_x[:, :, :, None]).squeeze()
     xt_at_b = (amplitudes[:, :, None, :] @ at_b_torch[:, :, :, None]).squeeze()
 
-    partial_objective = 0.5 * xt_at_a_x + xt_at_b
+    partial_objective = 0.5 * xt_at_a_x - xt_at_b
 
     return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
 
