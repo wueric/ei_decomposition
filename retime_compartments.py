@@ -4,7 +4,7 @@ import argparse
 import pickle
 from typing import Dict, Tuple
 
-from lib.ei_decomposition import generate_fourier_phase_shift_matrices
+from lib.util_fns import generate_fourier_phase_shift_matrices
 
 ABS_MAX_FRAC = 0.05
 

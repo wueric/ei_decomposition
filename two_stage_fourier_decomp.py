@@ -18,13 +18,16 @@ if __name__ == '__main__':
     parser.add_argument('output', type=str, help='path to output pickle file')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--maxiter', '-m', type=int, default=25, help='maximum number of iterations to run')
-    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
-                        help='L1 regularization lambda for amplitudes')
+    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2, help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
                         help='L2 regularization for waveform second derivatives')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
+    parser.add_argument('--grid_step', type=int, default=5, help='step size for grid search')
+    parser.add_argument('--grid_top_n', type=int, default=4, help='top n for grid search')
+    parser.add_argument('--fine_search_width', type=int, default=2, help='width for fine search')
+    parser.add_argument('--grid_batch_size', type=int, default=8192, help='grid search batch size')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
     parser.add_argument('--cell_list', '-c', type=str, default=None,
                         help='Override cell_type argument, instead use cell ids in specified file')
@@ -55,7 +58,7 @@ if __name__ == '__main__':
 
     shift_tuple = (-args.before, args.after)
 
-    decomposition_dict, basis_waveforms, mse = ei_decomp.decompose_cells_by_fitted_compartment(
+    decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
         eis_by_cell_id,
         compute_device,
         n_basis_vectors=args.nbasis,
@@ -66,7 +69,11 @@ if __name__ == '__main__':
         output_debug_dict=False,
         shifts=shift_tuple,
         supersample_factor=args.upsample,
-        snr_abs_threshold=args.thresh
+        snr_abs_threshold=args.thresh,
+        grid_search_step=args.grid_step,
+        grid_search_top_n=args.grid_top_n,
+        fine_search_width=args.fine_search_width,
+        grid_search_batch_size=args.grid_batch_size
     )
 
     with open(args.output, 'wb') as joint_fit_file:

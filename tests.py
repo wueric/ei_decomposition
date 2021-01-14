@@ -11,8 +11,9 @@ import pickle
 
 import tqdm
 
-from lib.ei_decomposition import fast_time_shifts_and_amplitudes_shared_shifts, bspline_upsample_waveforms, \
+from lib.joint_amplitude_time_optimization import fast_time_shifts_and_amplitudes_shared_shifts, \
     coarse_to_fine_time_shifts_and_amplitudes
+from lib.util_fns import bspline_upsample_waveforms
 
 if __name__ == '__main__':
     device = torch.device('cuda')
@@ -74,7 +75,7 @@ if __name__ == '__main__':
         2,
         device,
         l1_regularization_lambda=7.5e-2,
-        max_batch_size=2048
+        max_batch_size=8192
     )
 
     save_dict = {
