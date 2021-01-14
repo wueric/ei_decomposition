@@ -268,8 +268,6 @@ def build_at_a_matrix(ft_canonical: np.ndarray,
     :return: batched A^T A matrix, shape (n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
     '''
 
-    n_canonical_waveforms, n_valid_phase_shifts = valid_phase_shifts.shape
-
     circular_corr_td = np.fft.irfft(ft_canonical[:, None, :] * np.conjugate(ft_canonical[None, :, :]),
                                     n=n_true_frequencies,
                                     axis=2)
@@ -282,18 +280,13 @@ def build_at_a_matrix(ft_canonical: np.ndarray,
 
     # now we have to build at_a matrix by grabbing the relevant pieces
     # not so straightforward, since we care about relative timing instead of absolute timing
-    at_a_matrix_np = np.zeros((n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms),
-                              dtype=np.float32)
 
-    for j in range(n_canonical_waveforms):
-        # shape (n_canonical_waveforms, n_valid_phase_shifts)
-        relative_shift = valid_phase_shifts - valid_phase_shifts[j, :][None, :]
+    # shape (n_canonical_waveforms, n_canonical_waveforms, n_valid_phase_shifts)
+    relative_shifts = valid_phase_shifts[None, :, :] - valid_phase_shifts[:, None, :]
 
-        # shape (n_canonical_waveforms, n_valid_phase_shifts)
-        taken_piece = np.take_along_axis(circular_corr_td[j, :, :], relative_shift[:, :], axis=1)
-
-        # shape (n_canonical_waveforms, n_valid_phase_shifts)
-        at_a_matrix_np[:, :, j] = taken_piece.transpose((1, 0))
+    # shape (n_canonical_waveforms, n_canonical_waveforms, n_valid_phase_shifts)
+    taken_piece = np.take_along_axis(circular_corr_td, relative_shifts, axis=2)
+    at_a_matrix_np = taken_piece.transpose((2, 0, 1))
 
     return at_a_matrix_np
 
@@ -342,7 +335,7 @@ def build_unshared_at_a_matrix(ft_canonical: np.ndarray,
 
     n_observations, n_canonical_waveforms, n_phase_shifts = unshared_phase_shifts.shape
 
-    # shape (n_canonical_waveforms, n_canonical_waveforms, n_true_frequencies)
+    # shape (n_canonical_waveforms, n_canonical_waveforms, n_timepoints)
     circular_corr_td = np.fft.irfft(ft_canonical[:, None, :] * np.conjugate(ft_canonical[None, :, :]),
                                     n=n_true_frequencies,
                                     axis=2)
@@ -351,13 +344,19 @@ def build_unshared_at_a_matrix(ft_canonical: np.ndarray,
                               dtype=np.float32)
 
     for j in range(n_canonical_waveforms):
-        # shape (n_observations, n_canonical_waveforms, n_valid_phase_shifts)
+        # shape (n_observations, n_canonical_waveforms, n_phase_shifts)
         unshared_relative_shift = unshared_phase_shifts - unshared_phase_shifts[:, j, :][:, None, :]
 
-        # shape (n_observations, n_canonical_waveforms, n_valid_phase_shifts)
-        taken_piece = np.take_along_axis(circular_corr_td[j, :, :], unshared_relative_shift[:, :, :], axis=1)
+        # shape (n_canonical_waveforms, n_observations * n_phase_shifts)
+        unshared_relative_shift_flat = unshared_relative_shift.transpose(1, 2, 0).reshape((n_canonical_waveforms, -1))
 
-        # shape (n_canonical_waveforms, n_valid_phase_shifts)
+        # shape (n_canonical_waveforms, n_observations * n_phase_shifts)
+        taken_piece_flat = np.take_along_axis(circular_corr_td[j, :, :], unshared_relative_shift_flat, axis=1)
+
+        # shape (n_observations, n_canonical_waveforms, n_phase_shifts)
+        taken_piece = taken_piece_flat.reshape(n_canonical_waveforms, n_phase_shifts, n_observations).transpose(2, 0, 1)
+
+        # shape (n_canonical_waveforms, n_phase_shifts)
         at_a_matrix_np[:, :, :, j] = taken_piece.transpose((0, 2, 1))
 
     return at_a_matrix_np
@@ -366,7 +365,7 @@ def build_unshared_at_a_matrix(ft_canonical: np.ndarray,
 def build_unshared_at_b_vector(observed_ft: np.ndarray,
                                ft_canonical: np.ndarray,
                                unshared_phase_shifts: np.ndarray,
-                               n_true_frequencies: int) -> np.ndarary:
+                               n_true_frequencies: int) -> np.ndarray:
     '''
 
     :param observed_ft: observed waveforms in Fourier domain, complex valued, shape (n_observations, n_rfft_frequencies)
@@ -448,7 +447,6 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
     # we make step_size smaller to be safe
     step_size = 1.0 / (2 * max_eigenvalue)  # has shape (n_observations, n_phase_shifts)
 
-
     ##### Step 4: do the projected gradient descent (no batching) ################################
     ##### This function assumes that the batching is taken care of by the caller #################
 
@@ -497,7 +495,6 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
     partial_objective = 0.5 * xt_at_a_x - xt_at_b
 
     return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
-
 
 
 def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
@@ -630,7 +627,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
                                               l1_regularization_lambda: Optional[float] = None,
                                               converge_epsilon: float = 1e-3,
                                               amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
-                                              max_batch_size: int = 2048) -> Tuple[np.ndarray, np.ndarray]:
+                                              max_batch_size: int = 8192) -> Tuple[np.ndarray, np.ndarray]:
     n_observations, _ = observed_ft.shape
     n_canonical_waveforms, n_rfft_frequencies = ft_canonical.shape
 
@@ -650,7 +647,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
     objective_results = np.zeros((n_observations, n_valid_phase_shifts), dtype=np.float32)
 
     print("First pass coarse search")
-    pbar = tqdm.tqdm(total=np.ceil(n_valid_phase_shifts / max_batch_size))
+    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)))
     for low in range(0, n_valid_phase_shifts, max_batch_size):
         high = min(n_valid_phase_shifts, low + max_batch_size)
 
@@ -661,7 +658,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
         amplitude_batch, objective_batch = fast_time_shifts_and_amplitudes_shared_shifts(
             observed_ft,
             ft_canonical,
-            valid_phase_shifts_matrix[low:high, :],
+            valid_phase_shifts_matrix[:, low:high],
             amplitudes_random_init,
             n_true_frequencies,
             10000,
@@ -672,13 +669,19 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
         amplitude_results[:, low:high, :] = amplitude_batch
         objective_results[:, low:high] = objective_batch
         pbar.update(1)
+    pbar.close()
 
     # pick the N best nodes to expand in detail
     # shape (n_observations, second_pass_best_n)
     partition_idx = np.argpartition(objective_results, second_pass_best_n, axis=1)[:, :second_pass_best_n]
 
-    # shape (n_observations, n_canonical_waveforms, second_pass_best_n)
-    best_phases = np.take_along_axis(valid_phase_shifts_matrix[None, :, :], partition_idx, axis=1)
+    # shape (n_observations * second_pass_best_n, )
+    partition_idx_flat = partition_idx.reshape((-1,))
+
+    # shape (n_canonical_waveforms, n_observations * second_pass_best_n)
+    best_phases_flat = valid_phase_shifts_matrix[:, partition_idx_flat]
+    best_phases = best_phases_flat.reshape((n_canonical_waveforms, n_observations, second_pass_best_n)).transpose(
+        (1, 0, 2))
 
     #### Do the fine search ###################################################
 
@@ -687,20 +690,20 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
     # define n_fine_phases = (1 + 2 * second_pass_width)^n_canonical_waveforms
     # shape (n_canonical_waveforms, n_fine_phases)
     second_pass_mg = np.stack(np.meshgrid(*[second_pass_fine_steps for _ in range(n_canonical_waveforms)]), axis=0)
+    second_pass_mg_flat = second_pass_mg.reshape((second_pass_mg.shape[0], -1))
 
     # shape (n_observations, n_canonical_waveforms, n_fine_phases, second_past_best_n)
-    next_iter_phases = best_phases[:,:,None,:] + second_pass_mg[None,:,:,None]
+    next_iter_phases = best_phases[:, :, None, :] + second_pass_mg_flat[None, :, :, None]
 
     # shape (n_observations, n_canonical_waveforms, second_pass_best_n * n_fine_phases)
     next_iter_phases_flat = next_iter_phases.reshape((n_observations, n_canonical_waveforms, -1))
-
     n_second_pass_shifts = next_iter_phases_flat.shape[2]
 
     amplitude_results = np.zeros((n_observations, n_second_pass_shifts, n_canonical_waveforms),
                                  dtype=np.float32)
     objective_results = np.zeros((n_observations, n_second_pass_shifts), dtype=np.float32)
     print("Second pass fine grained search")
-    pbar = tqdm.tqdm(total=np.ceil(n_second_pass_shifts / max_batch_size))
+    pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)))
     for low in range(0, n_second_pass_shifts, max_batch_size):
         high = min(n_second_pass_shifts, low + max_batch_size)
 
@@ -711,7 +714,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
         amplitude_batch, objective_batch = fast_time_shifts_and_amplitudes_unshared_shifts(
             observed_ft,
             ft_canonical,
-            next_iter_phases[:,:,low:high],
+            next_iter_phases_flat[:, :, low:high],
             amplitudes_random_init,
             n_true_frequencies,
             10000,
@@ -722,12 +725,13 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
         amplitude_results[:, low:high, :] = amplitude_batch
         objective_results[:, low:high] = objective_batch
         pbar.update(1)
+    pbar.close()
 
     #### Now pick the best objective value for each observed waveform ########################
-    best_objective = np.argmin(objective_results, axis=1) # shape (n_observations, )
+    best_objective = np.argmin(objective_results, axis=1)  # shape (n_observations, )
 
-    best_amplitudes = np.take_along_axis(objective_results, best_objective, axis=1)
-    best_shifts = np.take_along_axis(next_iter_phases_flat, best_objective, axis=2)
+    best_amplitudes = np.take_along_axis(amplitude_results, best_objective[:, None, None], axis=1).squeeze(1)
+    best_shifts = np.take_along_axis(next_iter_phases_flat, best_objective[:, None, None], axis=2).squeeze(2)
 
     return best_amplitudes, best_shifts
 
