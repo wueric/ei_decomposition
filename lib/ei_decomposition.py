@@ -256,17 +256,69 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     return soln_real_seg + 1j * soln_imag_seg
 
 
-def fast_time_shifts_and_amplitudes_unique_shifts(observed_ft: np.ndarray,
-                                                  ft_canonical: np.ndarray,
-                                                  unique_phase_shifts: np.ndarray,
-                                                  amplitude_matrix_real_np: np.ndarray,
-                                                  n_true_frequencies,
-                                                  max_iter: int,
-                                                  device: torch.device,
-                                                  l1_regularization_lambda: Optional[float] = None,
-                                                  convergence_epsilon: float = 1e-3) \
-        -> Tuple[np.ndarray, np.ndarray]:
-    pass
+def build_at_a_matrix (ft_canonical: np.ndarray,
+                       valid_phase_shifts: np.ndarray,
+                       n_true_frequencies: int) -> np.ndarray:
+
+    '''
+
+    :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
+            shape (n_canonical_waveforms, n_rfft_frequencies)
+    :param valid_phase_shifts: integer array, shape (n_canonical_waveforms, n_valid_phase_shifts)
+    :param n_true_frequencies: int
+    :return: batched A^T A matrix, shape (n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    '''
+
+    n_canonical_waveforms, n_valid_phase_shifts = valid_phase_shifts.shape
+
+    circular_corr_td = np.fft.irfft(ft_canonical[:, None, :] * np.conjugate(ft_canonical[None, :, :]),
+                                    n=n_true_frequencies,
+                                    axis=2)
+
+    # shape (n_canonical_waveforms, n_canonical_waveforms, n_timepoints), axis 1 corresponds to the shifted waveforms
+    # relative to axis 0 fixed waveforms
+    # (i,j,t)^{th} entry corresponds to cross correlation of i^{th} canonical waveform with j^{th} canonical waveform
+    #   that has been delayed by t samples
+    # This means that circular_conv_td is not symmetric for dims (0, 1)
+
+    # now we have to build at_a matrix by grabbing the relevant pieces
+    # not so straightforward, since we care about relative timing instead of absolute timing
+    at_a_matrix_np = np.zeros((n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms),
+                              dtype=np.float32)
+
+    for j in range(n_canonical_waveforms):
+        # shape (n_canonical_waveforms, n_valid_phase_shifts)
+        relative_shift = valid_phase_shifts - valid_phase_shifts[j, :][None, :]
+
+        # shape (n_canonical_waveforms, n_valid_phase_shifts)
+        taken_piece = np.take_along_axis(circular_corr_td[j, :, :], relative_shift[:, :], axis=1)
+
+        # shape (n_canonical_waveforms, n_valid_phase_shifts)
+        at_a_matrix_np[:, :, j] = taken_piece.transpose((1, 0))
+
+    return at_a_matrix_np
+
+
+def build_at_b_vector (observed_ft : np.ndarray,
+                       ft_canonical : np.ndarray,
+                       valid_phase_shifts: np.ndarray,
+                       n_true_frequencies : int) -> np.ndarray:
+
+    # shape (n_observations, n_canonical_waveforms, n_timepoints)
+    data_circ_conv_td = np.fft.irfft(observed_ft[:, None, :] * np.conjugate(ft_canonical[None, :, :]),
+                                     n=n_true_frequencies,
+                                     axis=2)
+    # The (i,j,t)^{th} entry corresponds to cross correlation of the i^{th} data waveform with the j^{th} canonical
+    #   waveform that has been delayed by t samples
+
+    # we have to build A^T b from this matrix
+    # shape (n_observations, n_canonical_waveforms, n_phase_shifts)
+    at_b_perm = np.take_along_axis(data_circ_conv_td, valid_phase_shifts[None, :, :], axis=2)
+
+    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    at_b_np = at_b_perm.transpose((0, 2, 1))
+
+    return at_b_np
 
 
 def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
@@ -287,7 +339,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
 
     Notation for the below function
 
-        objective fn is 1/2 |Ax-b|^2 = 1/2 (Ax-b)^T (Ax-b)
+        objective fn is 1/2 |Ax-b|^2 = 1/2 (Ax-b)^T (Ax-b) = 1/2 x^T A^T A x - x^T A^T b - 1/2 b^T b
         gradient is A^T A x - A^T b
 
     Implementation notes:
@@ -304,52 +356,20 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
     :return:
     '''
 
-    n_observations, n_rfft_frequencies = observed_ft.shape
     n_canonical_waveforms, n_valid_phase_shifts = valid_phase_shifts.shape
 
     #### Step 1: build A^T A from circular cross correlation #####################################
-    # this one depends on relative timing for each of the canonical waveforms, so a bit tricky
-    circular_conv_td = np.fft.irfft(ft_canonical[:, None, :] * np.conjugate(ft_canonical[None, :, :]),
-                                    n=n_true_frequencies,
-                                    axis=2)
 
-    # shape (n_canonical_waveforms, n_canonical_waveforms, n_timepoints), axis 1 corresponds to the shifted waveforms
-    # relative to axis 0 fixed waveforms
-    # (i,j,t)^{th} entry corresponds to cross correlation of i^{th} canonical waveform with j^{th} canonical waveform
-    #   that has been delayed by t samples
-    # This means that circular_conv_td is not symmetric for dims (0, 1)
-
-    # now we have to build at_a matrix by grabbing the relevant pieces
-    # not so straightforward, since we care about relative timing instead of absolute timing
-    at_a_matrix_np = np.zeros((n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms),
-                              dtype=np.float32)
-    for j in range(n_canonical_waveforms):
-        relative_shift = valid_phase_shifts - valid_phase_shifts[j, :][None, :]
-        # shape (n_canonical_waveforms, n_valid_phase_shifts)
-
-        taken_piece = np.take_along_axis(circular_conv_td[j, :, :], relative_shift[:, :], axis=1)
-        # shape (n_canonical_waveforms, n_valid_phase_shifts)
-        at_a_matrix_np[:, j, :] = taken_piece.transpose((1, 0))
+    # shape (n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    at_a_matrix_np = build_at_a_matrix(ft_canonical, valid_phase_shifts, n_true_frequencies)
 
     # shape (n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
     at_a_matrix = torch.tensor(at_a_matrix_np, dtype=torch.float32, device=device)
 
     ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
     # this one depends on absolute timing so it is much easier to pack
-
-    # shape (n_observations, n_canonical_waveforms, n_timepoints)
-    data_circ_conv_td = np.fft.irfft(observed_ft[:, None, :] * np.conjugate(ft_canonical[None, :, :]),
-                                     n=n_true_frequencies,
-                                     axis=2)
-    # The (i,j,t)^{th} entry corresponds to cross correlation of the i^{th} data waveform with the j^{th} canonical
-    #   waveform that has been delayed by t samples
-
-    # we have to build A^T b from this matrix
-    # shape (n_observations, n_canonical_waveforms, n_phase_shifts)
-    at_b_perm = np.take_along_axis(data_circ_conv_td, valid_phase_shifts[None, :, :], axis=2)
-
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
-    at_b_np = at_b_perm.transpose((0, 2, 1))
+    at_b_np = build_at_b_vector(observed_ft, ft_canonical, valid_phase_shifts, n_true_frequencies)
 
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
     at_b_torch = torch.tensor(at_b_np, dtype=torch.float32, device=device)
@@ -375,11 +395,13 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
     amplitudes = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
 
-    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms, 1)
-    at_a_x = at_a_matrix[None, :, :, :] @ amplitudes[:, :, :, None]
+    # at_a_x has shape (n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
 
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
-    gradient = at_a_x.squeeze(3) - at_b_torch
+    at_a_x = (at_a_matrix[None, :, :, :] @ amplitudes[:, :, :, None]).squeeze(3)
+
+    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    gradient = at_a_x - at_b_torch
     if l1_regularization_lambda is not None:
         gradient += l1_regularization_lambda
 
@@ -400,7 +422,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
         step_distance = next_amplitudes - amplitudes
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         step_distance = torch.sum(step_distance * step_distance, dim=2)  # shape (n_observations, n_valid_phase_shifts)
-        convergence_bound = convergence_factor * step_distance  # shape (n_observations, n_valid_phase_shifts)
+        convergence_bound = convergence_factor[None, :] * step_distance  # shape (n_observations, n_valid_phase_shifts)
         worst_bound = torch.max(convergence_bound).item()
 
         amplitudes = next_amplitudes
