@@ -11,7 +11,8 @@ import pickle
 
 import tqdm
 
-from lib.ei_decomposition import fast_time_shifts_and_amplitudes_shared_shifts, bspline_upsample_waveforms
+from lib.ei_decomposition import fast_time_shifts_and_amplitudes_shared_shifts, bspline_upsample_waveforms, \
+    coarse_to_fine_time_shifts_and_amplitudes
 
 if __name__ == '__main__':
     device = torch.device('cuda')
@@ -63,21 +64,22 @@ if __name__ == '__main__':
                                           size=(512, valid_phase_shifts_matrix.shape[1], n_canonical_waveforms))
 
     print("Running fit")
-    amplitudes, objective_values = fast_time_shifts_and_amplitudes_shared_shifts(
+    amplitudes, phases = coarse_to_fine_time_shifts_and_amplitudes(
         np.fft.rfft(padded_ei, axis=1),
         np.fft.rfft(padded_upsampled, axis=1),
-        valid_phase_shifts_matrix,
-        random_amplitudes,
         n_timepoints,
-        10000,
+        (-100, 100),
+        5,
+        5,
+        2,
         device,
-        l1_regularization_lambda=7.5e-2
+        l1_regularization_lambda=7.5e-2,
+        max_batch_size=2048
     )
 
     save_dict = {
         'basis': basis_upsampled,
-        'objective': objective_values,
-        'shifts': shift_steps,
+        'shifts': phases,
         'weights': amplitudes
     }
 
