@@ -271,6 +271,7 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
                                    iter_delays,
                                    n_frequencies_not_rfft)
 
+        pbar.set_postfix({'MSE': mse})
         pbar.update(1)
 
     return iter_real_amplitudes, iter_canonical_waveform_td, iter_delays, mse

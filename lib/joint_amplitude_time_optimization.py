@@ -425,7 +425,6 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
                                  dtype=np.float32)
     objective_results = np.zeros((n_observations, n_valid_phase_shifts), dtype=np.float32)
 
-    print("First pass coarse search")
     pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False)
     for low in range(0, n_valid_phase_shifts, max_batch_size):
         high = min(n_valid_phase_shifts, low + max_batch_size)
@@ -481,7 +480,6 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
     amplitude_results = np.zeros((n_observations, n_second_pass_shifts, n_canonical_waveforms),
                                  dtype=np.float32)
     objective_results = np.zeros((n_observations, n_second_pass_shifts), dtype=np.float32)
-    print("Second pass fine grained search")
     pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)), leave=False)
     for low in range(0, n_second_pass_shifts, max_batch_size):
         high = min(n_second_pass_shifts, low + max_batch_size)
