@@ -216,7 +216,7 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
     iter_canonical_waveform_ft = np.fft.rfft(initialized_canonical_waveforms, axis=1)
 
     print("Beginning optimization loop")
-    pbar = tqdm.tqdm(total=n_iter)
+    pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization')
     for iter_count in range(n_iter):
         # within each iteration, we have a three step optimization
         # (1) Given fixed canonical waveforms,

@@ -89,6 +89,7 @@ def build_unshared_at_a_matrix(ft_canonical: np.ndarray,
                                     n=n_true_frequencies,
                                     axis=2)
 
+    # shape (n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
     at_a_matrix_np = np.zeros((n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms),
                               dtype=np.float32)
 
@@ -425,7 +426,9 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
                                  dtype=np.float32)
     objective_results = np.zeros((n_observations, n_valid_phase_shifts), dtype=np.float32)
 
-    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False)
+    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)),
+                     leave=False,
+                     desc='First pass grid search')
     for low in range(0, n_valid_phase_shifts, max_batch_size):
         high = min(n_valid_phase_shifts, low + max_batch_size)
 
@@ -480,7 +483,9 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
     amplitude_results = np.zeros((n_observations, n_second_pass_shifts, n_canonical_waveforms),
                                  dtype=np.float32)
     objective_results = np.zeros((n_observations, n_second_pass_shifts), dtype=np.float32)
-    pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)), leave=False)
+    pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)),
+                     leave=False,
+                     desc='Second pass fine search')
     for low in range(0, n_second_pass_shifts, max_batch_size):
         high = min(n_second_pass_shifts, low + max_batch_size)
 
