@@ -43,12 +43,10 @@ if __name__ == '__main__':
     if args.cell_list is not None:
 
         with open(args.cell_list, 'r') as cell_id_file:
-            cell_id_list = []
-            for line in cell_id_file.readlines():
-                cell_id = int(line.strip('\n'))
-                cell_id_list.append(cell_id)
-
+            cell_id_list = list(
+                map(lambda x: int(x), cell_id_file.readline().strip('\n').split(',')))
         eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
+
     else:
         cell_id_list = dataset.get_all_cells_of_type(args.cell_type)
         eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
