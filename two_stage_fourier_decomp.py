@@ -31,6 +31,7 @@ if __name__ == '__main__':
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
     parser.add_argument('--cell_list', '-c', type=str, default=None,
                         help='Override cell_type argument, instead use cell ids in specified file')
+    parser.add_argument('--renormalize', '-r', action='store_true', default=False, help='renormalize data waveforms')
 
     args = parser.parse_args()
 
@@ -63,7 +64,7 @@ if __name__ == '__main__':
         maxiter_decomp=args.maxiter,
         l1_regularize_lambda=args.weight_reg,
         sobolev_regularize_lambda=args.sobolev_reg,
-        renormalize_data_waveforms=True,
+        renormalize_data_waveforms=args.renormalize,
         output_debug_dict=False,
         shifts=shift_tuple,
         supersample_factor=args.upsample,
