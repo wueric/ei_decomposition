@@ -150,7 +150,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
                                                     n_true_frequencies: int,
                                                     max_iter: int,
                                                     device: torch.device,
-                                                    l1_regularization_lambda: Optional[float] = None,
+                                                    l1_regularization_lambda: Optional[np.ndarray] = None,
                                                     converge_epsilon: float = 1e-3,
                                                     include_l1_penalty_in_final_obj: bool = False) \
         -> Tuple[np.ndarray, np.ndarray]:
@@ -168,6 +168,11 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
     :param converge_epsilon:
     :return:
     '''
+
+    l1_regularization_lambda_torch = None
+    if l1_regularization_lambda is not None:
+        # shape (n_observations, )
+        l1_regularization_lambda_torch = torch.tensor(l1_regularization_lambda, dtype=torch.float32, device=device)
 
     ##### Generate the appropriate A^T A matrices and A^T b vectors ###########################################
 
@@ -212,7 +217,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
     gradient = at_a_x - unshared_at_b_vector
     if l1_regularization_lambda is not None:
-        gradient += l1_regularization_lambda
+        gradient += l1_regularization_lambda_torch[:, None, None]
 
     for step_num in range(max_iter):
 
@@ -226,7 +231,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         gradient = at_a_x - unshared_at_b_vector
         if l1_regularization_lambda is not None:
-            gradient += l1_regularization_lambda
+            gradient += l1_regularization_lambda_torch[:, None, None]
 
         step_distance = next_amplitudes - amplitudes
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
@@ -247,7 +252,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
 
     if include_l1_penalty_in_final_obj:
         # shape (n_observations, n_valid_phase_shifts)
-        l1_obj_penalties = l1_regularization_lambda * torch.sum(amplitudes, dim=2)
+        l1_obj_penalties = l1_regularization_lambda[:, None] * torch.sum(amplitudes, dim=2)
         partial_objective = partial_objective + l1_obj_penalties
 
     return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
@@ -260,7 +265,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
                                                   n_true_frequencies: int,
                                                   max_iter: int,
                                                   device: torch.device,
-                                                  l1_regularization_lambda: Optional[float] = None,
+                                                  l1_regularization_lambda: Optional[np.ndarray] = None,
                                                   converge_epsilon: float = 1e-3,
                                                   include_l1_penalty_in_final_obj: bool = False) \
         -> Tuple[np.ndarray, np.ndarray]:
@@ -291,6 +296,12 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
     '''
 
     n_canonical_waveforms, n_valid_phase_shifts = valid_phase_shifts.shape
+
+    #### Step 0: Set up regularization if necessary ##############################################
+    l1_regularization_lambda_torch = None
+    if l1_regularization_lambda is not None:
+        # shape (n_observations, )
+        l1_regularization_lambda_torch = torch.tensor(l1_regularization_lambda, dtype=torch.float32, device=device)
 
     #### Step 1: build A^T A from circular cross correlation #####################################
 
@@ -329,15 +340,14 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
     amplitudes = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
 
-    # at_a_x has shape (n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
-
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
     at_a_x = (at_a_matrix[None, :, :, :] @ amplitudes[:, :, :, None]).squeeze(3)
 
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
     gradient = at_a_x - at_b_torch
     if l1_regularization_lambda is not None:
-        gradient += l1_regularization_lambda
+        # l1_regularization_lambda has shape (n_observations, )
+        gradient += l1_regularization_lambda_torch[:, None, None]
 
     for step_num in range(max_iter):
 
@@ -351,7 +361,8 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         gradient = at_a_x - at_b_torch
         if l1_regularization_lambda is not None:
-            gradient += l1_regularization_lambda
+            # l1_regularization_lambda has shape (n_observations, )
+            gradient += l1_regularization_lambda_torch[:, None, None]
 
         step_distance = next_amplitudes - amplitudes
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
@@ -372,7 +383,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
 
     if include_l1_penalty_in_final_obj:
         # shape (n_observations, n_valid_phase_shifts)
-        l1_obj_penalties = l1_regularization_lambda * torch.sum(amplitudes, dim=2)
+        l1_obj_penalties = l1_regularization_lambda_torch[:, None] * torch.sum(amplitudes, dim=2)
         partial_objective = partial_objective + l1_obj_penalties
 
     return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
@@ -386,7 +397,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
                                               second_pass_best_n: int,
                                               second_pass_width: int,
                                               device: torch.device,
-                                              l1_regularization_lambda: Optional[float] = None,
+                                              l1_regularization_lambda: Optional[np.ndarray] = None,
                                               converge_epsilon: float = 1e-3,
                                               amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
                                               max_batch_size: int = 8192,

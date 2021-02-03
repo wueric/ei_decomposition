@@ -181,7 +181,7 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
                                                 n_iter: int,
                                                 device: torch.device,
                                                 max_batch_size=8192,
-                                                l1_regularization_lambda: Optional[float] = None,
+                                                l1_regularization_lambda: Optional[np.ndarray] = None,
                                                 sobolev_regularization_lambda: Optional[float] = None,
                                                 include_l1_penalty_in_final_obj : bool = False) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
@@ -580,9 +580,15 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
 
     n_observations, n_samples = padded_channels_sufficient_magnitude.shape
 
-    if renormalize_data_waveforms:
-        mag_padded = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
-        padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:, None]
+    mag_padded = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
+    padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:, None]
+
+    lambda_l1_renormalize_vector = None
+    if l1_regularize_lambda is not None:
+        if renormalize_data_waveforms:
+            lambda_l1_renormalize_vector = l1_regularize_lambda / mag_padded
+        else:
+            lambda_l1_renormalize_vector = l1_regularize_lambda * np.ones((n_observations, ), dtype=np.float32)
 
     if n_basis_vectors is not None:
         # have to randomly initialize basis waveforms
@@ -599,8 +605,6 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
                                              [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                              mode='constant')
 
-
-
     amplitudes, waveforms, delays, mse = shifted_fourier_nmf_iterative_optimization3(
         padded_channels_sufficient_magnitude,
         init_basis,
@@ -612,13 +616,12 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         maxiter_decomp,
         device,
         max_batch_size=grid_search_batch_size,
-        l1_regularization_lambda=l1_regularize_lambda,
+        l1_regularization_lambda=lambda_l1_renormalize_vector,
         sobolev_regularization_lambda=sobolev_regularize_lambda,
         include_l1_penalty_in_final_obj=include_l1_penalty_in_final_obj
     )
 
-    if renormalize_data_waveforms:
-        amplitudes = mag_padded[:, None] * amplitudes
+    amplitudes = mag_padded[:, None] * amplitudes
 
     # now unpack the results
     result_dict = unpack_amplitudes_and_phases_into_ei_shape(amplitudes,
