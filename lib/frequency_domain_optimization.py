@@ -11,7 +11,9 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
                                                       ft_complex_observations_np: np.ndarray,
                                                       n_true_frequencies: int,
                                                       device: torch.device,
-                                                      sobolev_lambda: Optional[float] = None) -> np.ndarray:
+                                                      sobolev_lambda: Optional[float] = None,
+                                                      observation_loss_weight: Optional[
+                                                          np.ndarray] = None) -> np.ndarray:
     '''
 
     :param amplitude_matrix_real_np: real-valued amplitudes for each observation, each shifted canonical waveform,
@@ -26,6 +28,10 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     :return: tuple of real component, imaginary component of canonical waveform Fourier transform
         each has shape (n_canonical_waveforms, n_rfft_frequencies)
     '''
+
+    if observation_loss_weight is not None:
+        amplitude_matrix_real_np = amplitude_matrix_real_np * observation_loss_weight[:, None]
+        ft_complex_observations_np = ft_complex_observations_np * observation_loss_weight[:, None]
 
     n_observations, n_canonical_waveforms = amplitude_matrix_real_np.shape
     _, n_rfft_frequencies = ft_complex_observations_np.shape

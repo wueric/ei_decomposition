@@ -182,8 +182,9 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
                                                 device: torch.device,
                                                 max_batch_size=8192,
                                                 l1_regularization_lambda: Optional[np.ndarray] = None,
+                                                waveform_observation_loss_weight: Optional[np.ndarray] = None,
                                                 sobolev_regularization_lambda: Optional[float] = None,
-                                                include_l1_penalty_in_final_obj : bool = False) \
+                                                include_l1_penalty_in_final_obj: bool = False) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     '''
     Main iteration loop for the two-step (as opposed to three-step) optimization process. Optimization steps are
@@ -251,6 +252,7 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
             n_frequencies_not_rfft,
             device,
             sobolev_lambda=sobolev_regularization_lambda,
+            observation_loss_weight=waveform_observation_loss_weight
         )
 
         # real valued np.ndarray, shape (n_canonical_waveforms, n_samples)
@@ -551,7 +553,8 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
                                                     fine_search_width: int = 2,
                                                     grid_search_batch_size: int = 8192,
                                                     maxiter_decomp: int = 25,
-                                                    renormalize_data_waveforms: bool = True,
+                                                    renormalize_data_waveforms_amplitude_fit: bool = True,
+                                                    renormalize_data_waveforms_waveform_fit: bool = True,
                                                     l1_regularize_lambda: Optional[float] = None,
                                                     sobolev_regularize_lambda: Optional[float] = None,
                                                     output_debug_dict: bool = False,
@@ -585,15 +588,15 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
 
     lambda_l1_renormalize_vector = None
     if l1_regularize_lambda is not None:
-        if renormalize_data_waveforms:
+        if renormalize_data_waveforms_amplitude_fit:
             lambda_l1_renormalize_vector = l1_regularize_lambda / mag_padded
         else:
-            lambda_l1_renormalize_vector = l1_regularize_lambda * np.ones((n_observations, ), dtype=np.float32)
+            lambda_l1_renormalize_vector = l1_regularize_lambda * np.ones((n_observations,), dtype=np.float32)
 
     if n_basis_vectors is not None:
         # have to randomly initialize basis waveforms
         init_basis = np.zeros((n_basis_vectors, n_samples),
-                                     dtype=np.float32)
+                              dtype=np.float32)
         rand_choice_data_waveform = np.random.randint(0, n_observations, size=n_basis_vectors)
         init_basis[:, :] = padded_channels_sufficient_magnitude[rand_choice_data_waveform, :]
         init_basis = init_basis / np.linalg.norm(init_basis, axis=1, keepdims=True)
@@ -603,8 +606,8 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         # also need to supersample and pad the initial basis waveforms
         bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
         init_basis = np.pad(bspline_supersampled_basis,
-                                             [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
-                                             mode='constant')
+                            [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
+                            mode='constant')
         init_basis = init_basis / np.linalg.norm(init_basis, axis=1, keepdims=True)
 
     amplitudes, waveforms, delays, mse = shifted_fourier_nmf_iterative_optimization3(
@@ -620,7 +623,8 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         max_batch_size=grid_search_batch_size,
         l1_regularization_lambda=lambda_l1_renormalize_vector,
         sobolev_regularization_lambda=sobolev_regularize_lambda,
-        include_l1_penalty_in_final_obj=include_l1_penalty_in_final_obj
+        include_l1_penalty_in_final_obj=include_l1_penalty_in_final_obj,
+        waveform_observation_loss_weight=(None if renormalize_data_waveforms_waveform_fit else mag_padded)
     )
 
     amplitudes = mag_padded[:, None] * amplitudes
