@@ -596,6 +596,7 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
                                      dtype=np.float32)
         rand_choice_data_waveform = np.random.randint(0, n_observations, size=n_basis_vectors)
         init_basis[:, :] = padded_channels_sufficient_magnitude[rand_choice_data_waveform, :]
+        init_basis = init_basis / np.linalg.norm(init_basis, axis=1, keepdims=True)
 
     else:
 
@@ -604,6 +605,7 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         init_basis = np.pad(bspline_supersampled_basis,
                                              [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                              mode='constant')
+        init_basis = init_basis / np.linalg.norm(init_basis, axis=1, keepdims=True)
 
     amplitudes, waveforms, delays, mse = shifted_fourier_nmf_iterative_optimization3(
         padded_channels_sufficient_magnitude,

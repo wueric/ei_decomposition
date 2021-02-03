@@ -8,7 +8,6 @@ if __name__ == '__main__':
 
     parser.add_argument('ds_path', type=str, help='path to Vision dataset')
     parser.add_argument('ds_name', type=str, help='name of Vision dataset')
-    parser.add_argument('cell_type', type=str, help='cell type of interest')
     parser.add_argument('basis_pickle', type=str, help='path to input pickle file')
     parser.add_argument('--cell_id', '-c', type=int, help='cell id')
     parser.add_argument('--electrodes', '-e', type=int, nargs='+', help='electrodes')
