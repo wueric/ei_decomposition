@@ -34,6 +34,7 @@ if __name__ == '__main__':
     parser.add_argument('--renormalize', '-r', action='store_true', default=False, help='renormalize data waveforms')
     parser.add_argument('--select_by_l1', '-d', action='store_true', default=False,
                         help='include L1 regularization when picking best search candidates')
+    parser.add_argument('--initialize_basis', '-i', type=str, default=None, help='path to initialized basis')
 
     args = parser.parse_args()
 
@@ -57,26 +58,56 @@ if __name__ == '__main__':
         cell_id_list = dataset.get_all_cells_of_type(args.cell_type)
         eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
 
+    # use the initialized basis if specified, otherwise specify the number of basis vectors
+    initial_basis = None
+    if args.initialize_basis is not None:
+        with open(args.initialize_basis, 'rb') as pfile:
+
+            basis_dict = pickle.load(pfile)
+            initial_basis = basis_dict['basis']
+
+
     shift_tuple = (-args.before, args.after)
 
-    decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
-        eis_by_cell_id,
-        compute_device,
-        n_basis_vectors=args.nbasis,
-        maxiter_decomp=args.maxiter,
-        l1_regularize_lambda=args.weight_reg,
-        sobolev_regularize_lambda=args.sobolev_reg,
-        renormalize_data_waveforms=args.renormalize,
-        output_debug_dict=False,
-        shifts=shift_tuple,
-        supersample_factor=args.upsample,
-        snr_abs_threshold=args.thresh,
-        grid_search_step=args.grid_step,
-        grid_search_top_n=args.grid_top_n,
-        fine_search_width=args.fine_search_width,
-        grid_search_batch_size=args.grid_batch_size,
-        include_l1_penalty_in_final_obj=args.select_by_l1
-    )
+    if initial_basis is None:
+        decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
+            eis_by_cell_id,
+            compute_device,
+            n_basis_vectors=args.nbasis,
+            maxiter_decomp=args.maxiter,
+            l1_regularize_lambda=args.weight_reg,
+            sobolev_regularize_lambda=args.sobolev_reg,
+            renormalize_data_waveforms=args.renormalize,
+            output_debug_dict=False,
+            shifts=shift_tuple,
+            supersample_factor=args.upsample,
+            snr_abs_threshold=args.thresh,
+            grid_search_step=args.grid_step,
+            grid_search_top_n=args.grid_top_n,
+            fine_search_width=args.fine_search_width,
+            grid_search_batch_size=args.grid_batch_size,
+            include_l1_penalty_in_final_obj=args.select_by_l1
+        )
+    else:
+        decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
+            eis_by_cell_id,
+            compute_device,
+            initialized_basis_vectors=initial_basis,
+            maxiter_decomp=args.maxiter,
+            l1_regularize_lambda=args.weight_reg,
+            sobolev_regularize_lambda=args.sobolev_reg,
+            renormalize_data_waveforms=args.renormalize,
+            output_debug_dict=False,
+            shifts=shift_tuple,
+            supersample_factor=args.upsample,
+            snr_abs_threshold=args.thresh,
+            grid_search_step=args.grid_step,
+            grid_search_top_n=args.grid_top_n,
+            fine_search_width=args.fine_search_width,
+            grid_search_batch_size=args.grid_batch_size,
+            include_l1_penalty_in_final_obj=args.select_by_l1
+        )
+
 
     with open(args.output, 'wb') as joint_fit_file:
         metadata_dict = {
