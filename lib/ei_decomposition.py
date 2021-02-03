@@ -182,7 +182,8 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
                                                 device: torch.device,
                                                 max_batch_size=8192,
                                                 l1_regularization_lambda: Optional[float] = None,
-                                                sobolev_regularization_lambda: Optional[float] = None) \
+                                                sobolev_regularization_lambda: Optional[float] = None,
+                                                include_l1_penalty_in_final_obj : bool = False) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     '''
     Main iteration loop for the two-step (as opposed to three-step) optimization process. Optimization steps are
@@ -237,7 +238,8 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
             device,
             l1_regularization_lambda=l1_regularization_lambda,
             amplitude_initialize_range=amplitude_init_range,
-            max_batch_size=max_batch_size
+            max_batch_size=max_batch_size,
+            include_l1_penalty_in_final_obj=include_l1_penalty_in_final_obj
         )
 
         # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
@@ -248,7 +250,7 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
             observations_fourier_transform,
             n_frequencies_not_rfft,
             device,
-            sobolev_lambda=sobolev_regularization_lambda
+            sobolev_lambda=sobolev_regularization_lambda,
         )
 
         # real valued np.ndarray, shape (n_canonical_waveforms, n_samples)
@@ -552,7 +554,8 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
                                                     renormalize_data_waveforms: bool = True,
                                                     l1_regularize_lambda: Optional[float] = None,
                                                     sobolev_regularize_lambda: Optional[float] = None,
-                                                    output_debug_dict: bool = False) \
+                                                    output_debug_dict: bool = False,
+                                                    include_l1_penalty_in_final_obj: bool = False) \
         -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, float],
                  Tuple[Dict[int, EIDecomposition], np.ndarray, float, Dict[str, np.ndarray]]]:
     # check the inputs for correctness
@@ -610,7 +613,8 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         device,
         max_batch_size=grid_search_batch_size,
         l1_regularization_lambda=l1_regularize_lambda,
-        sobolev_regularization_lambda=sobolev_regularize_lambda
+        sobolev_regularization_lambda=sobolev_regularize_lambda,
+        include_l1_penalty_in_final_obj=include_l1_penalty_in_final_obj
     )
 
     if renormalize_data_waveforms:
