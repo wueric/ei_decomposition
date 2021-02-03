@@ -32,6 +32,8 @@ if __name__ == '__main__':
     parser.add_argument('--cell_list', '-c', type=str, default=None,
                         help='Override cell_type argument, instead use cell ids in specified file')
     parser.add_argument('--renormalize', '-r', action='store_true', default=False, help='renormalize data waveforms')
+    parser.add_argument('--select_by_l1', '-d', action='store_true', default=False,
+                        help='include L1 regularization when picking best search candidates')
 
     args = parser.parse_args()
 
@@ -72,7 +74,8 @@ if __name__ == '__main__':
         grid_search_step=args.grid_step,
         grid_search_top_n=args.grid_top_n,
         fine_search_width=args.fine_search_width,
-        grid_search_batch_size=args.grid_batch_size
+        grid_search_batch_size=args.grid_batch_size,
+        include_l1_penalty_in_final_obj=args.select_by_l1
     )
 
     with open(args.output, 'wb') as joint_fit_file:

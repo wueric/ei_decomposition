@@ -151,7 +151,8 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
                                                     max_iter: int,
                                                     device: torch.device,
                                                     l1_regularization_lambda: Optional[float] = None,
-                                                    converge_epsilon: float = 1e-3) \
+                                                    converge_epsilon: float = 1e-3,
+                                                    include_l1_penalty_in_final_obj: bool = False) \
         -> Tuple[np.ndarray, np.ndarray]:
     '''
 
@@ -244,6 +245,11 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(observed_ft: np.ndarray,
 
     partial_objective = 0.5 * xt_at_a_x - xt_at_b
 
+    if include_l1_penalty_in_final_obj:
+        # shape (n_observations, n_valid_phase_shifts)
+        l1_obj_penalties = l1_regularization_lambda * torch.sum(amplitudes, dim=2)
+        partial_objective = partial_objective + l1_obj_penalties
+
     return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
 
 
@@ -255,7 +261,8 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
                                                   max_iter: int,
                                                   device: torch.device,
                                                   l1_regularization_lambda: Optional[float] = None,
-                                                  converge_epsilon: float = 1e-3) \
+                                                  converge_epsilon: float = 1e-3,
+                                                  include_l1_penalty_in_final_obj: bool = False) \
         -> Tuple[np.ndarray, np.ndarray]:
     '''
     Iterative coarse-to-fine search helper function
@@ -363,6 +370,11 @@ def fast_time_shifts_and_amplitudes_shared_shifts(observed_ft: np.ndarray,
 
     partial_objective = 0.5 * xt_at_a_x - xt_at_b
 
+    if include_l1_penalty_in_final_obj:
+        # shape (n_observations, n_valid_phase_shifts)
+        l1_obj_penalties = l1_regularization_lambda * torch.sum(amplitudes, dim=2)
+        partial_objective = partial_objective + l1_obj_penalties
+
     return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
 
 
@@ -377,8 +389,9 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
                                               l1_regularization_lambda: Optional[float] = None,
                                               converge_epsilon: float = 1e-3,
                                               amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
-                                              max_batch_size: int = 8192) -> Tuple[np.ndarray, np.ndarray]:
-
+                                              max_batch_size: int = 8192,
+                                              include_l1_penalty_in_final_obj: bool = False) -> \
+        Tuple[np.ndarray, np.ndarray]:
     '''
     Coarse-to-fine joint fitting of amplitudes and time shifts. Algorithm has two distinct phases:
 
@@ -445,7 +458,8 @@ def coarse_to_fine_time_shifts_and_amplitudes(observed_ft: np.ndarray,
             10000,
             device,
             l1_regularization_lambda=l1_regularization_lambda,
-            converge_epsilon=converge_epsilon
+            converge_epsilon=converge_epsilon,
+            include_l1_penalty_in_final_obj=include_l1_penalty_in_final_obj
         )
         amplitude_results[:, low:high, :] = amplitude_batch
         objective_results[:, low:high] = objective_batch
