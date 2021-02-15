@@ -24,7 +24,11 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
         shape (n_observations, n_rfft_frequencies)
     :param n_true_frequencies : int, number of frequencies = n_samples for the normal FFT
         (not the number of rFFT frequencies)
-    :param device:
+    :param device: torch.device
+    :param sobolev_lambda: scalar lambda for second derivative penalty for regularizing smoothness for
+        the waveforms
+    :param observation_loss_weight: lambda vector of weights, for weighting the contribution to the loss
+        of each individual waveform. shape (n_observations, )
     :return: tuple of real component, imaginary component of canonical waveform Fourier transform
         each has shape (n_canonical_waveforms, n_rfft_frequencies)
     '''

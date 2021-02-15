@@ -1,10 +1,12 @@
 import visionloader as vl
+import electrode_map as el_map
 
 import torch
 
 import pickle
 
 import lib.ei_decomposition as ei_decomp
+import lib.spatial_prior_amplitude_time_opt as spat_decomp
 
 import argparse
 
@@ -21,6 +23,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2, help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
                         help='L2 regularization for waveform second derivatives')
+    parser.add_argument('--spatial_reg', '-q', type=float, default=1e-3, help='Spatial continuity regularization lambda')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
@@ -46,6 +49,7 @@ if __name__ == '__main__':
                                   include_params=True,
                                   include_ei=True)
     dataset_el_map = dataset.get_electrode_map()
+    dataset_adjacency_map = el_map.get_litke_array_adj_mat_by_array_id(dataset.array_id)
 
     if args.cell_list is not None:
 
@@ -70,45 +74,45 @@ if __name__ == '__main__':
     shift_tuple = (-args.before, args.after)
 
     if initial_basis is None:
-        decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
+        decomposition_dict, basis_waveforms, mse = spat_decomp.spatial_cont_time_optimization(
             eis_by_cell_id,
+            dataset_adjacency_map,
+            args.spatial_reg,
             compute_device,
             n_basis_vectors=args.nbasis,
-            maxiter_decomp=args.maxiter,
-            l1_regularize_lambda=args.weight_reg,
-            sobolev_regularize_lambda=args.sobolev_reg,
-            renormalize_data_waveforms_amplitude_fit=args.renormalize,
-            renormalize_data_waveforms_waveform_fit=args.renormalize,
-            output_debug_dict=False,
-            shifts=shift_tuple,
-            supersample_factor=args.upsample,
             snr_abs_threshold=args.thresh,
+            supersample_factor=args.upsample,
+            shifts=shift_tuple,
             grid_search_step=args.grid_step,
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
-            grid_search_batch_size=args.grid_batch_size,
-            include_l1_penalty_in_final_obj=args.select_by_l1
-        )
-    else:
-        decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
-            eis_by_cell_id,
-            compute_device,
-            initialized_basis_vectors=initial_basis,
-            maxiter_decomp=args.maxiter,
+            grid_search_batch_size=args.grid_search_batch_size,
+            maxiter_spatial_reg_decomp=args.maxiter,
+            renormalize_data_waveforms_waveform_fit=args.renormalize,
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
-            renormalize_data_waveforms_amplitude_fit=args.renormalize,
-            renormalize_data_waveforms_waveform_fit=args.renormalize,
-            output_debug_dict=False,
-            shifts=shift_tuple,
-            supersample_factor=args.upsample,
-            snr_abs_threshold=args.thresh,
-            grid_search_step=args.grid_step,
-            grid_search_top_n=args.grid_top_n,
-            fine_search_width=args.fine_search_width,
-            grid_search_batch_size=args.grid_batch_size,
         )
 
+    else:
+        decomposition_dict, basis_waveforms, mse = spat_decomp.spatial_cont_time_optimization(
+            eis_by_cell_id,
+            dataset_adjacency_map,
+            args.spatial_reg,
+            compute_device,
+            initialized_basis_vectors=initial_basis,
+            snr_abs_threshold=args.thresh,
+            supersample_factor=args.upsample,
+            shifts=shift_tuple,
+            grid_search_step=args.grid_step,
+            grid_search_top_n=args.grid_top_n,
+            fine_search_width=args.fine_search_width,
+            grid_search_batch_size=args.grid_search_batch_size,
+            maxiter_spatial_reg_decomp=args.maxiter,
+            renormalize_data_waveforms_waveform_fit=args.renormalize,
+            l1_regularize_lambda=args.weight_reg,
+            sobolev_regularize_lambda=args.sobolev_reg,
+        )
+        pass
 
     with open(args.output, 'wb') as joint_fit_file:
         metadata_dict = {

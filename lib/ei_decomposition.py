@@ -181,10 +181,9 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
                                                 n_iter: int,
                                                 device: torch.device,
                                                 max_batch_size=8192,
-                                                l1_regularization_lambda: Optional[np.ndarray] = None,
+                                                l1_regularization_lambda: Optional[float] = None,
                                                 waveform_observation_loss_weight: Optional[np.ndarray] = None,
-                                                sobolev_regularization_lambda: Optional[float] = None,
-                                                include_l1_penalty_in_final_obj: bool = False) \
+                                                sobolev_regularization_lambda: Optional[float] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     '''
     Main iteration loop for the two-step (as opposed to three-step) optimization process. Optimization steps are
@@ -205,6 +204,7 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
     :param n_iter: number of iteration steps
     :param device:
     :param l1_regularization_lambda:
+    :param waveform_observation_loss_weight:
     :param sobolev_regularization_lambda:
     :return:
     '''
@@ -220,7 +220,7 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
     print("Beginning optimization loop")
     pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization')
     for iter_count in range(n_iter):
-        # within each iteration, we have a three step optimization
+        # within each iteration, we have a two step optimization
         # (1) Given fixed canonical waveforms,
         #       solve for real-valued amplitudes and time shifts with
         #       grid search over nonnegative linear least squares problems
@@ -240,7 +240,6 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
             l1_regularization_lambda=l1_regularization_lambda,
             amplitude_initialize_range=amplitude_init_range,
             max_batch_size=max_batch_size,
-            include_l1_penalty_in_final_obj=include_l1_penalty_in_final_obj
         )
 
         # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
@@ -557,8 +556,7 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
                                                     renormalize_data_waveforms_waveform_fit: bool = True,
                                                     l1_regularize_lambda: Optional[float] = None,
                                                     sobolev_regularize_lambda: Optional[float] = None,
-                                                    output_debug_dict: bool = False,
-                                                    include_l1_penalty_in_final_obj: bool = False) \
+                                                    output_debug_dict: bool = False) \
         -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, float],
                  Tuple[Dict[int, EIDecomposition], np.ndarray, float, Dict[str, np.ndarray]]]:
     # check the inputs for correctness
@@ -586,12 +584,7 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
     mag_padded = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
     padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:, None]
 
-    lambda_l1_renormalize_vector = None
-    if l1_regularize_lambda is not None:
-        if renormalize_data_waveforms_amplitude_fit:
-            lambda_l1_renormalize_vector = l1_regularize_lambda / mag_padded
-        else:
-            lambda_l1_renormalize_vector = l1_regularize_lambda * np.ones((n_observations,), dtype=np.float32)
+    waveform_fourier_weights = (mag_padded * mag_padded)
 
     if n_basis_vectors is not None:
         # have to randomly initialize basis waveforms
@@ -621,10 +614,9 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         maxiter_decomp,
         device,
         max_batch_size=grid_search_batch_size,
-        l1_regularization_lambda=lambda_l1_renormalize_vector,
+        l1_regularization_lambda=l1_regularize_lambda,
         sobolev_regularization_lambda=sobolev_regularize_lambda,
-        include_l1_penalty_in_final_obj=include_l1_penalty_in_final_obj,
-        waveform_observation_loss_weight=(None if renormalize_data_waveforms_waveform_fit else mag_padded)
+        waveform_observation_loss_weight=(None if renormalize_data_waveforms_waveform_fit else waveform_fourier_weights)
     )
 
     amplitudes = mag_padded[:, None] * amplitudes

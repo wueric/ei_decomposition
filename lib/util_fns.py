@@ -7,6 +7,7 @@ from typing import List, Dict, Union, Tuple, Sequence
 
 EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
 
+
 def bspline_upsample_waveforms(waveforms: np.ndarray,
                                upsample_factor: int) -> np.ndarray:
     '''
@@ -30,6 +31,212 @@ def bspline_upsample_waveforms(waveforms: np.ndarray,
         upsampled[idx, :] = waveform_shifted
 
     return upsampled
+
+
+def bspline_upsample_waveforms_padded_by_cell(waveforms_by_cell: np.ndarray,
+                                              last_valid_indices: np.ndarray,
+                                              upsample_factor: int) -> np.ndarray:
+    '''
+    Upsample waveforms with bspline interpolation, where the waveforms are grouped by cell
+        and some of the electrodes are disused
+    :param waveforms_by_cell: shape (n_cells, n_max_electrodes, n_timepoints)
+    :param last_valid_indices: integer, shape (n_cells, ), index of the last valid electrode for each cell
+        in waveforms_by_cell
+    :param upsample_factor: upsample factor
+    :return: upsampled waveforms, shape (n_cells, n_max_electrodes, n_timepoints * upsample_factor)
+    '''
+
+    n_cells, max_n_electrodes, n_orig_samples = waveforms_by_cell.shape
+    upsampled = np.zeros((n_cells, max_n_electrodes, n_orig_samples * upsample_factor), dtype=np.float32)
+
+    orig_time_samples = np.r_[0:n_orig_samples]
+    upsample_timepoints = np.linspace(0, n_orig_samples, n_orig_samples * upsample_factor)
+
+    for cell_idx in range(n_cells):
+        max_valid_idx = last_valid_indices[cell_idx]
+        for el_idx in range(max_valid_idx):
+            orig_waveform = waveforms_by_cell[cell_idx, el_idx, :]
+            bspline = interpolate.splrep(orig_time_samples, orig_waveform)
+
+            waveform_shifted = interpolate.splev(upsample_timepoints, bspline)
+            # shape (n_shifts, n_orig_samples)
+            upsampled[cell_idx, el_idx, :] = waveform_shifted
+
+    return upsampled
+
+
+def make_electrode_padded_ei_data_matrix(eis_by_cell_id: Dict[int, np.ndarray],
+                                         cell_order: List[int],
+                                         threshold: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    '''
+
+    :param eis_by_cell_id: Dict[int - cell_id, np.ndarray - EI with shape (n_electrodes, n_timepoints)
+    :param cell_order : List[int] list of cell id
+    :param threshold: float
+    :return: Tuple[np.ndarray, np.ndarray, np.ndarray], first one has shape (n_cells, n_electrodes_max, n_timepoints)
+        corresponding to the padded EIs, and second one is integer valued with shape (n_cells, n_electrodes_max),
+        where unused slots are given value -1. Third has shape (n_cells, ) and is integer valued.
+        It contains the index of the last valid electrode in the padding
+    '''
+
+    n_cells = len(eis_by_cell_id)
+
+    max_threshold_electrodes = -np.inf
+    n_timepoints = -1
+    for cell_id, full_ei in eis_by_cell_id.items():
+        max_amplitude = np.amax(np.abs(full_ei), axis=1)
+        n_exceeds_threshold = np.sum(max_amplitude > threshold)
+        max_threshold_electrodes = max(max_threshold_electrodes, n_exceeds_threshold)
+        n_timepoints = full_ei.shape[1]
+
+    padded_eis = np.zeros((n_cells, max_threshold_electrodes, n_timepoints), dtype=np.float32)
+    electrode_idx_mat = -np.ones((n_cells, max_threshold_electrodes), dtype=np.int32)
+    last_valid_idx = np.array((n_cells,), dtype=np.int32)
+
+    for i, cell_id in enumerate(cell_order):
+        full_ei = eis_by_cell_id[cell_id]
+
+        max_amplitude = np.amax(np.abs(full_ei), axis=1)
+        include_channel = max_amplitude > threshold
+        n_channels_included = np.sum(include_channel)
+
+        padded_eis[i, :n_channels_included, :] = full_ei[include_channel, :]
+
+        electrode_idx_mat[cell_id, :n_channels_included] = np.argwhere(include_channel).flatten()
+
+        last_valid_idx[i] = n_channels_included
+
+    return padded_eis, electrode_idx_mat, last_valid_idx
+
+
+def one_pad_disused_by_cell(magnitudes_arranged_by_cell : np.ndarray,
+                            last_valid_indices: np.ndarray) -> np.ndarray:
+    '''
+
+    :param magnitudes_arranged_by_cell: magnitudes of each channel for each cell
+        shape (n_cells, max_n_electrodes)
+    :param last_valid_indices: shape (n_cells, ) integer valued, contains the number
+        of valid electrodes by cell in magnitudes_arranged_by_cell
+    :return: (n_cells, max_n_electrodes), where entries corresponding to unused electrodes
+        are replaced by 1 for safe multiplication and division
+    '''
+
+    n_cells, max_n_electrodes = magnitudes_arranged_by_cell.shape
+    output_magnitudes = np.ones_like(magnitudes_arranged_by_cell, dtype=np.float32)
+    for cell_idx in range(n_cells):
+        top_idx = last_valid_indices[cell_idx]
+        output_magnitudes[cell_idx,:top_idx] = magnitudes_arranged_by_cell[cell_idx,:top_idx]
+
+    return output_magnitudes
+
+def pack_by_cell_into_flat(waveforms_arranged_by_cell: np.ndarray,
+                           last_valid_indices: np.ndarray) -> np.ndarray:
+    '''
+    Rearranges and flattens 3D matrix of time domain waveforms that are arranged by cell into
+        a 2D matirx of time domain waveforms. Automatically cuts out zero-valued waveforms
+    :param waveforms_arranged_by_cell: shape (n_cells, n_max_electrodes, n_timepoints)
+    :param last_valid_indices: shape (n_cells, ), integer valued, contains the index of the last
+        valid electrode in waveforms_arranged_by_cell
+    :return: shape (n_waveforms_total, n_timepoints)
+    '''
+
+    n_cells, n_max_electrodes, n_timepoints = waveforms_arranged_by_cell.shape
+    n_legit_waveforms = np.sum(last_valid_indices)
+
+    output_flat_matrix = np.zeros((n_legit_waveforms, n_timepoints), dtype=np.float32)
+
+    write_offset = 0
+    for cell_idx in range(n_cells):
+        n_electrodes_for_cell = last_valid_indices[cell_idx]
+        write_end = write_offset + n_electrodes_for_cell
+        output_flat_matrix[write_offset:write_end, :] = waveforms_arranged_by_cell[cell_idx, :n_electrodes_for_cell, :]
+
+        write_offset = write_end
+
+    return output_flat_matrix
+
+
+def unpack_flat_into_by_cell(flat_matrix: np.ndarray,
+                             last_valid_indices: np.ndarray) -> np.ndarray:
+    '''
+    Rearranges and unflattens a flat 2D matrix of time domain waveforms into a padded 3D matrix of time domain waveforms
+        tht are arranged by cell
+    :param flat_matrix: shape (n_waveforms_total, n_timepoints), flat matrix of waveforms
+    :param last_valid_indices:  shape (n_cells, ), integer valued, contains the index of the last valid electrode for
+        each cell
+    :return: shape (n_cells, n_max_electrodes, n_timepoints)
+    '''
+    n_total_waveforms, n_timepoints = flat_matrix.shape
+    n_cells = last_valid_indices.shape[0]
+    n_max_electrodes = np.max(last_valid_indices)
+
+    waveforms_padded_by_cell = np.zeros((n_cells, n_max_electrodes, n_timepoints), dtype=np.float32)
+
+    read_offset = 0
+    for cell_idx in range(n_cells):
+        n_waveforms_to_get = last_valid_indices[cell_idx]
+        read_end = n_waveforms_to_get + read_offset
+
+        waveforms_padded_by_cell[cell_idx, :n_waveforms_to_get, :] = flat_matrix[read_offset:read_end, :]
+        read_offset = read_end
+
+    return waveforms_padded_by_cell
+
+
+def unpack_flattened_magnitudes_into_by_cell(flattened_magnitudes: np.ndarray,
+                                             last_valid_indices: np.ndarray) -> np.ndarray:
+    pass
+
+
+def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
+                                       included_in_padded_ei: np.ndarray,
+                                       last_valid_indices: np.ndarray) -> np.ndarray:
+    '''
+    Converts adjacency list into a series of adjacency mean matrices, each corresponding
+        to a particular cell
+
+    Rules for dealing with edges and excluded electrodes:
+        (1) If an electrode is at the edge of a cell (i.e. at least one of its neighboring electrodes is excluded
+            in the optimization calculation because its amplitude is insufficient), we still include those excluded
+            neighbors in the denominator for the mean calculation because zero is still a meaningful signal
+        (2) Edges of the array will not be included in the mean calculation (i.e. if an electrode has fewer neighbors
+            than typical because it is located at the edge of the electrode array, the number of neighbors is
+            the number of existing real neighbors rather than the number of typical neighbors)
+
+    :param raw_adjacency_mat: adjacency list, shape (n_electrodes, ?), ragged np.ndarray
+    :param included_in_padded_ei: shape (n_cells, n_max_electrodes), electrode order for each padded ei
+        where disused electrodes are marked with -1
+    :param last_valid_indices: shape (n_cells, ), integer, corresponding to the last valid col
+        of included_in_padd_ei for each cell
+    :return: np.ndarray, shape (n_cells, n_max_electrodes, n_max_electrodes), corresponding to the neighbor
+        mean matrix
+    '''
+
+    n_cells, n_max_electrodes = included_in_padded_ei.shape
+    output_mean_matrix = np.zeros((n_cells, n_max_electrodes, n_max_electrodes), dtype=np.float32)
+
+    for cell_idx in range(n_cells):
+        last_valid_idx = last_valid_indices[cell_idx]
+        included_electrodes = included_in_padded_ei[cell_idx, :last_valid_idx]
+
+        el_id_to_idx = {}  # type: Dict[int, int]
+        for idx, el_id in enumerate(included_electrodes):
+            el_id_to_idx[el_id] = idx
+
+        mean_adjacency_matrix = np.zeros((n_max_electrodes, n_max_electrodes), dtype=np.float32)
+        for idx, el_id in enumerate(included_electrodes):
+            all_valid_neighbors_id = raw_adjacency_mat[idx]
+
+            valid_neighbors_denom = all_valid_neighbors_id.shape[0]
+
+            for adjacent_el_id in all_valid_neighbors_id:
+                if adjacent_el_id in el_id_to_idx:
+                    adjacent_idx = el_id_to_idx[adjacent_el_id]
+                    mean_adjacency_matrix[idx, adjacent_idx] = 1.0 / valid_neighbors_denom
+
+        output_mean_matrix[cell_idx, :, :] = mean_adjacency_matrix
+
+    return output_mean_matrix
 
 
 def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,
@@ -135,14 +342,13 @@ def pack_significant_electrodes_into_matrix(eis_by_cell_id: Dict[int, np.ndarray
 
 def unpack_amplitudes_and_phases_into_ei_shape(packed_amplitude_matrix: np.ndarray,
                                                packed_phase_matrix: np.ndarray,
-                                               orig_ei_by_cell_id : Dict[int, np.ndarray],
+                                               orig_ei_by_cell_id: Dict[int, np.ndarray],
                                                cell_order: List[int],
                                                unpack_slice_dict: Dict[int, Tuple[slice, Sequence[int]]]) \
-    -> Dict[int, EIDecomposition]:
-
+        -> Dict[int, EIDecomposition]:
     n_observations, n_basis_vectors = packed_amplitude_matrix.shape
 
-    result_dict = {} # type: Dict[int, EIDecomposition]
+    result_dict = {}  # type: Dict[int, EIDecomposition]
     for cell_id in cell_order:
         orig_ei_mat = orig_ei_by_cell_id[cell_id]
         n_channels = orig_ei_mat.shape[0]
@@ -159,3 +365,42 @@ def unpack_amplitudes_and_phases_into_ei_shape(packed_amplitude_matrix: np.ndarr
 
     return result_dict
 
+
+def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: np.ndarray,
+                                                     by_cell_phase_matrix: np.ndarray,
+                                                     by_cell_ordered_electrodes: np.ndarray,
+                                                     last_valid_indices : np.ndarray,
+                                                     cell_order: List[int],
+                                                     orig_ei_n_electrodes: int) \
+        -> Dict[int, EIDecomposition]:
+    '''
+    Converts the by-cell matrix representation of an EI decomposition into EIDecomposition
+
+    :param by_cell_amplitude_matrix: amplitude matrix, shape (n_cells, max_n_electrodes, n_canonical_waveforms)
+    :param by_cell_phase_matrix: phase matrix, integer valued, shape (n_cells, max_n_electrodes, n_canonical_waveforms)
+    :param by_cell_ordered_electrodes: electrode order, integer valued, shape (n_cells, max_n_electrodes). Unused slots
+        are marked -1
+    :param last_valid_indices: last valid electrode index for each cell
+    :param cell_order: ordering of cells, list of integers
+    :param orig_ei_n_electrodes: number of electrodes included in the full-size EI
+    :return: Dict[int, EIDecomposition], EIDecomposition for each cell, keyed by cell_id
+    '''
+
+    n_cells, max_n_electrodes, n_basis_waveforms = by_cell_amplitude_matrix.shape
+
+    result_dict = {}  # type: Dict[int, EIDecomposition]
+    for idx, cell_id in enumerate(cell_order):
+        electrode_order_including_invalid = by_cell_ordered_electrodes[idx, :]
+
+        n_valid_electrodes = last_valid_indices[idx]
+        electrode_order_valid = electrode_order_including_invalid[:n_valid_electrodes]
+
+        amplitude_matrix = np.zeros((orig_ei_n_electrodes, n_basis_waveforms), dtype=np.float32)
+        amplitude_matrix[electrode_order_valid,:] = by_cell_amplitude_matrix[idx, :n_valid_electrodes, :]
+
+        delay_matrix = np.zeros((orig_ei_n_electrodes, n_basis_waveforms), dtype=np.int32)
+        delay_matrix[electrode_order_valid,:] = by_cell_phase_matrix[idx, :n_valid_electrodes, :]
+
+        result_dict[cell_id] = (amplitude_matrix, delay_matrix)
+
+    return result_dict
