@@ -373,7 +373,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
         raise ValueError('Can specify only one of n_basis_vectors and initialized_basis_vectors')
 
     n_electrodes_total = -1
-    for cell_id, ei_matrix in eis_by_cell_id:
+    for cell_id, ei_matrix in eis_by_cell_id.items():
         n_electrodes_total = ei_matrix.shape[0]
         break
 

@@ -91,7 +91,7 @@ def make_electrode_padded_ei_data_matrix(eis_by_cell_id: Dict[int, np.ndarray],
 
     padded_eis = np.zeros((n_cells, max_threshold_electrodes, n_timepoints), dtype=np.float32)
     electrode_idx_mat = -np.ones((n_cells, max_threshold_electrodes), dtype=np.int32)
-    last_valid_idx = np.array((n_cells,), dtype=np.int32)
+    last_valid_idx = np.zeros((n_cells,), dtype=np.int32)
 
     for i, cell_id in enumerate(cell_order):
         full_ei = eis_by_cell_id[cell_id]
@@ -102,7 +102,7 @@ def make_electrode_padded_ei_data_matrix(eis_by_cell_id: Dict[int, np.ndarray],
 
         padded_eis[i, :n_channels_included, :] = full_ei[include_channel, :]
 
-        electrode_idx_mat[cell_id, :n_channels_included] = np.argwhere(include_channel).flatten()
+        electrode_idx_mat[i, :n_channels_included] = np.argwhere(include_channel).flatten()
 
         last_valid_idx[i] = n_channels_included
 
@@ -227,7 +227,7 @@ def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
         for idx, el_id in enumerate(included_electrodes):
             all_valid_neighbors_id = raw_adjacency_mat[idx]
 
-            valid_neighbors_denom = all_valid_neighbors_id.shape[0]
+            valid_neighbors_denom = len(all_valid_neighbors_id)
 
             for adjacent_el_id in all_valid_neighbors_id:
                 if adjacent_el_id in el_id_to_idx:

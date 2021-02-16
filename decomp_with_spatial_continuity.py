@@ -86,7 +86,7 @@ if __name__ == '__main__':
             grid_search_step=args.grid_step,
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
-            grid_search_batch_size=args.grid_search_batch_size,
+            grid_search_batch_size=args.grid_batch_size,
             maxiter_spatial_reg_decomp=args.maxiter,
             renormalize_data_waveforms_waveform_fit=args.renormalize,
             l1_regularize_lambda=args.weight_reg,
