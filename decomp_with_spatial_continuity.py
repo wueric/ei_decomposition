@@ -18,6 +18,7 @@ if __name__ == '__main__':
     parser.add_argument('ds_name', type=str, help='name of Vision dataset')
     parser.add_argument('cell_type', type=str, help='cell type of interest')
     parser.add_argument('output', type=str, help='path to output pickle file')
+    parser.add_argument('--init_fit', type=str, help='path to initial decomposition')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--maxiter', '-m', type=int, default=25, help='maximum number of iterations to run')
     parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2, help='L1 regularization lambda for amplitudes')
@@ -73,13 +74,18 @@ if __name__ == '__main__':
 
     shift_tuple = (-args.before, args.after)
 
+    #FIXME get rid of later
+    with open(args.initial_fit, 'rb') as pfile:
+        _ = pickle.load(pfile)
+        intial_prefit = pickle.load(pfile)
+
     if initial_basis is None:
         decomposition_dict, basis_waveforms, mse = spat_decomp.spatial_cont_time_optimization(
             eis_by_cell_id,
             dataset_adjacency_map,
             args.spatial_reg,
+            intial_prefit,
             compute_device,
-            n_basis_vectors=args.nbasis,
             snr_abs_threshold=args.thresh,
             supersample_factor=args.upsample,
             shifts=shift_tuple,
@@ -98,8 +104,8 @@ if __name__ == '__main__':
             eis_by_cell_id,
             dataset_adjacency_map,
             args.spatial_reg,
+            intial_prefit,
             compute_device,
-            initialized_basis_vectors=initial_basis,
             snr_abs_threshold=args.thresh,
             supersample_factor=args.upsample,
             shifts=shift_tuple,

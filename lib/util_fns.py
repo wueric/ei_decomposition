@@ -65,14 +65,40 @@ def bspline_upsample_waveforms_padded_by_cell(waveforms_by_cell: np.ndarray,
     return upsampled
 
 
+def grab_above_threshold_electrodes_and_order(eis_by_cell_id: Dict[int, np.ndarray],
+                                              threshold: float) -> Tuple[int, Dict[int, np.ndarray]]:
+    '''
+    Grabs indices of electrodes that are above threhsolds
+
+    :param eis_by_cell_id: key cell_id (int) -> value EI matrix (np.ndarray)
+    :param threshold: cutoff for including electrode in EI, maximum amplitude of EI must exceed this threshold
+    :return: maximum number of electrodes included; Dict where key is cell_id, value is np.ndarray with shape
+        (n_electrodes_included, ) containing the indices of the above threshold electrodes. Order in this array
+        is important
+    '''
+    above_threshold_index_dict = {}  # type: Dict[int, np.ndarray]
+    max_threshold_electrodes = -np.inf
+
+    for cell_id, full_ei in eis_by_cell_id.items():
+        max_amplitude = np.amax(np.abs(full_ei), axis=1)
+        exceeds_threshold = max_amplitude > threshold
+        n_exceeds_threshold = np.sum(exceeds_threshold)
+        max_threshold_electrodes = max(max_threshold_electrodes, n_exceeds_threshold)
+
+        above_threshold_index_dict[cell_id] = np.squeeze(np.argwhere(exceeds_threshold))
+
+    return max_threshold_electrodes, above_threshold_index_dict
+
+
 def make_electrode_padded_ei_data_matrix(eis_by_cell_id: Dict[int, np.ndarray],
                                          cell_order: List[int],
-                                         threshold: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                                         max_n_electrodes : int,
+                                         electrode_selection_by_cell : Dict[int, np.ndarray]) \
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     '''
 
     :param eis_by_cell_id: Dict[int - cell_id, np.ndarray - EI with shape (n_electrodes, n_timepoints)
     :param cell_order : List[int] list of cell id
-    :param threshold: float
     :return: Tuple[np.ndarray, np.ndarray, np.ndarray], first one has shape (n_cells, n_electrodes_max, n_timepoints)
         corresponding to the padded EIs, and second one is integer valued with shape (n_cells, n_electrodes_max),
         where unused slots are given value -1. Third has shape (n_cells, ) and is integer valued.
@@ -80,36 +106,66 @@ def make_electrode_padded_ei_data_matrix(eis_by_cell_id: Dict[int, np.ndarray],
     '''
 
     n_cells = len(eis_by_cell_id)
+    n_timepoints = eis_by_cell_id[cell_order[0]].shape[1]
 
-    max_threshold_electrodes = -np.inf
-    n_timepoints = -1
-    for cell_id, full_ei in eis_by_cell_id.items():
-        max_amplitude = np.amax(np.abs(full_ei), axis=1)
-        n_exceeds_threshold = np.sum(max_amplitude > threshold)
-        max_threshold_electrodes = max(max_threshold_electrodes, n_exceeds_threshold)
-        n_timepoints = full_ei.shape[1]
-
-    padded_eis = np.zeros((n_cells, max_threshold_electrodes, n_timepoints), dtype=np.float32)
-    electrode_idx_mat = -np.ones((n_cells, max_threshold_electrodes), dtype=np.int32)
+    padded_eis = np.zeros((n_cells, max_n_electrodes, n_timepoints), dtype=np.float32)
+    electrode_idx_mat = -np.ones((n_cells, max_n_electrodes), dtype=np.int32)
     last_valid_idx = np.zeros((n_cells,), dtype=np.int32)
 
     for i, cell_id in enumerate(cell_order):
         full_ei = eis_by_cell_id[cell_id]
 
-        max_amplitude = np.amax(np.abs(full_ei), axis=1)
-        include_channel = max_amplitude > threshold
-        n_channels_included = np.sum(include_channel)
+        channels_included = electrode_selection_by_cell[cell_id]
+        n_channels_included = channels_included.shape[0]
 
-        padded_eis[i, :n_channels_included, :] = full_ei[include_channel, :]
-
-        electrode_idx_mat[i, :n_channels_included] = np.argwhere(include_channel).flatten()
+        padded_eis[i, :n_channels_included, :] = full_ei[channels_included, :]
+        electrode_idx_mat[i, :n_channels_included] = channels_included
 
         last_valid_idx[i] = n_channels_included
 
     return padded_eis, electrode_idx_mat, last_valid_idx
 
 
-def one_pad_disused_by_cell(magnitudes_arranged_by_cell : np.ndarray,
+def pack_full_by_cell_into_matrix_by_cell(decomposition_dict: Dict[int, Tuple[np.ndarray, np.ndarray]],
+                                          cell_order: List[int],
+                                          max_n_electrodes: int,
+                                          electrode_selection_by_cell_id: Dict[int, np.ndarray]) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    '''
+
+    Packs an existing decomposition (in full EI form factor) into the stacked by-cell tensor representation
+        that the spatial continuity decomposition algorithm uses
+
+    :param decomposition_dict: existing decomposition dict, key is integer cell_id, values are Tuple of
+        np.ndarray, first entry in tuple is previously fit decomposition weight, shape (n_electrodes, n_basis_vectors),
+        second entry in tuple is previously fit decomposition delay, shape (n_electrodes, n_basis_vectors)
+    :param cell_order: ordering of cells that we want in the output matrix, list of cell_id
+    :param max_n_electrodes: maximum number of above threshold electrodes that we are including
+    :param electrode_selection_by_cell_id: selection of nonzero electrodes, key is cell_id, value is np.ndarray used
+        to slice the provided decomposition to grab fits for electrodes that we care about. Order in the np.ndarray
+        matters
+    :return: packed decomposition tensor, shape (n_cells, max_n_electrodes, n_basis_waveforms), and packed phase tensor,
+        shape (n_cells, max_n_electrodes, n_basis_waveforms)
+    '''
+
+    _, n_basis_waveforms = decomposition_dict[cell_order[0]][0].shape
+    n_cells = len(cell_order)
+
+    stacked_amplitudes = np.zeros((n_cells, max_n_electrodes, n_basis_waveforms), dtype=np.float32)
+    stacked_phases = np.zeros((n_cells, max_n_electrodes, n_basis_waveforms), dtype=np.int32)
+
+    for idx, cell_id in enumerate(cell_order):
+        init_decomp_amp, init_decomp_phase = decomposition_dict[cell_id]
+        selected_electrodes_in_order = electrode_selection_by_cell_id[cell_id]
+        n_electrodes_selected = selected_electrodes_in_order.shape[0]
+
+        stacked_amplitudes[idx, :n_electrodes_selected, :] = init_decomp_amp[n_electrodes_selected, :]
+        stacked_phases[idx, :n_electrodes_selected, :] = init_decomp_phase[n_electrodes_selected, :]
+
+    return stacked_amplitudes, stacked_phases
+
+
+def one_pad_disused_by_cell(magnitudes_arranged_by_cell: np.ndarray,
                             last_valid_indices: np.ndarray) -> np.ndarray:
     '''
 
@@ -125,9 +181,10 @@ def one_pad_disused_by_cell(magnitudes_arranged_by_cell : np.ndarray,
     output_magnitudes = np.ones_like(magnitudes_arranged_by_cell, dtype=np.float32)
     for cell_idx in range(n_cells):
         top_idx = last_valid_indices[cell_idx]
-        output_magnitudes[cell_idx,:top_idx] = magnitudes_arranged_by_cell[cell_idx,:top_idx]
+        output_magnitudes[cell_idx, :top_idx] = magnitudes_arranged_by_cell[cell_idx, :top_idx]
 
     return output_magnitudes
+
 
 def pack_by_cell_into_flat(waveforms_arranged_by_cell: np.ndarray,
                            last_valid_indices: np.ndarray) -> np.ndarray:
@@ -369,7 +426,7 @@ def unpack_amplitudes_and_phases_into_ei_shape(packed_amplitude_matrix: np.ndarr
 def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: np.ndarray,
                                                      by_cell_phase_matrix: np.ndarray,
                                                      by_cell_ordered_electrodes: np.ndarray,
-                                                     last_valid_indices : np.ndarray,
+                                                     last_valid_indices: np.ndarray,
                                                      cell_order: List[int],
                                                      orig_ei_n_electrodes: int) \
         -> Dict[int, EIDecomposition]:
@@ -396,10 +453,10 @@ def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: n
         electrode_order_valid = electrode_order_including_invalid[:n_valid_electrodes]
 
         amplitude_matrix = np.zeros((orig_ei_n_electrodes, n_basis_waveforms), dtype=np.float32)
-        amplitude_matrix[electrode_order_valid,:] = by_cell_amplitude_matrix[idx, :n_valid_electrodes, :]
+        amplitude_matrix[electrode_order_valid, :] = by_cell_amplitude_matrix[idx, :n_valid_electrodes, :]
 
         delay_matrix = np.zeros((orig_ei_n_electrodes, n_basis_waveforms), dtype=np.int32)
-        delay_matrix[electrode_order_valid,:] = by_cell_phase_matrix[idx, :n_valid_electrodes, :]
+        delay_matrix[electrode_order_valid, :] = by_cell_phase_matrix[idx, :n_valid_electrodes, :]
 
         result_dict[cell_id] = (amplitude_matrix, delay_matrix)
 

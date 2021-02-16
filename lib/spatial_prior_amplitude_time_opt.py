@@ -7,13 +7,15 @@ import tqdm
 
 import electrode_map as el_map
 
-from typing import Dict, Tuple, List, Optional, Union, Callable
+from typing import Dict, Tuple, List, Optional, Union, Callable, Any
 
 from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_cell, \
     make_electrode_padded_ei_data_matrix, make_spatial_neighbors_mean_matrix, \
     bspline_upsample_waveforms, pack_by_cell_into_flat, unpack_flat_into_by_cell, \
-    pack_by_cell_amplitudes_and_phases_into_ei_shape, one_pad_disused_by_cell
-from lib.ei_decomposition import shifted_fourier_nmf_iterative_optimization3, debug_evaluate_error
+    pack_by_cell_amplitudes_and_phases_into_ei_shape, one_pad_disused_by_cell, \
+    grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell
+
+from lib.ei_decomposition import debug_evaluate_error
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
 
@@ -308,9 +310,8 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
 def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                                    electrode_array_raw_adj_mat: np.ndarray,
                                    spatial_regularization_lambda: float,
+                                   initial_decomposition: Dict[str, Any],
                                    device: torch.device,
-                                   n_basis_vectors: Optional[int] = None,
-                                   initialized_basis_vectors: Optional[np.ndarray] = None,
                                    snr_abs_threshold: float = 5.0,
                                    amplitude_random_init_range: Tuple[float, float] = (0.0, 10.0),
                                    supersample_factor: int = 5,
@@ -318,10 +319,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                                    grid_search_step: int = 5,
                                    grid_search_top_n: int = 4,
                                    fine_search_width: int = 2,
-                                   grid_search_batch_size: int = 8192,
-                                   maxiter_intialization_decomp: int = 2,
                                    maxiter_spatial_reg_decomp: int = 10,
-                                   renormalize_data_waveforms_waveform_fit: bool = True,
                                    l1_regularize_lambda: Optional[float] = None,
                                    sobolev_regularize_lambda: Optional[float] = None,
                                    output_debug_dict: bool = False) \
@@ -365,13 +363,6 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
     :return:
     '''
 
-    # check the inputs for correctness
-    # must either specify the number of basis waveforms, or specify initial basis waveforms outright
-    if n_basis_vectors is None and initialized_basis_vectors is None:
-        raise ValueError('Must specify either n_basis_vectors or initialized_basis_vectors')
-    elif n_basis_vectors is not None and initialized_basis_vectors is not None:
-        raise ValueError('Can specify only one of n_basis_vectors and initialized_basis_vectors')
-
     n_electrodes_total = -1
     for cell_id, ei_matrix in eis_by_cell_id.items():
         n_electrodes_total = ei_matrix.shape[0]
@@ -379,9 +370,23 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
 
     temp_cell_order = list(eis_by_cell_id.keys())
 
-    ei_data_mat, matrix_indices_by_cell_id, last_valid_indices = make_electrode_padded_ei_data_matrix(eis_by_cell_id,
-                                                                                                      temp_cell_order,
-                                                                                                      snr_abs_threshold)
+    max_n_electrodes, selected_above_threshold_els = grab_above_threshold_electrodes_and_order(eis_by_cell_id,
+                                                                                               snr_abs_threshold)
+
+    ei_data_mat, matrix_indices_by_cell_id, last_valid_indices = make_electrode_padded_ei_data_matrix(
+        eis_by_cell_id,
+        temp_cell_order,
+        max_n_electrodes,
+        selected_above_threshold_els
+    )
+
+    prefit_decomp = initial_decomposition['decomposition']
+    amplitudes, phases = pack_full_by_cell_into_matrix_by_cell(prefit_decomp,
+                                                               temp_cell_order,
+                                                               max_n_electrodes,
+                                                               selected_above_threshold_els)
+    waveforms = initial_decomposition['waveforms']
+
     neighbor_mean_matrices_by_cell = make_spatial_neighbors_mean_matrix(electrode_array_raw_adj_mat,
                                                                         matrix_indices_by_cell_id,
                                                                         last_valid_indices)
@@ -396,8 +401,6 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
     padded_channels_by_cell = np.pad(bspline_supersampled_by_cell,
                                      [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                      mode='constant')
-
-    n_cells, max_n_electrodes, n_samples = padded_channels_by_cell.shape
 
     # shape (n_cells, max_n_electrodes), may contain zeros for disused electrodes
     # on a cell-by-cell basis, need to set those to one because we only use this
@@ -419,42 +422,6 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
     waveform_observation_weights = 1.0 / (mag_flattened * mag_flattened)
 
     n_waveforms_total, _ = padded_channels_flattened.shape
-
-    # init_basis will have shape (n_basis_vectors, n_timepoints)
-    if n_basis_vectors is not None:
-        # have to randomly initialize basis waveforms
-        init_basis = np.zeros((n_basis_vectors, n_samples),
-                              dtype=np.float32)
-        rand_choice_data_waveform = np.random.randint(0, max_n_electrodes, size=n_basis_vectors)
-        init_basis[:, :] = padded_channels_flattened[rand_choice_data_waveform, :]
-        init_basis = init_basis / np.linalg.norm(init_basis, axis=1, keepdims=True)
-
-    else:
-        # also need to supersample and pad the initial basis waveforms
-        bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
-        init_basis = np.pad(bspline_supersampled_basis,
-                            [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
-                            mode='constant')
-        init_basis = init_basis / np.linalg.norm(init_basis, axis=1, keepdims=True)
-
-    # now, we have to make a first pass solution to initialize the amplitudes and waveforms in a reasonable place
-
-    amplitudes, waveforms, delays, mse = shifted_fourier_nmf_iterative_optimization3(
-        padded_channels_flattened,
-        init_basis,
-        shifts,
-        grid_search_step,
-        grid_search_top_n,
-        fine_search_width,
-        amplitude_random_init_range,
-        maxiter_intialization_decomp,
-        device,
-        max_batch_size=grid_search_batch_size,
-        l1_regularization_lambda=l1_regularize_lambda,
-        sobolev_regularization_lambda=sobolev_regularize_lambda,
-        waveform_observation_loss_weight=(
-            None if renormalize_data_waveforms_waveform_fit else waveform_observation_weights)
-    )
 
     # amplitudes has shape (n_total_waveforms, n_basis_vectors)
     # waveforms has shape (n_basis_vectors, n_timepoints)
