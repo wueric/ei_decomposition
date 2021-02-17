@@ -31,13 +31,9 @@ if __name__ == '__main__':
     parser.add_argument('--grid_step', type=int, default=5, help='step size for grid search')
     parser.add_argument('--grid_top_n', type=int, default=4, help='top n for grid search')
     parser.add_argument('--fine_search_width', type=int, default=2, help='width for fine search')
-    parser.add_argument('--grid_batch_size', type=int, default=8192, help='grid search batch size')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
     parser.add_argument('--cell_list', '-c', type=str, default=None,
                         help='Override cell_type argument, instead use cell ids in specified file')
-    parser.add_argument('--renormalize', '-r', action='store_true', default=False, help='renormalize data waveforms')
-    parser.add_argument('--select_by_l1', '-d', action='store_true', default=False,
-                        help='include L1 regularization when picking best search candidates')
     parser.add_argument('--initialize_basis', '-i', type=str, default=None, help='path to initialized basis')
 
     args = parser.parse_args()
@@ -75,7 +71,7 @@ if __name__ == '__main__':
     shift_tuple = (-args.before, args.after)
 
     #FIXME get rid of later
-    with open(args.initial_fit, 'rb') as pfile:
+    with open(args.init_fit, 'rb') as pfile:
         _ = pickle.load(pfile)
         intial_prefit = pickle.load(pfile)
 
@@ -92,9 +88,7 @@ if __name__ == '__main__':
             grid_search_step=args.grid_step,
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
-            grid_search_batch_size=args.grid_batch_size,
             maxiter_spatial_reg_decomp=args.maxiter,
-            renormalize_data_waveforms_waveform_fit=args.renormalize,
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
         )
@@ -112,9 +106,7 @@ if __name__ == '__main__':
             grid_search_step=args.grid_step,
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
-            grid_search_batch_size=args.grid_search_batch_size,
             maxiter_spatial_reg_decomp=args.maxiter,
-            renormalize_data_waveforms_waveform_fit=args.renormalize,
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
         )

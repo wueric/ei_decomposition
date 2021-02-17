@@ -84,7 +84,7 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
         canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
 
         # shape (n_observations, n_canonical_waveforms, n_timepoints)
-        canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2)
+        canonical_waveforms_shifted = np.real(np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2))
 
         # shape (n_observations, n_canonical_waveforms)
         # print("Iter {0}, Nonnegative least squares".format(iter_count))
@@ -150,7 +150,7 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
     canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
 
     # shape (n_observations, n_canonical_waveforms, n_timepoints)
-    canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2)
+    canonical_waveforms_shifted = np.real(np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2))
 
     # shape (n_observations, n_canonical_waveforms)
     initialized_amplitudes = nonnegative_least_squares_optimize_amplitudes(waveform_data_matrix,
@@ -346,7 +346,7 @@ def shifted_fourier_nmf_iterative_optimization(waveform_data_matrix: np.ndarray,
         canonical_waveform_shift_ft = delay_phase_shift_mat * canonical_waveform_ft[None, :, :]
 
         # shape (n_observations, n_canonical_waveforms, n_timepoints)
-        canonical_waveforms_shifted = np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2)
+        canonical_waveforms_shifted = np.real(np.fft.irfft(canonical_waveform_shift_ft, n=n_samples, axis=2))
 
         # shape (n_observations, n_canonical_waveforms)
         # print("Iter {0}, Nonnegative least squares".format(iter_count))
@@ -368,7 +368,7 @@ def shifted_fourier_nmf_iterative_optimization(waveform_data_matrix: np.ndarray,
         )
 
         # real valued np.ndarray, shape (n_canonical_waveforms, n_samples)
-        iter_canonical_waveform_td = np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=1)
+        iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=1))
 
         # shape (n_observations, n_canonical_waveforms)
         # print("Iter {0}, Delay estimation".format(iter_count))

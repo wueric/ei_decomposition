@@ -307,7 +307,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         # shape (n_observations, n_valid_phase_shifts)
         spat_cont_unscaled_penalty = spatial_continuity_penalty_fn(amplitudes_scaled_orig)
 
-        spat_cont_scaled_penalty = spat_cont_unscaled_penalty * normalization_scale_factor_torch_square[:, None, None]
+        spat_cont_scaled_penalty = spat_cont_unscaled_penalty * normalization_scale_factor_torch_square[:, None]
 
         partial_objective = partial_objective + spat_cont_scaled_penalty
 
@@ -493,7 +493,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         # shape (n_observations, n_valid_phase_shifts)
         spat_cont_unscaled_penalty = spatial_continuity_penalty_fn(amplitudes_scaled_orig)
 
-        spat_cont_scaled_penalty = spat_cont_unscaled_penalty * normalization_scale_factor_torch_square[:, None, None]
+        spat_cont_scaled_penalty = spat_cont_unscaled_penalty * normalization_scale_factor_torch_square[:, None]
 
         partial_objective = partial_objective + spat_cont_scaled_penalty
 

@@ -87,7 +87,6 @@ if __name__ == '__main__':
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
             grid_search_batch_size=args.grid_batch_size,
-            include_l1_penalty_in_final_obj=args.select_by_l1
         )
     else:
         decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(

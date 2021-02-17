@@ -191,22 +191,26 @@ def pack_by_cell_into_flat(waveforms_arranged_by_cell: np.ndarray,
     '''
     Rearranges and flattens 3D matrix of time domain waveforms that are arranged by cell into
         a 2D matirx of time domain waveforms. Automatically cuts out zero-valued waveforms
-    :param waveforms_arranged_by_cell: shape (n_cells, n_max_electrodes, n_timepoints)
+    :param waveforms_arranged_by_cell: shape (n_cells, n_max_electrodes, ...)
     :param last_valid_indices: shape (n_cells, ), integer valued, contains the index of the last
         valid electrode in waveforms_arranged_by_cell
-    :return: shape (n_waveforms_total, n_timepoints)
+    :return: shape (n_waveforms_total, ...)
     '''
 
-    n_cells, n_max_electrodes, n_timepoints = waveforms_arranged_by_cell.shape
+    n_cells, n_max_electrodes = waveforms_arranged_by_cell.shape[:2]
     n_legit_waveforms = np.sum(last_valid_indices)
 
-    output_flat_matrix = np.zeros((n_legit_waveforms, n_timepoints), dtype=np.float32)
+    remaining_dimensions = waveforms_arranged_by_cell.shape[2:]
+    output_flat_matrix_dims = [n_legit_waveforms, ]
+    output_flat_matrix_dims.extend(list(remaining_dimensions))
+
+    output_flat_matrix = np.zeros(output_flat_matrix_dims, dtype=np.float32)
 
     write_offset = 0
     for cell_idx in range(n_cells):
         n_electrodes_for_cell = last_valid_indices[cell_idx]
         write_end = write_offset + n_electrodes_for_cell
-        output_flat_matrix[write_offset:write_end, :] = waveforms_arranged_by_cell[cell_idx, :n_electrodes_for_cell, :]
+        output_flat_matrix[write_offset:write_end, ...] = waveforms_arranged_by_cell[cell_idx, :n_electrodes_for_cell, ...]
 
         write_offset = write_end
 
@@ -223,6 +227,8 @@ def unpack_flat_into_by_cell(flat_matrix: np.ndarray,
         each cell
     :return: shape (n_cells, n_max_electrodes, n_timepoints)
     '''
+
+    print(flat_matrix.shape)
     n_total_waveforms, n_timepoints = flat_matrix.shape
     n_cells = last_valid_indices.shape[0]
     n_max_electrodes = np.max(last_valid_indices)

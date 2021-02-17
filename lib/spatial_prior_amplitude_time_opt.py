@@ -147,6 +147,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
     shifts_cd_matrix = np.zeros((n_cells, max_n_electrodes, n_canonical_waveforms), dtype=np.int32)
 
     # solve the problems for each cell in parallel by electrode index
+    pbar = tqdm.tqdm(total=max_n_electrodes, leave=False, desc='Optimization by electrode')
     for electrode_idx in range(max_n_electrodes):
         spatial_regularizer_callable = make_coord_descent_mean_connectivity_regularize_fn2(neighborhood_mean_mat,
                                                                                            amplitudes_cd_matrix,
@@ -164,14 +165,18 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
             second_pass_width,
             device,
             l1_regularization_lambda=l1_regularization_lambda,
-            normalization_scale_factor=normalization_scale_factor,
+            normalization_scale_factor=normalization_scale_factor[:, electrode_idx],
             converge_epsilon=least_squares_converge_epsilon,
             amplitude_initialize_range=amplitude_initialize_range,
-            spatial_continuity_regularizer=spatial_regularizer_callable
+            spatial_continuity_regularizer=spatial_regularizer_callable,
+            max_batch_size=8192
         )
 
         amplitudes_cd_matrix[:, electrode_idx, :] = parallel_amplitudes_el
         shifts_cd_matrix[:, electrode_idx, :] = parallel_amplitudes_el
+
+        pbar.update(1)
+    pbar.close()
 
     return amplitudes_cd_matrix, shifts_cd_matrix
 
@@ -233,8 +238,9 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
     flattened_data_ft = pack_by_cell_into_flat(data_ft, last_valid_indices)
 
     if waveform_observation_loss_weight is not None:
-        flattened_waveform_weights = one_pad_disused_by_cell(waveform_observation_loss_weight,
-                                                             last_valid_indices)
+        # shape (n_cells, max_n_electrodes)
+        flattened_waveform_weights = pack_by_cell_into_flat(waveform_observation_loss_weight,
+                                                            last_valid_indices)
     else:
         flattened_waveform_weights = np.ones((flattened_data_ft.shape[0],), dtype=np.float32)
 
@@ -295,8 +301,8 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
 
         mse = debug_evaluate_error(flattened_data_ft,
                                    flattened_amplitude_mat,
+                                   iter_canonical_waveform_ft,
                                    flattened_delays_mat,
-                                   iter_delays,
                                    n_frequencies_not_rfft)
 
         pbar.set_postfix({'MSE': mse})
@@ -381,7 +387,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
     )
 
     prefit_decomp = initial_decomposition['decomposition']
-    amplitudes, phases = pack_full_by_cell_into_matrix_by_cell(prefit_decomp,
+    amplitudes_initialized_unflattened, phases = pack_full_by_cell_into_matrix_by_cell(prefit_decomp,
                                                                temp_cell_order,
                                                                max_n_electrodes,
                                                                selected_above_threshold_els)
@@ -430,8 +436,6 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
 
     # shape (n_cells, max_n_electrodes, n_timepoints)
     normalized_unflattened_data_matrix = unpack_flat_into_by_cell(padded_channels_flattened,
-                                                                  last_valid_indices)
-    amplitudes_initialized_unflattened = unpack_flat_into_by_cell(amplitudes,
                                                                   last_valid_indices)
 
     amplitudes_by_cell, canonical_waveforms, delays_by_cell, mse = shifted_fourier_nmf_iterative_optimization_spatial(
