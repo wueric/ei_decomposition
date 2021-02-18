@@ -291,9 +291,7 @@ def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
 
         relevant_electrodes_indices = included_in_padded_ei[cell_idx][:n_valid_electrodes_cell]
         relevant_submatrix = full_mean_mat[np.ix_(relevant_electrodes_indices, relevant_electrodes_indices)]
-        cell_mean_matrix[:n_valid_electrodes_cell, :n_valid_electrodes_cell] = relevant_submatrix
-
-        pass
+        cell_mean_matrix[cell_idx, :n_valid_electrodes_cell, :n_valid_electrodes_cell] = relevant_submatrix
 
     return cell_mean_matrix
 

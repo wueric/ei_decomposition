@@ -54,12 +54,13 @@ def make_coord_descent_mean_connectivity_regularize_fn3(adjacency_mean_mat_by_ce
 
     # shape (n_cells, max_n_electrodes)
     one_over_mag_diag_by_cell = np.zeros((n_cells, max_n_electrodes), dtype=np.float32)
+
     # shape (n_cells, max_n_electrodes, max_n_electrodes)
     mean_mat_by_cell_minus_ident = np.zeros_like(adjacency_mean_mat_by_cell, dtype=np.float32)
     for cell_idx in range(n_cells):
         n_used_electrodes = last_valid_indices[cell_idx]
         one_over_mag_diag_by_cell[
-        cell_idx, :n_used_electrodes] = 1.0 / dividable_data_waveform_magnitudes[:n_used_electrodes]
+        cell_idx, :n_used_electrodes] = 1.0 / dividable_data_waveform_magnitudes[cell_idx, :n_used_electrodes]
 
         mean_mat_by_cell_minus_ident[cell_idx, :n_used_electrodes, :n_used_electrodes] = adjacency_mean_mat_by_cell[
                                                                                          cell_idx, :n_used_electrodes,
@@ -74,7 +75,8 @@ def make_coord_descent_mean_connectivity_regularize_fn3(adjacency_mean_mat_by_ce
 
     # shape (n_cells, max_n_electrodes, max_n_electrodes)
     m_i_t_m_i = mean_mat_by_cell_minus_ident_torch.permute(0, 2, 1) @ mean_mat_by_cell_minus_ident_torch
-    diag_m_i_t_m_i_diag = one_over_mag_diag_torch[:, None, :] * m_i_t_m_i * m_i_t_m_i[:, :, None]
+
+    diag_m_i_t_m_i_diag = one_over_mag_diag_torch[:, None, :] * m_i_t_m_i * one_over_mag_diag_torch[:, :, None]
 
     # shape (n_cells, n_canonical_waveforms, max_n_electrodes)
     amplitude_mat_torch = torch.tensor(all_amplitude_matrix.transpose((0, 2, 1)), dtype=torch.float32, device=device)
@@ -101,11 +103,13 @@ def make_coord_descent_mean_connectivity_regularize_fn3(adjacency_mean_mat_by_ce
         batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
         batched_amplitude_mat[:, :, :, electrode_idx] += batched_normalized_electrode_amplitudes
 
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
-        all_grad = batched_amplitude_mat @ diag_m_i_t_m_i_diag[:, None, :, :]
+        diag_m_i_t_m_i_diag_relevant = diag_m_i_t_m_i_diag[:, :, electrode_idx]
 
         # shape (n_cells, batch_size, n_canonical_waveforms)
-        return all_grad[:, :, :, electrode_idx] * lambda_spatial
+        all_grad = (batched_amplitude_mat @ diag_m_i_t_m_i_diag_relevant[:, None, :, None]).squeeze(3)
+
+        # shape (n_cells, batch_size, n_canonical_waveforms)
+        return all_grad * lambda_spatial
 
     def loss_callable(batched_normalized_electrode_amplitudes: torch.Tensor) -> torch.Tensor:
         '''
@@ -126,6 +130,7 @@ def make_coord_descent_mean_connectivity_regularize_fn3(adjacency_mean_mat_by_ce
 
         # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
         a_prime_diag = batched_amplitude_mat * one_over_mag_diag_torch[:, None, None, :]
+        print(a_prime_diag.shape, mean_mat_torch.shape)
 
         # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
         a_prime_diag_m = a_prime_diag @ mean_mat_torch[:, None, :, :]
