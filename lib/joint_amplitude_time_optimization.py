@@ -5,6 +5,70 @@ import torch
 import tqdm
 
 
+def make_unweighted_l1_regularizer(lambda_l1: float) \
+        -> Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+
+    '''
+
+    :param lambda_l1:
+    :return:
+    '''
+
+    def gradient_l1_regularizer() -> torch.Tensor:
+        return lambda_l1
+
+    def loss_l1_regularizer(batched_amplitudes : torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param batched_amplitudes: shape (n_different_problems, batch_size, n_canonical_waveforms)
+        :return:
+        '''
+
+        # shape (n_different_problems, batch_size)
+        return lambda_l1 * torch.sum(batched_amplitudes, dim=2)
+
+    return gradient_l1_regularizer, loss_l1_regularizer
+
+
+def make_by_cell_weighted_l1_regularizer(problem_weights: np.ndarray,
+                                         lambda_l1: float,
+                                         device: torch.device) \
+        -> Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    Makes lambda function for weighted L1 regularization
+
+    :param problem_weights: L1 weights that we should have for each optimization problem.
+        Shape (n_different_problems, )
+    :param lambda_l1:  L1 regularization lambda
+    :param device: torch.device
+    :return:
+    '''
+
+    # shape (n_different_problems, batch_size)
+    l1_problem_weights = torch.tensor(problem_weights, dtype=torch.float32, device=device)
+
+    def gradient_weighted_l1_regularizer() -> torch.Tensor:
+        '''
+        Calculates the gradient of the weighted L1 loss term in the nonnegative orthant
+
+        :return: shape (n_different_problems, 1, 1)
+        '''
+        return l1_problem_weights[:, None, None] * lambda_l1
+
+    def weighted_l1_loss(batched_amplitudes: torch.Tensor) -> torch.Tensor:
+        '''
+        Calculates the value of the weighted L1 loss term in the nonnegative orthant
+
+        :param batched_amplitudes: shape (n_different_problems, batch_size, n_canonical_waveforms)
+        :return: shape (n_different_problems, batch_size)
+        '''
+
+        # shape (n_different_problems, batch_size)
+        return torch.sum(batched_amplitudes * l1_problem_weights[:, None, None] * lambda_l1, dim=2)
+
+    return gradient_weighted_l1_regularizer, weighted_l1_loss
+
+
 def build_at_a_matrix(ft_canonical: np.ndarray,
                       valid_phase_shifts: np.ndarray,
                       n_true_frequencies: int) -> np.ndarray:
@@ -151,9 +215,9 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         n_true_frequencies: int,
         max_iter: int,
         device: torch.device,
-        l1_regularization_lambda: Optional[float] = None,
-        normalization_scale_factor: Optional[np.ndarray] = None,
         converge_epsilon: float = 1e-3,
+        l1_regularization_callable: Optional[
+            Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) \
         -> Tuple[np.ndarray, np.ndarray]:
@@ -175,19 +239,6 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
     '''
 
     n_observations, n_rfft_frequencies = observed_ft.shape
-
-    ######### Set up the normalization bookkeeping if we choose to use it #####################################
-    if normalization_scale_factor is None:
-        normalization_scale_factor = np.ones((n_observations,), dtype=np.float32)
-
-    # shape (n_observations, )
-    normalization_scale_factor_torch = torch.tensor(normalization_scale_factor, dtype=torch.float32, device=device)
-    normalization_scale_factor_torch_square = normalization_scale_factor_torch * normalization_scale_factor_torch
-
-    ##### Set up L1 regularization, if specified ##############################################################
-    # we have to rescale the L1 term by the original waveform L2 norm if we scale the data by L2 norm
-    if l1_regularization_lambda is not None:
-        l1_torch_scaled = l1_regularization_lambda * normalization_scale_factor_torch
 
     ##### Generate the appropriate A^T A matrices and A^T b vectors ###########################################
 
@@ -231,26 +282,13 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
 
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
     gradient = at_a_x - unshared_at_b_vector
-    if l1_regularization_lambda is not None:
-        gradient += l1_torch_scaled[:, None, None]
+    if l1_regularization_callable is not None:
+        l1_regularize_grad_callable, _ = l1_regularization_callable
+        gradient += l1_regularize_grad_callable()
 
     if spatial_continuity_regularizer is not None:
         spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
-
-        # in order to use the spatial continuity lambdas we need to have the amplitudes scaled
-        # back up to the original unscaled version
-        amplitudes_scaled_orig = amplitudes / normalization_scale_factor_torch[:, None, None]
-
-        # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
-        spat_cont_unscaled_gradient = spatial_continuity_grad_fn(amplitudes_scaled_orig)
-
-        # in the case that we rescaled the target waveform, we also have to rescale
-        # the gradient of the spatial continuity term so that it matches up with
-        # the rest of the objective function
-        spat_cont_scaled_gradient = spat_cont_unscaled_gradient * normalization_scale_factor_torch_square[:, None, None]
-
-        # now we have to rescale the gradient
-        gradient += spat_cont_scaled_gradient
+        gradient += spatial_continuity_grad_fn(amplitudes)
 
     for step_num in range(max_iter):
 
@@ -263,20 +301,13 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
 
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         gradient = at_a_x - unshared_at_b_vector
-        if l1_regularization_lambda is not None:
-            gradient += l1_torch_scaled[:, None, None]
+        if l1_regularization_callable is not None:
+            l1_regularize_grad_callable, _ = l1_regularization_callable
+            gradient += l1_regularize_grad_callable()
 
         if spatial_continuity_regularizer is not None:
             spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
-
-            amplitudes_scaled_orig = amplitudes / normalization_scale_factor_torch[:, None, None]
-
-            # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
-            spat_cont_unscaled_gradient = spatial_continuity_grad_fn(amplitudes_scaled_orig)
-            spat_cont_scaled_gradient = spat_cont_unscaled_gradient * normalization_scale_factor_torch_square[:,
-                                                                      None, None]
-
-            gradient += spat_cont_scaled_gradient
+            gradient += spatial_continuity_grad_fn(amplitudes)
 
         step_distance = next_amplitudes - amplitudes
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
@@ -293,23 +324,15 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
     xt_at_a_x = (amplitudes[:, :, None, :] @ at_a_x[:, :, :, None]).squeeze()
     xt_at_b = (amplitudes[:, :, None, :] @ unshared_at_b_vector[:, :, :, None]).squeeze()
 
+    _, l1_loss_callable = l1_regularization_callable
+
     # shape (n_observations, n_valid_phase_shifts)
-    l1_obj_penalties = l1_regularization_lambda * torch.sum(amplitudes, dim=2)
+    l1_obj_penalties = l1_loss_callable(amplitudes)
     partial_objective = 0.5 * xt_at_a_x - xt_at_b + l1_obj_penalties
 
     if spatial_continuity_regularizer is not None:
         _, spatial_continuity_penalty_fn = spatial_continuity_regularizer
-
-        # in order to use the spatial continuity lambdas we need to have the amplitudes scaled
-        # back up to the original unscaled version
-        amplitudes_scaled_orig = amplitudes / normalization_scale_factor_torch[:, None, None]
-
-        # shape (n_observations, n_valid_phase_shifts)
-        spat_cont_unscaled_penalty = spatial_continuity_penalty_fn(amplitudes_scaled_orig)
-
-        spat_cont_scaled_penalty = spat_cont_unscaled_penalty * normalization_scale_factor_torch_square[:, None]
-
-        partial_objective = partial_objective + spat_cont_scaled_penalty
+        partial_objective = partial_objective + spatial_continuity_penalty_fn(amplitudes)
 
     return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
 
@@ -322,9 +345,9 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         n_true_frequencies: int,
         max_iter: int,
         device: torch.device,
-        l1_regularization_lambda: Optional[float] = None,
-        normalization_scale_factor: Optional[np.ndarray] = None,
         converge_epsilon: float = 1e-3,
+        l1_regularization_callable: Optional[
+            Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) \
         -> Tuple[np.ndarray, np.ndarray]:
@@ -358,19 +381,6 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
 
     n_observations, n_rfft_frequencies = observed_ft.shape
     n_canonical_waveforms, n_valid_phase_shifts = valid_phase_shifts.shape
-
-    ######### Set up the normalization bookkeeping if we choose to use it #####################################
-    if normalization_scale_factor is None:
-        normalization_scale_factor = np.ones((n_observations,), dtype=np.float32)
-
-    # shape (n_observations, )
-    normalization_scale_factor_torch = torch.tensor(normalization_scale_factor, dtype=torch.float32, device=device)
-    normalization_scale_factor_torch_square = normalization_scale_factor_torch * normalization_scale_factor_torch
-
-    ##### Set up L1 regularization, if specified ##############################################################
-    # we have to rescale the L1 term by the original waveform L2 norm if we scale the data by L2 norm
-    if l1_regularization_lambda is not None:
-        l1_torch_scaled = l1_regularization_lambda * normalization_scale_factor_torch
 
     #### Step 1: build A^T A from circular cross correlation #####################################
 
@@ -414,27 +424,13 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
 
     # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
     gradient = at_a_x - at_b_torch
-    if l1_regularization_lambda is not None:
-        # l1_regularization_lambda has shape (n_observations, )
-        gradient += l1_torch_scaled[:, None, None]
+    if l1_regularization_callable is not None:
+        l1_regularize_grad_callable, _ = l1_regularization_callable
+        gradient += l1_regularize_grad_callable()
 
     if spatial_continuity_regularizer is not None:
         spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
-
-        # in order to use the spatial continuity lambdas we need to have the amplitudes scaled
-        # back up to the original unscaled version
-        amplitudes_scaled_orig = amplitudes / normalization_scale_factor_torch[:, None, None]
-
-        # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
-        spat_cont_unscaled_gradient = spatial_continuity_grad_fn(amplitudes_scaled_orig)
-
-        # in the case that we rescaled the target waveform, we also have to rescale
-        # the gradient of the spatial continuity term so that it matches up with
-        # the rest of the objective function
-        spat_cont_scaled_gradient = spat_cont_unscaled_gradient * normalization_scale_factor_torch_square[:, None, None]
-
-        # now we have to rescale the gradient
-        gradient += spat_cont_scaled_gradient
+        gradient += spatial_continuity_grad_fn(amplitudes)
 
     for step_num in range(max_iter):
 
@@ -446,21 +442,13 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
 
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         gradient = at_a_x - at_b_torch
-        if l1_regularization_lambda is not None:
-            # l1_regularization_lambda has shape (n_observations, )
-            gradient += l1_torch_scaled[:, None, None]
+        if l1_regularization_callable is not None:
+            l1_regularize_grad_callable, _ = l1_regularization_callable
+            gradient += l1_regularize_grad_callable()
 
         if spatial_continuity_regularizer is not None:
             spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
-
-            amplitudes_scaled_orig = amplitudes / normalization_scale_factor_torch[:, None, None]
-
-            # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
-            spat_cont_unscaled_gradient = spatial_continuity_grad_fn(amplitudes_scaled_orig)
-            spat_cont_scaled_gradient = spat_cont_unscaled_gradient * normalization_scale_factor_torch_square[:, None,
-                                                                      None]
-
-            gradient += spat_cont_scaled_gradient
+            gradient += spatial_continuity_grad_fn(amplitudes)
 
         step_distance = next_amplitudes - amplitudes
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
@@ -479,23 +467,15 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
 
     partial_objective = 0.5 * xt_at_a_x - xt_at_b
 
+    _, l1_loss_callable = l1_regularization_callable
+
     # shape (n_observations, n_valid_phase_shifts)
-    l1_obj_penalties = l1_regularization_lambda * torch.sum(amplitudes, dim=2)
+    l1_obj_penalties = l1_loss_callable(amplitudes)
     partial_objective = partial_objective + l1_obj_penalties
 
     if spatial_continuity_regularizer is not None:
         _, spatial_continuity_penalty_fn = spatial_continuity_regularizer
-
-        # in order to use the spatial continuity lambdas we need to have the amplitudes scaled
-        # back up to the original unscaled version
-        amplitudes_scaled_orig = amplitudes / normalization_scale_factor_torch[:, None, None]
-
-        # shape (n_observations, n_valid_phase_shifts)
-        spat_cont_unscaled_penalty = spatial_continuity_penalty_fn(amplitudes_scaled_orig)
-
-        spat_cont_scaled_penalty = spat_cont_unscaled_penalty * normalization_scale_factor_torch_square[:, None]
-
-        partial_objective = partial_objective + spat_cont_scaled_penalty
+        partial_objective = partial_objective + spatial_continuity_penalty_fn(amplitudes)
 
     return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
 
@@ -509,11 +489,11 @@ def coarse_to_fine_time_shifts_and_amplitudes(
         second_pass_best_n: int,
         second_pass_width: int,
         device: torch.device,
-        l1_regularization_lambda: Optional[float] = None,
-        normalization_scale_factor: Optional[np.ndarray] = None,
         converge_epsilon: float = 1e-3,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
         max_batch_size: int = 8192,
+        l1_regularization_callable: Optional[
+            Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) -> \
         Tuple[np.ndarray, np.ndarray]:
@@ -585,9 +565,8 @@ def coarse_to_fine_time_shifts_and_amplitudes(
             n_true_frequencies,
             10000,
             device,
-            l1_regularization_lambda=l1_regularization_lambda,
-            normalization_scale_factor=normalization_scale_factor,
             converge_epsilon=converge_epsilon,
+            l1_regularization_callable=l1_regularization_callable,
             spatial_continuity_regularizer=spatial_continuity_regularizer
         )
         amplitude_results[:, low:high, :] = amplitude_batch
@@ -644,9 +623,8 @@ def coarse_to_fine_time_shifts_and_amplitudes(
             n_true_frequencies,
             10000,
             device,
-            l1_regularization_lambda=l1_regularization_lambda,
-            normalization_scale_factor=normalization_scale_factor,
             converge_epsilon=converge_epsilon,
+            l1_regularization_callable=l1_regularization_callable,
             spatial_continuity_regularizer=spatial_continuity_regularizer
         )
         amplitude_results[:, low:high, :] = amplitude_batch

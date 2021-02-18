@@ -7,7 +7,8 @@ import tqdm
 
 from lib.amplitude_optimization import nonnegative_least_squares_optimize_amplitudes
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
-from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes
+from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
+    make_unweighted_l1_regularizer, make_by_cell_weighted_l1_regularizer
 from lib.template_matching import greedy_template_match_time_shift, torch_fit_integer_shifts_all_but_one_template_match
 from lib.util_fns import bspline_upsample_waveforms, generate_fourier_phase_shift_matrices, debug_evaluate_error, \
     EIDecomposition, pack_significant_electrodes_into_matrix, unpack_amplitudes_and_phases_into_ei_shape
@@ -182,7 +183,8 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
                                                 device: torch.device,
                                                 max_batch_size=8192,
                                                 l1_regularization_lambda: Optional[float] = None,
-                                                waveform_observation_loss_weight: Optional[np.ndarray] = None,
+                                                orig_data_magnitude: Optional[np.ndarray] = None,
+                                                waveform_observation_loss_weight : Optional[np.ndarray] = None,
                                                 sobolev_regularization_lambda: Optional[float] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     '''
@@ -203,8 +205,9 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
     :param amplitude_init_range: (low, high), range to initialize the amplitudes
     :param n_iter: number of iteration steps
     :param device:
-    :param l1_regularization_lambda:
-    :param waveform_observation_loss_weight:
+    :param l1_regularization_lambda: weight for L1 regularization
+    :param orig_data_magnitude: shape (n_observations, ), L2 norm of the original data waveforms, this
+        parameter is optional and is used only if waveform_data_matrix was scaled by the L2 norm
     :param sobolev_regularization_lambda:
     :return:
     '''
@@ -216,6 +219,13 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
     # shape (n_observations, n_frequencies)
     observations_fourier_transform = np.fft.rfft(waveform_data_matrix, axis=1)
     iter_canonical_waveform_ft = np.fft.rfft(initialized_canonical_waveforms, axis=1)
+
+    if orig_data_magnitude is None:
+        l1_regularization_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
+    else:
+        l1_regularization_callable = make_by_cell_weighted_l1_regularizer(orig_data_magnitude,
+                                                                          l1_regularization_lambda,
+                                                                          device)
 
     print("Beginning optimization loop")
     pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization')
@@ -237,9 +247,9 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
             fine_search_top_n,
             fine_search_width,
             device,
-            l1_regularization_lambda=l1_regularization_lambda,
+            l1_regularization_callable=l1_regularization_callable,
             amplitude_initialize_range=amplitude_init_range,
-            max_batch_size=max_batch_size,
+            max_batch_size=max_batch_size
         )
 
         # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
@@ -552,7 +562,6 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
                                                     fine_search_width: int = 2,
                                                     grid_search_batch_size: int = 8192,
                                                     maxiter_decomp: int = 25,
-                                                    renormalize_data_waveforms_amplitude_fit: bool = True,
                                                     renormalize_data_waveforms_waveform_fit: bool = True,
                                                     l1_regularize_lambda: Optional[float] = None,
                                                     sobolev_regularize_lambda: Optional[float] = None,
@@ -575,16 +584,21 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
     bspline_supersampled = bspline_upsample_waveforms(ei_data_mat, supersample_factor)
 
     # now zero pad before and after
+    # shpae (n_observations, n_samples)
     padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
                                                   [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                                   mode='constant')
 
     n_observations, n_samples = padded_channels_sufficient_magnitude.shape
 
+    # shape (n_observations, )
     mag_padded = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
+
+    # shape (n_observations, n_samples)
     padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude / mag_padded[:, None]
 
-    waveform_fourier_weights = (mag_padded * mag_padded)
+    # shape (n_observations, n_observations)
+    waveform_fourier_weights = mag_padded * mag_padded
 
     if n_basis_vectors is not None:
         # have to randomly initialize basis waveforms
@@ -615,6 +629,7 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         device,
         max_batch_size=grid_search_batch_size,
         l1_regularization_lambda=l1_regularize_lambda,
+        orig_data_magnitude=mag_padded,
         sobolev_regularization_lambda=sobolev_regularize_lambda,
         waveform_observation_loss_weight=(None if renormalize_data_waveforms_waveform_fit else waveform_fourier_weights)
     )

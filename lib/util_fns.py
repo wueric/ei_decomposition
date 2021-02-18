@@ -246,11 +246,6 @@ def unpack_flat_into_by_cell(flat_matrix: np.ndarray,
     return waveforms_padded_by_cell
 
 
-def unpack_flattened_magnitudes_into_by_cell(flattened_magnitudes: np.ndarray,
-                                             last_valid_indices: np.ndarray) -> np.ndarray:
-    pass
-
-
 def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
                                        included_in_padded_ei: np.ndarray,
                                        last_valid_indices: np.ndarray) -> np.ndarray:
@@ -276,30 +271,31 @@ def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
     '''
 
     n_cells, n_max_electrodes = included_in_padded_ei.shape
-    output_mean_matrix = np.zeros((n_cells, n_max_electrodes, n_max_electrodes), dtype=np.float32)
 
+    # first build the adjacency matrix for the full electrode map
+    # from that then calculate the mean matrix for the full electrode map
+    # then we take submatrices from the full mean matrix for each cell
+    full_matrix_n_electrodes = raw_adjacency_mat.shape[0]
+    full_adj_mat = np.zeros((full_matrix_n_electrodes, full_matrix_n_electrodes), dtype=np.float32)
+    for center_idx in range(full_matrix_n_electrodes):
+        nn_indices = raw_adjacency_mat[center_idx]
+        full_adj_mat[center_idx, nn_indices] = 1.0
+
+    # the mean matrix is calculated by dividing by columnwise sums
+    adj_mat_csums = np.sum(full_adj_mat, axis=0) # shape (full_matrix_n_electrodes, full_matrix_n_electrodes)
+    full_mean_mat = full_adj_mat / adj_mat_csums[None, :] # shape (full_matrix_n_electrodes, full_matrix_n_electrodes)
+
+    cell_mean_matrix = np.zeros((n_cells, n_max_electrodes, n_max_electrodes), dtype=np.float32)
     for cell_idx in range(n_cells):
-        last_valid_idx = last_valid_indices[cell_idx]
-        included_electrodes = included_in_padded_ei[cell_idx, :last_valid_idx]
+        n_valid_electrodes_cell = last_valid_indices[cell_idx]
 
-        el_id_to_idx = {}  # type: Dict[int, int]
-        for idx, el_id in enumerate(included_electrodes):
-            el_id_to_idx[el_id] = idx
+        relevant_electrodes_indices = included_in_padded_ei[cell_idx][:n_valid_electrodes_cell]
+        relevant_submatrix = full_mean_mat[np.ix_(relevant_electrodes_indices, relevant_electrodes_indices)]
+        cell_mean_matrix[:n_valid_electrodes_cell, :n_valid_electrodes_cell] = relevant_submatrix
 
-        mean_adjacency_matrix = np.zeros((n_max_electrodes, n_max_electrodes), dtype=np.float32)
-        for idx, el_id in enumerate(included_electrodes):
-            all_valid_neighbors_id = raw_adjacency_mat[idx]
+        pass
 
-            valid_neighbors_denom = len(all_valid_neighbors_id)
-
-            for adjacent_el_id in all_valid_neighbors_id:
-                if adjacent_el_id in el_id_to_idx:
-                    adjacent_idx = el_id_to_idx[adjacent_el_id]
-                    mean_adjacency_matrix[idx, adjacent_idx] = 1.0 / valid_neighbors_denom
-
-        output_mean_matrix[cell_idx, :, :] = mean_adjacency_matrix
-
-    return output_mean_matrix
+    return cell_mean_matrix
 
 
 def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,

@@ -16,78 +16,127 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
     grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell
 
 from lib.ei_decomposition import debug_evaluate_error
-from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes
+from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
+    make_by_cell_weighted_l1_regularizer
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
 
 
-def make_coord_descent_mean_connectivity_regularize_fn2(adjacency_mean_mat_by_cell: np.ndarray,
+def make_coord_descent_mean_connectivity_regularize_fn3(adjacency_mean_mat_by_cell: np.ndarray,
+                                                        dividable_data_waveform_magnitudes: np.ndarray,
                                                         all_amplitude_matrix: np.ndarray,
+                                                        last_valid_indices: np.ndarray,
                                                         lambda_spatial: float,
                                                         electrode_idx: int,
                                                         device: torch.device) \
         -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
     '''
-    Makes lambda functions to calculate both the value of the |AM-A|_F^2 spatial continuity penalty term
-        as well as its gradient
+    Makes lambda functions to calculate both the value of |AM-A|_F^2 spatial continuity penalty term (but in terms
+        of A' instead of A), as well as the gradient of the penalty term with respect to A', where A' is
+        the normalized amplitude matrix rather than the amplitude matrix
 
     :param adjacency_mean_mat_by_cell: Adjacency mean matrix for each cell,
         shape (n_cells, max_n_electrodes, max_n_electrodes)
-    :param all_amplitude_matrix: previously fitted amplitudes for each cell, with no rescaling applied (i.e. these
-        amplitudes should fit the raw EI). shape (n_cells, max_n_electrodes, n_canonical_waveforms)
+    :param dividable_data_waveform_magnitudes: L2 norms of the data waveforms, arranged in by-cell format. Entries
+        corresponding to disused electrodes have value 1, because we use this matrix for multiplication and division
+        only. Shape (n_cells, max_n_electrodes)
+    :param all_amplitude_matrix: previously fitted normalized amplitudes A' for each cell (with rescaling, these amplitudes
+        will not fit the raw EI). shape (n_cells, max_n_electrodes, n_canonical_waveforms). Entries corresponding to
+        unused electrodes must be zero
+    :param last_valid_indices: shape (n_cells, ), number of valid electrodes for each cell
     :param lambda_spatial: scalar multiple lambda for the spatial continuity penalty
     :param electrode_idx: the index of the center electrode that we are working with
     :param device:
-    :return: gradient callable, takes batched amplitudes of center electrode as input, and
-        penalty term callable, takes batched amplitudes of center electrode as input
+    :return:
     '''
 
     n_cells, max_n_electrodes, _ = adjacency_mean_mat_by_cell.shape
     _, _, n_canonical_waveforms = all_amplitude_matrix.shape
 
+    # shape (n_cells, max_n_electrodes)
+    one_over_mag_diag_by_cell = np.zeros((n_cells, max_n_electrodes), dtype=np.float32)
+    # shape (n_cells, max_n_electrodes, max_n_electrodes)
+    mean_mat_by_cell_minus_ident = np.zeros_like(adjacency_mean_mat_by_cell, dtype=np.float32)
+    for cell_idx in range(n_cells):
+        n_used_electrodes = last_valid_indices[cell_idx]
+        one_over_mag_diag_by_cell[
+        cell_idx, :n_used_electrodes] = 1.0 / dividable_data_waveform_magnitudes[:n_used_electrodes]
+
+        mean_mat_by_cell_minus_ident[cell_idx, :n_used_electrodes, :n_used_electrodes] = adjacency_mean_mat_by_cell[
+                                                                                         cell_idx, :n_used_electrodes,
+                                                                                         :n_used_electrodes]
+        mean_mat_by_cell_minus_ident[cell_idx, np.r_[:n_used_electrodes], np.r_[:n_used_electrodes]] -= 1.0
+
+    # shape (n_cells, max_n_electrodes)
+    one_over_mag_diag_torch = torch.tensor(one_over_mag_diag_by_cell, dtype=torch.float32, device=device)
+
+    # shape (n_cells, max_n_electrodes, max_n_electrodes)
+    mean_mat_by_cell_minus_ident_torch = torch.tensor(mean_mat_by_cell_minus_ident, dtype=torch.float32, device=device)
+
+    # shape (n_cells, max_n_electrodes, max_n_electrodes)
+    m_i_t_m_i = mean_mat_by_cell_minus_ident_torch.permute(0, 2, 1) @ mean_mat_by_cell_minus_ident_torch
+    diag_m_i_t_m_i_diag = one_over_mag_diag_torch[:, None, :] * m_i_t_m_i * m_i_t_m_i[:, :, None]
+
     # shape (n_cells, n_canonical_waveforms, max_n_electrodes)
     amplitude_mat_torch = torch.tensor(all_amplitude_matrix.transpose((0, 2, 1)), dtype=torch.float32, device=device)
-    # shape (n_cells, max_n_electrodes)
-    adj_mean_torch = torch.tensor(adjacency_mean_mat_by_cell[:, :, electrode_idx], dtype=torch.float32, device=device)
 
-    # shape (n_cells, n_canonical_waveforms)
-    relevant_am_product = (amplitude_mat_torch @ adj_mean_torch[:, :, None]).squeeze(2)
+    # shape (n_cells, n_canonical_waveforms, max_n_electrodes)
+    amplitude_mat_torch_without_electrode = amplitude_mat_torch.clone()
+    amplitude_mat_torch_without_electrode[:, :, electrode_idx] = 0.0
 
-    def gradient_callable(batched_amplitudes: torch.Tensor) -> torch.Tensor:
+    # shape (n_cells, max_n_electrodes, max_n_electrodes)
+    mean_mat_torch = torch.tensor(adjacency_mean_mat_by_cell, dtype=torch.float32, device=device)
+
+    def gradient_callable(batched_normalized_electrode_amplitudes: torch.Tensor) -> torch.Tensor:
         '''
         Gradient w.r.t. amplitudes of the spatial continuity penalty, with lambda included
 
-        :param batched_amplitudes: shape (n_cells, ..., n_canonical_waveforms), with no normalization whatsoever (i.e.
-            proportional to the original raw EI waveform)
-        :return: gradient, shape (n_cells, ..., n_canonical_waveforms)
+        :param batched_normalized_amplitudes: shape (n_cells, batch_size, n_canonical_waveforms), with normalization
+            This is A', which if used directly will not fit the raw EIs
+        :return: gradient, shape (n_cells, batch_size, n_canonical_waveforms)
         '''
-        ndim_batched_amplitudes = batched_amplitudes.ndim
-        slice_obj = [slice(None), ]
-        for i in range(ndim_batched_amplitudes - 2):
-            slice_obj.append(None)
-        slice_obj.append(slice(None))
 
-        return lambda_spatial * (batched_amplitudes - relevant_am_product[slice_obj])
+        _, batch_size, _ = batched_normalized_electrode_amplitudes.shape
 
-    def loss_callable(batched_amplitudes: torch.Tensor) -> torch.Tensor:
+        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes
+        batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
+        batched_amplitude_mat[:, :, :, electrode_idx] += batched_normalized_electrode_amplitudes
+
+        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
+        all_grad = batched_amplitude_mat @ diag_m_i_t_m_i_diag[:, None, :, :]
+
+        # shape (n_cells, batch_size, n_canonical_waveforms)
+        return all_grad[:, :, :, electrode_idx] * lambda_spatial
+
+    def loss_callable(batched_normalized_electrode_amplitudes: torch.Tensor) -> torch.Tensor:
         '''
         Value of the spatial continuity penalty, with lambda included
 
-        :param batched_amplitudes: shape (n_cells, ..., n_canonical_waveforms), with no normalization whatsoever (i.e.
-            proportional to the original raw EI waveform)
+        Note that the implementation of this needs to careful to avoid including the unused electrodes at the
+            end of the data
+
+        :param batched_normalized_amplitudes: shape (n_cells, batch_size, n_canonical_waveforms), with normalization
+            This is A', which if used directly will not fit the raw EIs
         :return: loss value, shape (n_cells, ...)
         '''
-        ndim_batched_amplitudes = batched_amplitudes.ndim
-        slice_obj = [slice(None), ]
-        for i in range(ndim_batched_amplitudes - 2):
-            slice_obj.append(None)
-        slice_obj.append(slice(None))
+        _, batch_size, _ = batched_normalized_electrode_amplitudes.shape
 
-        # shape (n_cells, ..., n_canonical_waveforms)
-        difference_mat = batched_amplitudes - relevant_am_product[slice_obj]
+        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes
+        batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
+        batched_amplitude_mat[:, :, :, electrode_idx] += batched_normalized_electrode_amplitudes
 
-        # shape (n_cells, ...)
-        total_loss = torch.sum(difference_mat * difference_mat, dim=-1) * lambda_spatial / 2
-        return total_loss
+        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
+        a_prime_diag = batched_amplitude_mat * one_over_mag_diag_torch[:, None, None, :]
+
+        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
+        a_prime_diag_m = a_prime_diag @ mean_mat_torch[:, None, :, :]
+
+        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
+        diff_matrix = a_prime_diag_m - a_prime_diag
+
+        # shpae (n_cells, batch_size)
+        frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(3, 4))
+
+        return lambda_spatial * frob_norm / 2.0
 
     return gradient_callable, loss_callable
 
@@ -95,8 +144,10 @@ def make_coord_descent_mean_connectivity_regularize_fn2(adjacency_mean_mat_by_ce
 def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
                                              ft_canonical: np.ndarray,
                                              n_true_frequencies: int,
+                                             last_valid_indices: np.ndarray,
                                              neighborhood_mean_mat: np.ndarray,
-                                             initial_amplitudes_by_cell: np.ndarray,
+                                             prev_iter_amplitudes_by_cell: np.ndarray,
+                                             normalization_scale_factor: np.ndarray,
                                              spatial_regularization_lambda: float,
                                              valid_phase_shift_range: Tuple[int, int],
                                              first_pass_step_size: int,
@@ -104,9 +155,9 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
                                              second_pass_width: int,
                                              device: torch.device,
                                              l1_regularization_lambda: Optional[float] = None,
-                                             normalization_scale_factor: Optional[np.ndarray] = None,
                                              amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
-                                             least_squares_converge_epsilon: float = 1e-3) \
+                                             least_squares_converge_epsilon: float = 1e-3,
+                                             max_batch_size: Optional[int] = 8192) \
         -> Tuple[np.ndarray, np.ndarray]:
     '''
     Does one pass of coordinate descent on the amplitudes and time shifts, parallelizing by cell
@@ -119,8 +170,13 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
     :param ft_canonical: basis waveforms in Fourier domain, unshifted, complex valued,
         shape (n_canonical_waveforms, n_rfft_frequencies)
     :param n_true_frequencies: number of actual (not rFFT) FFT frequencies
+    :param last_valid_indices: shape (n_cells, ), integer-valued, number of valid electrodes for each cell in
+        observed_ft_by_cell
     :param neighborhood_mean_mat: mean adjacency matrix for each cell, shape (n_cells, max_n_electrodes, max_n_electrodes)
-    :param initial_amplitudes_by_cell: initial amplitudes, shape (n_cells, max_n_electrodes, n_canonical_waveforms)
+    :param prev_iter_amplitudes_by_cell: initial amplitudes, shape (n_cells, max_n_electrodes, n_canonical_waveforms)
+    :param normalization_scale_factor: Scale factor that was applied to the data waveforms,
+        shape (n_cells, max_n_electrodes). Cannot contain any zeros for disused electrodes, so need to take care of
+        this in the caller of this function
     :param valid_phase_shift_range: range of sample shifts to consider
     :param first_pass_step_size: int, step size for the first pass grid search
     :param second_pass_best_n: int, algorithm expands upon the second_pass_best_n best results from the first pass
@@ -130,9 +186,6 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
     :param spatial_regularization_lambda: spatial regularization penalty weight
     :param device: torch.device
     :param l1_regularization_lambda: L1 basis waveform weight penalty
-    :param normalization_scale_factor: Scale factor that was applied to the data waveforms,
-        shape (n_cells, max_n_electrodes). Cannot contain any zeros for disused electrodes, so need to take care of
-        this in the caller of this function
     :param least_squares_converge_epsilon:
     :return:
     '''
@@ -141,7 +194,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
     n_canonical_waveforms, _ = ft_canonical.shape
 
     # shape (n_cells, max_n_electrodes, n_canonical_waveforms)
-    amplitudes_cd_matrix = initial_amplitudes_by_cell.copy()
+    amplitudes_cd_matrix = prev_iter_amplitudes_by_cell.copy()
 
     # shape (n_cells, max_n_electrodes, n_canonical_waveforms)
     shifts_cd_matrix = np.zeros((n_cells, max_n_electrodes, n_canonical_waveforms), dtype=np.int32)
@@ -149,11 +202,19 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
     # solve the problems for each cell in parallel by electrode index
     pbar = tqdm.tqdm(total=max_n_electrodes, leave=False, desc='Optimization by electrode')
     for electrode_idx in range(max_n_electrodes):
-        spatial_regularizer_callable = make_coord_descent_mean_connectivity_regularize_fn2(neighborhood_mean_mat,
+        spatial_regularizer_callable = make_coord_descent_mean_connectivity_regularize_fn3(neighborhood_mean_mat,
+                                                                                           normalization_scale_factor,
                                                                                            amplitudes_cd_matrix,
+                                                                                           last_valid_indices,
                                                                                            spatial_regularization_lambda,
                                                                                            electrode_idx,
                                                                                            device)
+
+        l1_regularizer_callable = None
+        if l1_regularization_lambda is not None:
+            l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(normalization_scale_factor[:, electrode_idx],
+                                                                           l1_regularization_lambda,
+                                                                           device)
 
         parallel_amplitudes_el, parallel_shifts_el = coarse_to_fine_time_shifts_and_amplitudes(
             observed_ft_by_cell[:, electrode_idx, :],
@@ -164,12 +225,11 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
             second_pass_best_n,
             second_pass_width,
             device,
-            l1_regularization_lambda=l1_regularization_lambda,
-            normalization_scale_factor=normalization_scale_factor[:, electrode_idx],
             converge_epsilon=least_squares_converge_epsilon,
             amplitude_initialize_range=amplitude_initialize_range,
+            l1_regularization_callable=l1_regularizer_callable,
             spatial_continuity_regularizer=spatial_regularizer_callable,
-            max_batch_size=8192
+            max_batch_size=max_batch_size
         )
 
         amplitudes_cd_matrix[:, electrode_idx, :] = parallel_amplitudes_el
@@ -257,8 +317,10 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
             data_ft,
             iter_canonical_waveform_ft,
             n_frequencies_not_rfft,
+            last_valid_indices,
             neighborhood_mean_mat,
             initial_amplitudes_by_cell,
+            normalization_scale_factor,
             spatial_regularization_lambda,
             valid_shift_range,
             shift_grid_step,
@@ -267,7 +329,6 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
             device,
             amplitude_initialize_range=amplitude_init_range,
             l1_regularization_lambda=l1_regularization_lambda,
-            normalization_scale_factor=normalization_scale_factor,
         )
 
         # iter_real_amplitudes and iter_delays have shape (n_cells, max_n_electrodes, n_canonical_waveforms)
@@ -388,9 +449,9 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
 
     prefit_decomp = initial_decomposition['decomposition']
     amplitudes_initialized_unflattened, phases = pack_full_by_cell_into_matrix_by_cell(prefit_decomp,
-                                                               temp_cell_order,
-                                                               max_n_electrodes,
-                                                               selected_above_threshold_els)
+                                                                                       temp_cell_order,
+                                                                                       max_n_electrodes,
+                                                                                       selected_above_threshold_els)
     waveforms = initial_decomposition['waveforms']
 
     neighbor_mean_matrices_by_cell = make_spatial_neighbors_mean_matrix(electrode_array_raw_adj_mat,
