@@ -223,7 +223,7 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
     if orig_data_magnitude is None:
         l1_regularization_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
     else:
-        l1_regularization_callable = make_by_cell_weighted_l1_regularizer(orig_data_magnitude,
+        l1_regularization_callable = make_by_cell_weighted_l1_regularizer(1.0 / (orig_data_magnitude * orig_data_magnitude),
                                                                           l1_regularization_lambda,
                                                                           device)
 
@@ -631,7 +631,8 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         l1_regularization_lambda=l1_regularize_lambda,
         orig_data_magnitude=mag_padded,
         sobolev_regularization_lambda=sobolev_regularize_lambda,
-        waveform_observation_loss_weight=(None if renormalize_data_waveforms_waveform_fit else waveform_fourier_weights)
+        #waveform_observation_loss_weight=(None if renormalize_data_waveforms_waveform_fit else waveform_fourier_weights)
+        waveform_observation_loss_weight = None
     )
 
     amplitudes = mag_padded[:, None] * amplitudes
