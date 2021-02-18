@@ -212,7 +212,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
 
         l1_regularizer_callable = None
         if l1_regularization_lambda is not None:
-            l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(normalization_scale_factor[:, electrode_idx],
+            l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(1.0 / (normalization_scale_factor[:, electrode_idx] * normalization_scale_factor[:, electrode_idx]),
                                                                            l1_regularization_lambda,
                                                                            device)
 
