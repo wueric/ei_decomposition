@@ -59,8 +59,9 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
 
     max_n_submatrix_electrodes = -1  # type: int
     for cell_idx in range(n_cells):
-        max_submatrix_electrodes = max(len(electrode_neighbor_indices_by_cell[cell_idx]) + 1,
-                                       max_n_submatrix_electrodes)
+        if electrode_neighbor_indices_by_cell[cell_idx] is not None:
+            max_n_submatrix_electrodes = max(len(electrode_neighbor_indices_by_cell[cell_idx]) + 1,
+                                             max_n_submatrix_electrodes)
 
     ###### Calculate 1 / diag |X|_2 #####################################################################
     ###### and pack the M-I submatrices #################################################################
@@ -86,12 +87,14 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
 
     for cell_idx in range(n_cells):
         neighbor_indices = electrode_neighbor_indices_by_cell[cell_idx]
+        mean_matrix_for_cell = adjacency_mean_mat_by_cell[cell_idx, :, :]
 
         if neighbor_indices is not None:
-            included_els = [electrode_idx, ] + neighbor_indices
+            included_els = [electrode_idx, ]
+            included_els.extend(list(neighbor_indices))
             n_included_els = len(included_els)
 
-            mean_submatrix = adjacency_mean_mat_by_cell[cell_idx, np.ix_(included_els, included_els)].copy()
+            mean_submatrix = mean_matrix_for_cell[np.ix_(included_els, included_els)].copy()
             mean_submatrices[cell_idx, :n_included_els, :n_included_els] = mean_submatrix
 
             mean_submatrix_minus_ident = mean_submatrix - np.eye(n_included_els, dtype=np.float32)
@@ -177,7 +180,7 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         diff_matrix = a_prime_diag_m - a_prime_diag
 
         # shpae (n_cells, batch_size)
-        frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(3, 4))
+        frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(2, 3))
 
         return lambda_spatial * frob_norm / 2.0
 
@@ -302,7 +305,7 @@ def make_coord_descent_mean_connectivity_regularize_fn3(adjacency_mean_mat_by_ce
         diff_matrix = a_prime_diag_m - a_prime_diag
 
         # shpae (n_cells, batch_size)
-        frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(3, 4))
+        frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(2, 3))
 
         return lambda_spatial * frob_norm / 2.0
 
@@ -371,7 +374,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
     pbar = tqdm.tqdm(total=max_n_electrodes, leave=False, desc='Optimization by electrode')
     for electrode_idx in range(max_n_electrodes):
 
-        kill_problems = (electrode_idx >= last_valid_indices) # shape (n_cells, )
+        kill_problems = (electrode_idx >= last_valid_indices)  # shape (n_cells, )
 
         electrode_nn_mat = get_neighbor_indices_from_adj_mat(neighborhood_mean_mat, electrode_idx)
         spatial_regularizer_callable = make_sparse_coord_descent_mean_connectivity_regularize_fn(neighborhood_mean_mat,
@@ -385,7 +388,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
         l1_regularizer_callable = None
         if l1_regularization_lambda is not None:
             l1_scale_factor = 1.0 / (
-                        normalization_scale_factor[:, electrode_idx] * normalization_scale_factor[:, electrode_idx])
+                    normalization_scale_factor[:, electrode_idx] * normalization_scale_factor[:, electrode_idx])
             l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(l1_scale_factor,
                                                                            l1_regularization_lambda,
                                                                            device)
