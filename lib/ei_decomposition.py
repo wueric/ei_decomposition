@@ -223,7 +223,8 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
     if orig_data_magnitude is None:
         l1_regularization_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
     else:
-        l1_regularization_callable = make_by_cell_weighted_l1_regularizer(1.0 / (orig_data_magnitude * orig_data_magnitude),
+        l1_reg_weight = 1.0 / np.power(orig_data_magnitude, 3)
+        l1_regularization_callable = make_by_cell_weighted_l1_regularizer(l1_reg_weight,
                                                                           l1_regularization_lambda,
                                                                           device)
 

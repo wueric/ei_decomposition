@@ -13,7 +13,7 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
     make_electrode_padded_ei_data_matrix, make_spatial_neighbors_mean_matrix, \
     pack_by_cell_into_flat, unpack_flat_into_by_cell, \
     pack_by_cell_amplitudes_and_phases_into_ei_shape, one_pad_disused_by_cell, \
-    grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, get_neighbor_indices_from_adj_mat
+    grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, get_neighborhood_indices_from_adj_mat
 
 from lib.ei_decomposition import debug_evaluate_error
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
@@ -376,7 +376,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
 
         kill_problems = (electrode_idx >= last_valid_indices)  # shape (n_cells, )
 
-        electrode_nn_mat = get_neighbor_indices_from_adj_mat(neighborhood_mean_mat, electrode_idx)
+        electrode_nn_mat = get_neighborhood_indices_from_adj_mat(neighborhood_mean_mat, electrode_idx)
         spatial_regularizer_callable = make_sparse_coord_descent_mean_connectivity_regularize_fn(neighborhood_mean_mat,
                                                                                                  normalization_scale_factor,
                                                                                                  amplitudes_cd_matrix,
@@ -387,8 +387,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
 
         l1_regularizer_callable = None
         if l1_regularization_lambda is not None:
-            l1_scale_factor = 1.0 / (
-                    normalization_scale_factor[:, electrode_idx] * normalization_scale_factor[:, electrode_idx])
+            l1_scale_factor = 1.0 / np.power(normalization_scale_factor[:, electrode_idx], 3)
             l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(l1_scale_factor,
                                                                            l1_regularization_lambda,
                                                                            device)

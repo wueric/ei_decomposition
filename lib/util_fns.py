@@ -92,8 +92,8 @@ def grab_above_threshold_electrodes_and_order(eis_by_cell_id: Dict[int, np.ndarr
 
 def make_electrode_padded_ei_data_matrix(eis_by_cell_id: Dict[int, np.ndarray],
                                          cell_order: List[int],
-                                         max_n_electrodes : int,
-                                         electrode_selection_by_cell : Dict[int, np.ndarray]) \
+                                         max_n_electrodes: int,
+                                         electrode_selection_by_cell: Dict[int, np.ndarray]) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     '''
 
@@ -210,7 +210,8 @@ def pack_by_cell_into_flat(waveforms_arranged_by_cell: np.ndarray,
     for cell_idx in range(n_cells):
         n_electrodes_for_cell = last_valid_indices[cell_idx]
         write_end = write_offset + n_electrodes_for_cell
-        output_flat_matrix[write_offset:write_end, ...] = waveforms_arranged_by_cell[cell_idx, :n_electrodes_for_cell, ...]
+        output_flat_matrix[write_offset:write_end, ...] = waveforms_arranged_by_cell[cell_idx, :n_electrodes_for_cell,
+                                                          ...]
 
         write_offset = write_end
 
@@ -246,12 +247,11 @@ def unpack_flat_into_by_cell(flat_matrix: np.ndarray,
     return waveforms_padded_by_cell
 
 
-def get_neighbor_indices_from_adj_mat(by_cell_adj_mat : np.ndarray,
-                                      center_electrode_idx : int) -> np.ndarray:
-
+def get_neighborhood_indices_from_adj_mat(by_cell_adj_mat: np.ndarray,
+                                          center_electrode_idx: int) -> np.ndarray:
     '''
-    Get the indices of the nearest neighbors of a center electrode from the
-        included-electrodes-only adjacency matrix representation
+    Get the indices of the nearest neighbors of a center electrode, as well as their nearest
+        neighbors from the included-electrodes-only adjacency matrix representation
 
     Indices in the adjacency list correspond to the indices of the included-electrode-only adjacency matrix
     :param by_cell_adj_mat:
@@ -260,11 +260,21 @@ def get_neighbor_indices_from_adj_mat(by_cell_adj_mat : np.ndarray,
     '''
 
     n_cells = by_cell_adj_mat.shape[0]
-    output_adj_lists = np.empty((n_cells, ), dtype=np.object)
+    output_adj_lists = np.empty((n_cells,), dtype=np.object)
     for cell_idx in range(n_cells):
-        has_valid_edges, = np.nonzero(by_cell_adj_mat[cell_idx, center_electrode_idx, :]) # shape (?, )
+        has_valid_edges, = np.nonzero(by_cell_adj_mat[cell_idx, center_electrode_idx, :])  # shape (?, )
         if has_valid_edges.shape[0] != 0:
-            output_adj_lists[cell_idx] = has_valid_edges
+            neighborhood_set = set()
+            for neighbor_el in has_valid_edges:
+                neighborhood_set.add(neighbor_el)
+
+                neighbors_of_neighbor_el, = np.nonzero(by_cell_adj_mat[cell_idx, neighbor_el, :])
+                if neighbors_of_neighbor_el.shape[0] != 0:
+                    for neighbor_neighbor_el in neighbors_of_neighbor_el:
+                        if neighbor_neighbor_el != center_electrode_idx:
+                            neighborhood_set.add(neighbor_neighbor_el)
+
+            output_adj_lists[cell_idx] = np.array(list(neighborhood_set))
     return output_adj_lists
 
 
@@ -304,8 +314,8 @@ def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
         full_adj_mat[center_idx, nn_indices] = 1.0
 
     # the mean matrix is calculated by dividing by columnwise sums
-    adj_mat_csums = np.sum(full_adj_mat, axis=0) # shape (full_matrix_n_electrodes, full_matrix_n_electrodes)
-    full_mean_mat = full_adj_mat / adj_mat_csums[None, :] # shape (full_matrix_n_electrodes, full_matrix_n_electrodes)
+    adj_mat_csums = np.sum(full_adj_mat, axis=0)  # shape (full_matrix_n_electrodes, full_matrix_n_electrodes)
+    full_mean_mat = full_adj_mat / adj_mat_csums[None, :]  # shape (full_matrix_n_electrodes, full_matrix_n_electrodes)
 
     cell_mean_matrix = np.zeros((n_cells, n_max_electrodes, n_max_electrodes), dtype=np.float32)
     for cell_idx in range(n_cells):
