@@ -575,8 +575,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
 
     result_dict = pack_by_cell_amplitudes_and_phases_into_ei_shape(amplitudes_by_cell,
                                                                    delays_by_cell,
-                                                                   matrix_indices_by_cell_id,
-                                                                   last_valid_indices,
+                                                                   selected_above_threshold_els,
                                                                    temp_cell_order,
                                                                    n_electrodes_total)
 

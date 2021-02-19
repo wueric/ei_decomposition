@@ -481,8 +481,7 @@ def unpack_amplitudes_and_phases_into_ei_shape(packed_amplitude_matrix: np.ndarr
 
 def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: np.ndarray,
                                                      by_cell_phase_matrix: np.ndarray,
-                                                     by_cell_ordered_electrodes: np.ndarray,
-                                                     last_valid_indices: np.ndarray,
+                                                     above_threshold_els_by_cell : Dict[int, np.ndarray],
                                                      cell_order: List[int],
                                                      orig_ei_n_electrodes: int) \
         -> Dict[int, EIDecomposition]:
@@ -491,9 +490,8 @@ def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: n
 
     :param by_cell_amplitude_matrix: amplitude matrix, shape (n_cells, max_n_electrodes, n_canonical_waveforms)
     :param by_cell_phase_matrix: phase matrix, integer valued, shape (n_cells, max_n_electrodes, n_canonical_waveforms)
-    :param by_cell_ordered_electrodes: electrode order, integer valued, shape (n_cells, max_n_electrodes). Unused slots
-        are marked -1
-    :param last_valid_indices: last valid electrode index for each cell
+    :param above_threshold_els_by_cell: valid electrodes by cell id, cell id -> np.ndarray of shape (n_electrodes, )
+        Each of the np.ndarray may have a different length
     :param cell_order: ordering of cells, list of integers
     :param orig_ei_n_electrodes: number of electrodes included in the full-size EI
     :return: Dict[int, EIDecomposition], EIDecomposition for each cell, keyed by cell_id
@@ -503,10 +501,8 @@ def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: n
 
     result_dict = {}  # type: Dict[int, EIDecomposition]
     for idx, cell_id in enumerate(cell_order):
-        electrode_order_including_invalid = by_cell_ordered_electrodes[idx, :]
-
-        n_valid_electrodes = last_valid_indices[idx]
-        electrode_order_valid = electrode_order_including_invalid[:n_valid_electrodes]
+        electrode_order_valid = above_threshold_els_by_cell[cell_id]
+        n_valid_electrodes = electrode_order_valid.shape[0]
 
         amplitude_matrix = np.zeros((orig_ei_n_electrodes, n_basis_waveforms), dtype=np.float32)
         amplitude_matrix[electrode_order_valid, :] = by_cell_amplitude_matrix[idx, :n_valid_electrodes, :]
