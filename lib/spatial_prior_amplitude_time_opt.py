@@ -132,6 +132,8 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
     # shape (n_cells, max_n_electrodes, max_n_electrodes)
     mean_submatrices_torch = torch.tensor(mean_submatrices, dtype=torch.float32, device=device)
 
+    grad_loss_scale_factor = torch.pow(one_over_mag_diag_torch[:, 0], 2)
+
     def gradient_callable(batched_normalized_electrode_amplitudes: torch.Tensor) -> torch.Tensor:
         '''
         Gradient w.r.t. amplitudes of the spatial continuity penalty, with lambda included
@@ -145,13 +147,14 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
 
         # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
         batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
-        batched_amplitude_mat[:, :, :, 0] += batched_normalized_electrode_amplitudes
+        batched_amplitude_mat[:, :, :, 0] = batched_normalized_electrode_amplitudes
 
         # shape (n_cells, batch_size, n_canonical_waveforms)
         all_grad = (batched_amplitude_mat @ diag_m_i_t_m_i_diag_relevant[:, None, :, None]).squeeze(3)
 
         # shape (n_cells, batch_size, n_canonical_waveforms)
-        return all_grad * lambda_spatial
+        #return all_grad * lambda_spatial * grad_loss_scale_factor[:, None, None]
+        return 0
 
     def loss_callable(batched_normalized_electrode_amplitudes: torch.Tensor) -> torch.Tensor:
         '''
@@ -168,7 +171,7 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
 
         # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
         batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
-        batched_amplitude_mat[:, :, :, 0] += batched_normalized_electrode_amplitudes
+        batched_amplitude_mat[:, :, :, 0] = batched_normalized_electrode_amplitudes
 
         # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
         a_prime_diag = batched_amplitude_mat * one_over_mag_diag_torch[:, None, None, :]
@@ -182,132 +185,8 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         # shpae (n_cells, batch_size)
         frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(2, 3))
 
-        return lambda_spatial * frob_norm / 2.0
-
-    return gradient_callable, loss_callable
-
-
-def make_coord_descent_mean_connectivity_regularize_fn3(adjacency_mean_mat_by_cell: np.ndarray,
-                                                        dividable_data_waveform_magnitudes: np.ndarray,
-                                                        all_amplitude_matrix: np.ndarray,
-                                                        last_valid_indices: np.ndarray,
-                                                        lambda_spatial: float,
-                                                        electrode_idx: int,
-                                                        device: torch.device) \
-        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
-    '''
-    Makes lambda functions to calculate both the value of |AM-A|_F^2 spatial continuity penalty term (but in terms
-        of A' instead of A), as well as the gradient of the penalty term with respect to A', where A' is
-        the normalized amplitude matrix rather than the amplitude matrix
-
-    :param adjacency_mean_mat_by_cell: Adjacency mean matrix for each cell,
-        shape (n_cells, max_n_electrodes, max_n_electrodes)
-    :param dividable_data_waveform_magnitudes: L2 norms of the data waveforms, arranged in by-cell format. Entries
-        corresponding to disused electrodes have value 1, because we use this matrix for multiplication and division
-        only. Shape (n_cells, max_n_electrodes)
-    :param all_amplitude_matrix: previously fitted normalized amplitudes A' for each cell (with rescaling, these amplitudes
-        will not fit the raw EI). shape (n_cells, max_n_electrodes, n_canonical_waveforms). Entries corresponding to
-        unused electrodes must be zero
-    :param last_valid_indices: shape (n_cells, ), number of valid electrodes for each cell
-    :param lambda_spatial: scalar multiple lambda for the spatial continuity penalty
-    :param electrode_idx: the index of the center electrode that we are working with
-    :param device:
-    :return:
-    '''
-
-    n_cells, max_n_electrodes, _ = adjacency_mean_mat_by_cell.shape
-    _, _, n_canonical_waveforms = all_amplitude_matrix.shape
-
-    # shape (n_cells, max_n_electrodes)
-    one_over_mag_diag_by_cell = np.zeros((n_cells, max_n_electrodes), dtype=np.float32)
-
-    # shape (n_cells, max_n_electrodes, max_n_electrodes)
-    mean_mat_by_cell_minus_ident = np.zeros_like(adjacency_mean_mat_by_cell, dtype=np.float32)
-    for cell_idx in range(n_cells):
-        n_used_electrodes = last_valid_indices[cell_idx]
-        one_over_mag_diag_by_cell[
-        cell_idx, :n_used_electrodes] = 1.0 / dividable_data_waveform_magnitudes[cell_idx, :n_used_electrodes]
-
-        mean_mat_by_cell_minus_ident[cell_idx, :n_used_electrodes, :n_used_electrodes] = adjacency_mean_mat_by_cell[
-                                                                                         cell_idx, :n_used_electrodes,
-                                                                                         :n_used_electrodes]
-        mean_mat_by_cell_minus_ident[cell_idx, np.r_[:n_used_electrodes], np.r_[:n_used_electrodes]] -= 1.0
-
-    # shape (n_cells, max_n_electrodes)
-    one_over_mag_diag_torch = torch.tensor(one_over_mag_diag_by_cell, dtype=torch.float32, device=device)
-
-    # shape (n_cells, max_n_electrodes, max_n_electrodes)
-    mean_mat_by_cell_minus_ident_torch = torch.tensor(mean_mat_by_cell_minus_ident, dtype=torch.float32, device=device)
-
-    # shape (n_cells, max_n_electrodes, max_n_electrodes)
-    m_i_t_m_i = mean_mat_by_cell_minus_ident_torch.permute(0, 2, 1) @ mean_mat_by_cell_minus_ident_torch
-
-    diag_m_i_t_m_i_diag = one_over_mag_diag_torch[:, None, :] * m_i_t_m_i * one_over_mag_diag_torch[:, :, None]
-
-    # shape (n_cells, n_canonical_waveforms, max_n_electrodes)
-    amplitude_mat_torch = torch.tensor(all_amplitude_matrix.transpose((0, 2, 1)), dtype=torch.float32, device=device)
-
-    # shape (n_cells, n_canonical_waveforms, max_n_electrodes)
-    amplitude_mat_torch_without_electrode = amplitude_mat_torch.clone()
-    amplitude_mat_torch_without_electrode[:, :, electrode_idx] = 0.0
-
-    # shape (n_cells, max_n_electrodes, max_n_electrodes)
-    mean_mat_torch = torch.tensor(adjacency_mean_mat_by_cell, dtype=torch.float32, device=device)
-
-    def gradient_callable(batched_normalized_electrode_amplitudes: torch.Tensor) -> torch.Tensor:
-        '''
-        Gradient w.r.t. amplitudes of the spatial continuity penalty, with lambda included
-
-        :param batched_normalized_amplitudes: shape (n_cells, batch_size, n_canonical_waveforms), with normalization
-            This is A', which if used directly will not fit the raw EIs
-        :return: gradient, shape (n_cells, batch_size, n_canonical_waveforms)
-        '''
-
-        _, batch_size, _ = batched_normalized_electrode_amplitudes.shape
-
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes
-        batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
-        batched_amplitude_mat[:, :, :, electrode_idx] += batched_normalized_electrode_amplitudes
-
-        diag_m_i_t_m_i_diag_relevant = diag_m_i_t_m_i_diag[:, :, electrode_idx]
-
-        # shape (n_cells, batch_size, n_canonical_waveforms)
-        all_grad = (batched_amplitude_mat @ diag_m_i_t_m_i_diag_relevant[:, None, :, None]).squeeze(3)
-
-        # shape (n_cells, batch_size, n_canonical_waveforms)
-        return all_grad * lambda_spatial
-
-    def loss_callable(batched_normalized_electrode_amplitudes: torch.Tensor) -> torch.Tensor:
-        '''
-        Value of the spatial continuity penalty, with lambda included
-
-        Note that the implementation of this needs to careful to avoid including the unused electrodes at the
-            end of the data
-
-        :param batched_normalized_amplitudes: shape (n_cells, batch_size, n_canonical_waveforms), with normalization
-            This is A', which if used directly will not fit the raw EIs
-        :return: loss value, shape (n_cells, ...)
-        '''
-        _, batch_size, _ = batched_normalized_electrode_amplitudes.shape
-
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes
-        batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
-        batched_amplitude_mat[:, :, :, electrode_idx] += batched_normalized_electrode_amplitudes
-
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
-        a_prime_diag = batched_amplitude_mat * one_over_mag_diag_torch[:, None, None, :]
-        print(a_prime_diag.shape, mean_mat_torch.shape)
-
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
-        a_prime_diag_m = a_prime_diag @ mean_mat_torch[:, None, :, :]
-
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_electrodes)
-        diff_matrix = a_prime_diag_m - a_prime_diag
-
-        # shpae (n_cells, batch_size)
-        frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(2, 3))
-
-        return lambda_spatial * frob_norm / 2.0
+        #return lambda_spatial * frob_norm * grad_loss_scale_factor[:, None] / 2.0
+        return 0
 
     return gradient_callable, loss_callable
 
@@ -410,7 +289,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
         )
 
         amplitudes_cd_matrix[:, electrode_idx, :] = parallel_amplitudes_el
-        shifts_cd_matrix[:, electrode_idx, :] = parallel_amplitudes_el
+        shifts_cd_matrix[:, electrode_idx, :] = parallel_shifts_el
 
         pbar.update(1)
     pbar.close()
