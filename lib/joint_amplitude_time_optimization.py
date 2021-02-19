@@ -7,7 +7,6 @@ import tqdm
 
 def make_unweighted_l1_regularizer(lambda_l1: float) \
         -> Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
-
     '''
 
     :param lambda_l1:
@@ -17,7 +16,7 @@ def make_unweighted_l1_regularizer(lambda_l1: float) \
     def gradient_l1_regularizer() -> torch.Tensor:
         return lambda_l1
 
-    def loss_l1_regularizer(batched_amplitudes : torch.Tensor) -> torch.Tensor:
+    def loss_l1_regularizer(batched_amplitudes: torch.Tensor) -> torch.Tensor:
         '''
 
         :param batched_amplitudes: shape (n_different_problems, batch_size, n_canonical_waveforms)
@@ -216,6 +215,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         max_iter: int,
         device: torch.device,
         converge_epsilon: float = 1e-3,
+        kill_problems: Optional[np.ndarray] = None,
         l1_regularization_callable: Optional[
             Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[
@@ -235,10 +235,16 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
     :param normalization_scale_factor: Scale factor that was applied to the original data waveforms,
         shape (n_observations, ).
     :param converge_epsilon: convergence criterion for projected gradient descent
+    :param kill_problems: Optional boolean np.ndarray, shape (n_observations, ). If None or unused, don't use
+        this feature. Marks specified problems as irrelevant when checking for convergence. Useful if we're
+        using this function for a parallel solver where some of the problems are zero-padded nonsense
     :return:
     '''
 
     n_observations, n_rfft_frequencies = observed_ft.shape
+
+    kill_problems_torch = torch.tensor(kill_problems, dtype=torch.bool,
+                                       device=device) if kill_problems is not None else None
 
     ##### Generate the appropriate A^T A matrices and A^T b vectors ###########################################
 
@@ -313,12 +319,22 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         step_distance = torch.sum(step_distance * step_distance, dim=2)  # shape (n_observations, n_valid_phase_shifts)
         convergence_bound = convergence_factor * step_distance  # shape (n_observations, n_valid_phase_shifts)
-        worst_bound = torch.max(convergence_bound).item()
-
         amplitudes = next_amplitudes
 
-        if worst_bound < converge_epsilon:
-            break
+        if kill_problems_torch is not None:
+            # some of the problems are invalid, and we don't care if some
+            # of the invalid problems haven't yet converged
+            worst_bound_by_problem = torch.max(convergence_bound, dim=1) # shape (n_observations)
+            all_valid_converged = torch.any(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            if all_valid_converged.item():
+                break
+        else:
+            # All of the subproblems are valid, so use the original
+            # termination condition where we stop when the last problem
+            # has converged reasonably
+            worst_bound = torch.max(convergence_bound).item()
+            if worst_bound < converge_epsilon:
+                break
 
     # now we have to calculate the objective values
     xt_at_a_x = (amplitudes[:, :, None, :] @ at_a_x[:, :, :, None]).squeeze()
@@ -346,6 +362,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         max_iter: int,
         device: torch.device,
         converge_epsilon: float = 1e-3,
+        kill_problems : Optional[np.ndarray] = None,
         l1_regularization_callable: Optional[
             Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[
@@ -376,11 +393,17 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
     :param n_true_frequencies: int
     :param l1_regularization_lambda: float, L1 regularization lambda
     :param normalization_scale_factor: Scale factor that was applied to the data waveforms, shape (n_observations, ).
+    :param kill_problems: Optional boolean np.ndarray, shape (n_observations, ). If None or unused, don't use
+        this feature. Marks specified problems as irrelevant when checking for convergence. Useful if we're
+        using this function for a parallel solver where some of the problems are zero-padded nonsense
     :return:
     '''
 
     n_observations, n_rfft_frequencies = observed_ft.shape
     n_canonical_waveforms, n_valid_phase_shifts = valid_phase_shifts.shape
+
+    kill_problems_torch = torch.tensor(kill_problems, dtype=torch.bool,
+                                       device=device) if kill_problems is not None else None
 
     #### Step 1: build A^T A from circular cross correlation #####################################
 
@@ -454,12 +477,22 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         step_distance = torch.sum(step_distance * step_distance, dim=2)  # shape (n_observations, n_valid_phase_shifts)
         convergence_bound = convergence_factor[None, :] * step_distance  # shape (n_observations, n_valid_phase_shifts)
-        worst_bound = torch.max(convergence_bound).item()
-
         amplitudes = next_amplitudes
 
-        if worst_bound < converge_epsilon:
-            break
+        if kill_problems_torch is not None:
+            # some of the problems are invalid, and we don't care if some
+            # of the invalid problems haven't yet converged
+            worst_bound_by_problem = torch.max(convergence_bound, dim=1) # shape (n_observations)
+            all_valid_converged = torch.any(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            if all_valid_converged.item():
+                break
+        else:
+            # All of the subproblems are valid, so use the original
+            # termination condition where we stop when the last problem
+            # has converged reasonably
+            worst_bound = torch.max(convergence_bound).item()
+            if worst_bound < converge_epsilon:
+                break
 
     # now we have to calculate the objective values
     xt_at_a_x = (amplitudes[:, :, None, :] @ at_a_x[:, :, :, None]).squeeze()
@@ -490,6 +523,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(
         second_pass_width: int,
         device: torch.device,
         converge_epsilon: float = 1e-3,
+        kill_problems : Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
         max_batch_size: int = 8192,
         l1_regularization_callable: Optional[
@@ -520,9 +554,10 @@ def coarse_to_fine_time_shifts_and_amplitudes(
     :param second_pass_width: int, one-sided width around the second_pass_best_n best results from the first pass grid
         search that the algorithm searches for the second pass
     :param device: torch.device
-    :param l1_regularization_lambda: float, lambda for L1 regularization of amplitudes
-    :param normalization_scale_factor: Scale factor that was applied to the data waveforms, shape (n_observations, )
     :param converge_epsilon:
+    :param kill_problems: Optional boolean np.ndarray, shape (n_observations, ). If None or unused, don't use
+        this feature. Marks specified problems as irrelevant when checking for convergence. Useful if we're
+        using this function for a parallel solver where some of the problems are zero-padded nonsense
     :param amplitude_initialize_range: range from which we uniformly at random initialize the amplitudes. Should have
         no bearing on the result, but may affect convergence speed
     :param max_batch_size: int, maximum batch size to solve at once
@@ -566,6 +601,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(
             10000,
             device,
             converge_epsilon=converge_epsilon,
+            kill_problems=kill_problems,
             l1_regularization_callable=l1_regularization_callable,
             spatial_continuity_regularizer=spatial_continuity_regularizer
         )
@@ -624,6 +660,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(
             10000,
             device,
             converge_epsilon=converge_epsilon,
+            kill_problems=kill_problems,
             l1_regularization_callable=l1_regularization_callable,
             spatial_continuity_regularizer=spatial_continuity_regularizer
         )

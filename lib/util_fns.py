@@ -246,6 +246,28 @@ def unpack_flat_into_by_cell(flat_matrix: np.ndarray,
     return waveforms_padded_by_cell
 
 
+def get_neighbor_indices_from_adj_mat(by_cell_adj_mat : np.ndarray,
+                                      center_electrode_idx : int) -> np.ndarray:
+
+    '''
+    Get the indices of the nearest neighbors of a center electrode from the
+        included-electrodes-only adjacency matrix representation
+
+    Indices in the adjacency list correspond to the indices of the included-electrode-only adjacency matrix
+    :param by_cell_adj_mat:
+    :param center_electrode_idx:
+    :return: shape (n_cells, ?) ragged np.ndarray of integer
+    '''
+
+    n_cells = by_cell_adj_mat.shape[0]
+    output_adj_lists = np.empty((n_cells, ), dtype=np.object)
+    for cell_idx in range(n_cells):
+        has_valid_edges, = np.nonzero(by_cell_adj_mat[cell_idx, center_electrode_idx, :]) # shape (?, )
+        if has_valid_edges.shape[0] != 0:
+            output_adj_lists[cell_idx] = has_valid_edges
+    return output_adj_lists
+
+
 def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
                                        included_in_padded_ei: np.ndarray,
                                        last_valid_indices: np.ndarray) -> np.ndarray:
