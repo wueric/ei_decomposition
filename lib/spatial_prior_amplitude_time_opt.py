@@ -13,7 +13,7 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
     make_electrode_padded_ei_data_matrix, make_spatial_neighbors_mean_matrix, \
     pack_by_cell_into_flat, unpack_flat_into_by_cell, \
     pack_by_cell_amplitudes_and_phases_into_ei_shape, one_pad_disused_by_cell, \
-    grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, get_neighborhood_indices_from_adj_mat
+    grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, get_neighborhood_indices_from_adj_mat_dfs
 
 from lib.ei_decomposition import debug_evaluate_error
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
@@ -89,21 +89,19 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         neighbor_indices = electrode_neighbor_indices_by_cell[cell_idx]
         mean_matrix_for_cell = adjacency_mean_mat_by_cell[cell_idx, :, :]
 
-        if neighbor_indices is not None:
-            included_els = [electrode_idx, ]
-            included_els.extend(list(neighbor_indices))
-            n_included_els = len(included_els)
+        if len(neighbor_indices) > 1:
+            n_included_els = len(neighbor_indices)
 
-            mean_submatrix = mean_matrix_for_cell[np.ix_(included_els, included_els)].copy()
+            mean_submatrix = mean_matrix_for_cell[np.ix_(neighbor_indices, neighbor_indices)].copy()
             mean_submatrices[cell_idx, :n_included_els, :n_included_els] = mean_submatrix
 
             mean_submatrix_minus_ident = mean_submatrix - np.eye(n_included_els, dtype=np.float32)
             mean_submatrices_minus_i[cell_idx, :n_included_els, :n_included_els] = mean_submatrix_minus_ident
 
             one_over_mag_diag_by_cell[cell_idx, :n_included_els] = 1.0 / dividable_data_waveform_magnitudes[
-                cell_idx, included_els]
+                cell_idx, neighbor_indices]
 
-            amplitude_submatrices[cell_idx, :n_included_els, :] = all_amplitude_matrix[cell_idx, included_els, :]
+            amplitude_submatrices[cell_idx, :n_included_els, :] = all_amplitude_matrix[cell_idx, neighbor_indices, :]
 
     ###### Transfer stuff over to GPU and calculate shared quantities ##########################
 
@@ -255,7 +253,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
 
         kill_problems = (electrode_idx >= last_valid_indices)  # shape (n_cells, )
 
-        electrode_nn_mat = get_neighborhood_indices_from_adj_mat(neighborhood_mean_mat, electrode_idx)
+        electrode_nn_mat = get_neighborhood_indices_from_adj_mat_dfs(neighborhood_mean_mat, electrode_idx, 2)
         spatial_regularizer_callable = make_sparse_coord_descent_mean_connectivity_regularize_fn(neighborhood_mean_mat,
                                                                                                  normalization_scale_factor,
                                                                                                  amplitudes_cd_matrix,

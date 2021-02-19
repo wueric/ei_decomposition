@@ -96,6 +96,8 @@ def make_electrode_padded_ei_data_matrix(eis_by_cell_id: Dict[int, np.ndarray],
                                          electrode_selection_by_cell: Dict[int, np.ndarray]) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     '''
+    Given a previously determined selection of electrodes for each cell,
+        pack a matrix representing the reduced EI for all of the cells
 
     :param eis_by_cell_id: Dict[int - cell_id, np.ndarray - EI with shape (n_electrodes, n_timepoints)
     :param cell_order : List[int] list of cell id
@@ -159,8 +161,8 @@ def pack_full_by_cell_into_matrix_by_cell(decomposition_dict: Dict[int, Tuple[np
         selected_electrodes_in_order = electrode_selection_by_cell_id[cell_id]
         n_electrodes_selected = selected_electrodes_in_order.shape[0]
 
-        stacked_amplitudes[idx, :n_electrodes_selected, :] = init_decomp_amp[n_electrodes_selected, :]
-        stacked_phases[idx, :n_electrodes_selected, :] = init_decomp_phase[n_electrodes_selected, :]
+        stacked_amplitudes[idx, :n_electrodes_selected, :] = init_decomp_amp[selected_electrodes_in_order, :]
+        stacked_phases[idx, :n_electrodes_selected, :] = init_decomp_phase[selected_electrodes_in_order, :]
 
     return stacked_amplitudes, stacked_phases
 
@@ -168,6 +170,8 @@ def pack_full_by_cell_into_matrix_by_cell(decomposition_dict: Dict[int, Tuple[np
 def one_pad_disused_by_cell(magnitudes_arranged_by_cell: np.ndarray,
                             last_valid_indices: np.ndarray) -> np.ndarray:
     '''
+    Replaces entries corresponding to unused electrodes with 1
+        Useful to avoid dividing by zero
 
     :param magnitudes_arranged_by_cell: magnitudes of each channel for each cell
         shape (n_cells, max_n_electrodes)
@@ -190,7 +194,8 @@ def pack_by_cell_into_flat(waveforms_arranged_by_cell: np.ndarray,
                            last_valid_indices: np.ndarray) -> np.ndarray:
     '''
     Rearranges and flattens 3D matrix of time domain waveforms that are arranged by cell into
-        a 2D matirx of time domain waveforms. Automatically cuts out zero-valued waveforms
+        a 2D matrix of time domain waveforms. Automatically cuts out zero-valued waveforms
+
     :param waveforms_arranged_by_cell: shape (n_cells, n_max_electrodes, ...)
     :param last_valid_indices: shape (n_cells, ), integer valued, contains the index of the last
         valid electrode in waveforms_arranged_by_cell
@@ -223,13 +228,15 @@ def unpack_flat_into_by_cell(flat_matrix: np.ndarray,
     '''
     Rearranges and unflattens a flat 2D matrix of time domain waveforms into a padded 3D matrix of time domain waveforms
         tht are arranged by cell
+
+    Reverse of pack_by_cell_into_flat
+
     :param flat_matrix: shape (n_waveforms_total, n_timepoints), flat matrix of waveforms
     :param last_valid_indices:  shape (n_cells, ), integer valued, contains the index of the last valid electrode for
         each cell
     :return: shape (n_cells, n_max_electrodes, n_timepoints)
     '''
 
-    print(flat_matrix.shape)
     n_total_waveforms, n_timepoints = flat_matrix.shape
     n_cells = last_valid_indices.shape[0]
     n_max_electrodes = np.max(last_valid_indices)
@@ -247,8 +254,9 @@ def unpack_flat_into_by_cell(flat_matrix: np.ndarray,
     return waveforms_padded_by_cell
 
 
-def get_neighborhood_indices_from_adj_mat(by_cell_adj_mat: np.ndarray,
-                                          center_electrode_idx: int) -> np.ndarray:
+def get_neighborhood_indices_from_adj_mat_dfs(by_cell_adj_mat: np.ndarray,
+                                              center_electrode_idx: int,
+                                              search_depth: int) -> np.ndarray:
     '''
     Get the indices of the nearest neighbors of a center electrode, as well as their nearest
         neighbors from the included-electrodes-only adjacency matrix representation
@@ -256,26 +264,42 @@ def get_neighborhood_indices_from_adj_mat(by_cell_adj_mat: np.ndarray,
     Indices in the adjacency list correspond to the indices of the included-electrode-only adjacency matrix
     :param by_cell_adj_mat:
     :param center_electrode_idx:
+    :param search_depth: depth in the DFS for which we search the neighborhood
     :return: shape (n_cells, ?) ragged np.ndarray of integer
     '''
 
+    def iterative_dfs_helper(adj_mat: np.ndarray,
+                             root_vert: int,
+                             depth: int) -> List[int]:
+
+        dfs_stack = [(root_vert, depth), ]
+        visited = set()
+        neighborhood_list = []
+
+        while len(dfs_stack) != 0:
+
+            # visit the node
+            current_node, current_depth = dfs_stack.pop()
+            visited.add(current_node)
+            neighborhood_list.append(current_node)
+
+            if current_depth != 0:
+                neighbor_els, = np.nonzero(adj_mat[current_node, :])
+                for neighbor_el in neighbor_els:
+                    if neighbor_el not in visited:
+                        dfs_stack.append((neighbor_el, current_depth - 1))
+
+        return neighborhood_list
+
+
     n_cells = by_cell_adj_mat.shape[0]
     output_adj_lists = np.empty((n_cells,), dtype=np.object)
+
     for cell_idx in range(n_cells):
-        has_valid_edges, = np.nonzero(by_cell_adj_mat[cell_idx, center_electrode_idx, :])  # shape (?, )
-        if has_valid_edges.shape[0] != 0:
-            neighborhood_set = set()
-            for neighbor_el in has_valid_edges:
-                neighborhood_set.add(neighbor_el)
+        neighborhood_list = iterative_dfs_helper(by_cell_adj_mat[cell_idx, :, :], center_electrode_idx, search_depth)
+        output_adj_lists[cell_idx] = neighborhood_list
 
-                neighbors_of_neighbor_el, = np.nonzero(by_cell_adj_mat[cell_idx, neighbor_el, :])
-                if neighbors_of_neighbor_el.shape[0] != 0:
-                    for neighbor_neighbor_el in neighbors_of_neighbor_el:
-                        if neighbor_neighbor_el != center_electrode_idx:
-                            neighborhood_set.add(neighbor_neighbor_el)
-
-            output_adj_lists[cell_idx] = np.array(list(neighborhood_set))
-    return output_adj_lists
+    return neighborhood_list
 
 
 def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
