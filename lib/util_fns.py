@@ -299,7 +299,7 @@ def get_neighborhood_indices_from_adj_mat_dfs(by_cell_adj_mat: np.ndarray,
         neighborhood_list = iterative_dfs_helper(by_cell_adj_mat[cell_idx, :, :], center_electrode_idx, search_depth)
         output_adj_lists[cell_idx] = neighborhood_list
 
-    return neighborhood_list
+    return output_adj_lists
 
 
 def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
