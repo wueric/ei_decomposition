@@ -255,6 +255,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
 
         kill_problems = (electrode_idx >= last_valid_indices)  # shape (n_cells, )
 
+        '''
         electrode_nn_mat = get_neighborhood_indices_from_adj_mat_dfs(neighborhood_mean_mat, electrode_idx, 2)
         spatial_regularizer_callable = make_sparse_coord_descent_mean_connectivity_regularize_fn(neighborhood_mean_mat,
                                                                                                  normalization_scale_factor,
@@ -263,6 +264,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
                                                                                                  electrode_idx,
                                                                                                  electrode_nn_mat,
                                                                                                  device)
+                                                                                                 '''
 
         l1_regularizer_callable = None
         if l1_regularization_lambda is not None:
@@ -284,7 +286,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
             kill_problems=kill_problems,
             amplitude_initialize_range=amplitude_initialize_range,
             l1_regularization_callable=l1_regularizer_callable,
-            spatial_continuity_regularizer=spatial_regularizer_callable,
+            #spatial_continuity_regularizer=spatial_regularizer_callable,
             max_batch_size=max_batch_size
         )
 
@@ -388,6 +390,8 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
             l1_regularization_lambda=l1_regularization_lambda,
         )
 
+        print(iter_real_amplitudes[0, :10, :], initial_amplitudes_by_cell[0,:10,:])
+
         # iter_real_amplitudes and iter_delays have shape (n_cells, max_n_electrodes, n_canonical_waveforms)
         # now we have to reshape iter_real_amplitudes and iter_delays
         # so that we can reuse the Fourier code
@@ -409,7 +413,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
         )
 
         # shape (n_canonical_waveforms, n_samples)
-        iter_canonical_waveform_td = np.fft.irfft(iter_canonical_waveform_ft, n=n_timepoints, axis=1)
+        iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_timepoints, axis=1))
 
         # now rescale the waveforms and amplitudes so that the basis waveforms each have L2 norm 1
         raw_optimized_waveform_magnitude = np.linalg.norm(iter_canonical_waveform_td, axis=1)
@@ -516,6 +520,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                                                                                        selected_above_threshold_els)
     waveforms = initial_decomposition['waveforms']
 
+    # shape (n_cells, max_n_electrodes, max_n_electrodes)
     neighbor_mean_matrices_by_cell = make_spatial_neighbors_mean_matrix(electrode_array_raw_adj_mat,
                                                                         matrix_indices_by_cell_id,
                                                                         last_valid_indices)
@@ -534,36 +539,23 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
     # shape (n_cells, max_n_electrodes), may contain zeros for disused electrodes
     # on a cell-by-cell basis, need to set those to one because we only use this
     # for multiplication and division
-    mag_by_cell = np.linalg.norm(padded_channels_by_cell, axis=2) # shape (n_cells, max_n_electrodes)
+    mag_by_cell = np.linalg.norm(padded_channels_by_cell, axis=2)
 
-    # shape (n_cells, max_n_electrodes)
+    # shape (n_cells, max_n_electrodes), does not contain any zeros
     mag_by_cell_one_padded = one_pad_disused_by_cell(mag_by_cell, last_valid_indices)
 
     # shape (n_cells, max_n_electrodes)
     waveform_observation_weights_by_cell = (mag_by_cell_one_padded * mag_by_cell_one_padded)
 
-    # shape (n_waveforms_total, n_timepoints)
-    padded_channels_flattened = pack_by_cell_into_flat(padded_channels_by_cell,
-                                                       last_valid_indices)
-    # shape (n_waveforms_total, )
-    mag_flattened = np.linalg.norm(padded_channels_flattened, axis=1)
-
-    # shape (n_waveforms_total, n_timepoints)
-    padded_channels_flattened = padded_channels_flattened / mag_flattened[:, None]
-
-    n_waveforms_total, _ = padded_channels_flattened.shape
+    # shape (n_cells, max_n_electrodes, n_timepoints)
+    padded_channels_by_cell_norm = padded_channels_by_cell / mag_by_cell[:, :, None]
 
     # amplitudes has shape (n_total_waveforms, n_basis_vectors)
     # waveforms has shape (n_basis_vectors, n_timepoints)
     # delays has shape (n_total_waveforms, n_basis_vectors) and is integer-valued
     # mse has shape (n_total_waveforms, )
-
-    # shape (n_cells, max_n_electrodes, n_timepoints)
-    normalized_unflattened_data_matrix = unpack_flat_into_by_cell(padded_channels_flattened,
-                                                                  last_valid_indices)
-
     amplitudes_by_cell, canonical_waveforms, delays_by_cell, mse = shifted_fourier_nmf_iterative_optimization_spatial(
-        normalized_unflattened_data_matrix,
+        padded_channels_by_cell_norm,
         last_valid_indices,
         waveforms,
         neighbor_mean_matrices_by_cell,
