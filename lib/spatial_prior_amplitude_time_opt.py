@@ -212,6 +212,8 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
         The core algorithm is grid search over a series of nonnegative least squares problems with
         regularization, solved using projected gradient descent
 
+    Optimizes the loss function
+
     :param observed_ft_by_cell: observed waveforms by cell in Fourier domain, complex valued,
         shape (n_cells, max_n_electrodes, n_rfft_frequencies). May contain zero-valued vectors.
         Potentially scaled, if it is scaled then normalization_scale_factor cannot None
@@ -321,6 +323,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
     :param initialized_canonical_waveforms: basis waveforms, shape (n_canonical_waveforms, n_timepoints)
     :param neighborhood_mean_mat: mean adjacency matrix for each cell, shape (n_cells, max_n_electrodes, max_n_electrodes)
     :param initial_amplitudes_by_cell : intialized amplitudes, shape (n_cells, max_n_electrodes, n_canonical_waveforms)
+    :param spatial_regularization_lambda: lambda scalar multiple for the spatial regularization term
     :param valid_shift_range: (low, high), range of valid sample shifts to consider for each canonical waveform
     :param shift_grid_step: spacing of the grid for the grid search
     :param fine_search_top_n: top n points from the grid search to expand on during the fine search
@@ -461,39 +464,44 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                 with optional Sobolev second difference regularization
 
 
-    :param padded_eis:
-    :param electrode_array_raw_adj_mat:
-    :param neighbors_mean_mat:
-    :param device:
-    :param n_basis_vectors:
-    :param initialized_basis_vectors:
-    :param snr_abs_threshold:
-    :param amplitude_random_init_range:
-    :param supersample_factor:
-    :param shifts:
+    :param eis_by_cell_id: cell_id (int) -> EI (np.ndarray). Each np.ndarray has shape (n_electrodes, n_timepoints)
+        These EIs are unpadded and at the original sample resolution. This function will automatically take care
+        of the upsampling and left/right time padding
+    :param electrode_array_raw_adj_mat: raw adjacency list representation of nearest neighbors for the electrode array
+        Has n_electrode rows, the i^{th} row contains a List[int] corresponding to the neighbors of electrode i
+        Everything is 0-indexed
+    :param spatial_regularization_lambda: regularization weight for the spatial regularization term
+    :param device: torch.device
+    :param snr_abs_threshold: float, maximum deviation from 0 on channel must exceed this value in order for the
+        channel to be included in the calculation
+    :param amplitude_random_init_range: Parameters of uniform distribution used to initialize the amplitudes for
+        the proximal gradient step. Will affect convergence speed, but should not affect final result
+    :param supersample_factor: int, factor at which we supersample in time domain
+    :param shifts: Tuple[int, int], range of shifts that the algorithm will consider
     :param grid_search_step:
     :param grid_search_top_n:
     :param fine_search_width:
     :param grid_search_batch_size:
-    :param maxiter_decomp:
-    :param renormalize_data_waveforms_amplitude_fit:
-    :param renormalize_data_waveforms_waveform_fit:
+    :param maxiter_spatial_reg_decomp:
     :param l1_regularize_lambda:
     :param sobolev_regularize_lambda:
     :param output_debug_dict:
     :return:
     '''
 
+    # determine how many electrodes there are in a complete EI
     n_electrodes_total = -1
     for cell_id, ei_matrix in eis_by_cell_id.items():
         n_electrodes_total = ei_matrix.shape[0]
         break
 
+    # temporary ordering of cell_id, used to determine order of the rows of all tensors
     temp_cell_order = list(eis_by_cell_id.keys())
 
     max_n_electrodes, selected_above_threshold_els = grab_above_threshold_electrodes_and_order(eis_by_cell_id,
                                                                                                snr_abs_threshold)
-
+    # ei_data_mat has shape (n_cells, max_n_electrodes, n_raw_timepoints)
+    # last_valid_indices has shape (n_cells, )
     ei_data_mat, matrix_indices_by_cell_id, last_valid_indices = make_electrode_padded_ei_data_matrix(
         eis_by_cell_id,
         temp_cell_order,
@@ -526,8 +534,12 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
     # shape (n_cells, max_n_electrodes), may contain zeros for disused electrodes
     # on a cell-by-cell basis, need to set those to one because we only use this
     # for multiplication and division
-    mag_by_cell = np.linalg.norm(padded_channels_by_cell, axis=2)
+    mag_by_cell = np.linalg.norm(padded_channels_by_cell, axis=2) # shape (n_cells, max_n_electrodes)
+
+    # shape (n_cells, max_n_electrodes)
     mag_by_cell_one_padded = one_pad_disused_by_cell(mag_by_cell, last_valid_indices)
+
+    # shape (n_cells, max_n_electrodes)
     waveform_observation_weights_by_cell = (mag_by_cell_one_padded * mag_by_cell_one_padded)
 
     # shape (n_waveforms_total, n_timepoints)
@@ -538,9 +550,6 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
 
     # shape (n_waveforms_total, n_timepoints)
     padded_channels_flattened = padded_channels_flattened / mag_flattened[:, None]
-
-    # shape (n_waveforms_total, )
-    waveform_observation_weights = 1.0 / (mag_flattened * mag_flattened)
 
     n_waveforms_total, _ = padded_channels_flattened.shape
 
