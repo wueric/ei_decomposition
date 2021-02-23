@@ -45,6 +45,17 @@ if __name__ == '__main__':
         5.0
     )
 
+    padded_ei_matrix, electrode_idx_mat, last_valid_indices = util_fns.make_electrode_padded_ei_data_matrix(
+        eis_of_type,
+        cells_of_type,
+        max_selected_electrodes,
+        selected_electrodes_by_cell
+    )
+
+    flat_matrix_waveforms = util_fns.pack_by_cell_into_flat(padded_ei_matrix, last_valid_indices)
+    unflat_matrix = util_fns.unpack_flat_into_by_cell(flat_matrix_waveforms, last_valid_indices)
+
+    assert np.allclose(unflat_matrix, padded_ei_matrix)
 
     # load existing decomposition, pack, unpack, and check if they're all the same or not
     test_cell_order = list(initial_prefit_decomp.keys()) # type: List[int]
@@ -62,6 +73,7 @@ if __name__ == '__main__':
         512
     )
 
+    print(cells_of_type)
     for cell_id in cells_of_type:
         assert cell_id in initial_prefit_decomp
         assert cell_id in original_decomp_reinflated
@@ -71,6 +83,7 @@ if __name__ == '__main__':
 
         assert np.allclose(orig_decomp_amplitudes, reinflated_amplitudes)
         assert np.allclose(orig_decomp_phases, reinflated_phases)
+    print('done')
 
 
 
