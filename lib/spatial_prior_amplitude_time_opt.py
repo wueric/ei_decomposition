@@ -13,7 +13,8 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
     make_electrode_padded_ei_data_matrix, make_spatial_neighbors_mean_matrix, \
     pack_by_cell_into_flat, unpack_flat_into_by_cell, \
     pack_by_cell_amplitudes_and_phases_into_ei_shape, one_pad_disused_by_cell, \
-    grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, get_neighborhood_indices_from_adj_mat_dfs
+    grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, \
+    get_neighborhood_indices_from_adj_mat_dfs
 
 from lib.ei_decomposition import debug_evaluate_error
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
@@ -151,7 +152,7 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         all_grad = (batched_amplitude_mat @ diag_m_i_t_m_i_diag_relevant[:, None, :, None]).squeeze(3)
 
         # shape (n_cells, batch_size, n_canonical_waveforms)
-        #return all_grad * lambda_spatial * grad_loss_scale_factor[:, None, None]
+        # return all_grad * lambda_spatial * grad_loss_scale_factor[:, None, None]
         return 0
 
     def loss_callable(batched_normalized_electrode_amplitudes: torch.Tensor) -> torch.Tensor:
@@ -183,7 +184,7 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         # shpae (n_cells, batch_size)
         frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(2, 3))
 
-        #return lambda_spatial * frob_norm * grad_loss_scale_factor[:, None] / 2.0
+        # return lambda_spatial * frob_norm * grad_loss_scale_factor[:, None] / 2.0
         return 0
 
     return gradient_callable, loss_callable
@@ -286,7 +287,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
             kill_problems=kill_problems,
             amplitude_initialize_range=amplitude_initialize_range,
             l1_regularization_callable=l1_regularizer_callable,
-            #spatial_continuity_regularizer=spatial_regularizer_callable,
+            # spatial_continuity_regularizer=spatial_regularizer_callable,
             max_batch_size=max_batch_size
         )
 
@@ -304,6 +305,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
                                                        initialized_canonical_waveforms: np.ndarray,
                                                        neighborhood_mean_mat: np.ndarray,
                                                        initial_amplitudes_by_cell: np.ndarray,
+                                                       initial_shifts_by_cell: np.ndarray,  # FIXME debugging only
                                                        spatial_regularization_lambda: float,
                                                        valid_shift_range: Tuple[int, int],
                                                        shift_grid_step: int,
@@ -372,6 +374,8 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
         # (2) Given fixed amplitudes and shifts, solve for the waveforms
         #   in frequency domain using unconstrained complex-valued linear least squares
 
+        # FIXME uncomment this out later
+        '''
         iter_real_amplitudes, iter_delays = search_with_coordinate_descent_projected(
             data_ft,
             iter_canonical_waveform_ft,
@@ -389,8 +393,8 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
             amplitude_initialize_range=amplitude_init_range,
             l1_regularization_lambda=l1_regularization_lambda,
         )
-
-        print(iter_real_amplitudes[0, :10, :], initial_amplitudes_by_cell[0,:10,:])
+        '''
+        iter_real_amplitudes, iter_delays = initial_amplitudes_by_cell, initial_shifts_by_cell
 
         # iter_real_amplitudes and iter_delays have shape (n_cells, max_n_electrodes, n_canonical_waveforms)
         # now we have to reshape iter_real_amplitudes and iter_delays
@@ -514,10 +518,10 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
     )
 
     prefit_decomp = initial_decomposition['decomposition']
-    amplitudes_initialized_unflattened, phases = pack_full_by_cell_into_matrix_by_cell(prefit_decomp,
-                                                                                       temp_cell_order,
-                                                                                       max_n_electrodes,
-                                                                                       selected_above_threshold_els)
+    amplitudes_initialized_unflattened, phases_unflattened = pack_full_by_cell_into_matrix_by_cell(prefit_decomp,
+                                                                                                   temp_cell_order,
+                                                                                                   max_n_electrodes,
+                                                                                                   selected_above_threshold_els)
     waveforms = initial_decomposition['waveforms']
 
     # shape (n_cells, max_n_electrodes, max_n_electrodes)
@@ -560,6 +564,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
         waveforms,
         neighbor_mean_matrices_by_cell,
         amplitudes_initialized_unflattened,
+        phases_unflattened,
         spatial_regularization_lambda,
         shifts,
         grid_search_step,
