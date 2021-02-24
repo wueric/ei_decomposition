@@ -305,7 +305,6 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
                                                        initialized_canonical_waveforms: np.ndarray,
                                                        neighborhood_mean_mat: np.ndarray,
                                                        initial_amplitudes_by_cell: np.ndarray,
-                                                       initial_shifts_by_cell: np.ndarray,  # FIXME debugging only
                                                        spatial_regularization_lambda: float,
                                                        valid_shift_range: Tuple[int, int],
                                                        shift_grid_step: int,
@@ -339,7 +338,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
     :param normalization_scale_factor: Scale factor that was applied to the data waveforms,
         shape (n_cells, max_n_electrodes). Cannot contain any zeros for disused electrodes, so need to take care of
         this in the caller of this function
-    :param waveform_observation_loss_weight: vecctor of weights, for weighting the contribution of each indivudal
+    :param waveform_observation_loss_weight: vector of weights, for weighting the contribution of each indivudal
         waveform to the overall loss when fitting basis waveform shapes. Shape (n_cells, max_n_electrodes)
     :param sobolev_regularization_lambda: scalar weight for second derivative penalty for regularizing the smoothness
         of the basis waveforms
@@ -374,8 +373,6 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
         # (2) Given fixed amplitudes and shifts, solve for the waveforms
         #   in frequency domain using unconstrained complex-valued linear least squares
 
-        # FIXME uncomment this out later
-        '''
         iter_real_amplitudes, iter_delays = search_with_coordinate_descent_projected(
             data_ft,
             iter_canonical_waveform_ft,
@@ -393,8 +390,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
             amplitude_initialize_range=amplitude_init_range,
             l1_regularization_lambda=l1_regularization_lambda,
         )
-        '''
-        iter_real_amplitudes, iter_delays = initial_amplitudes_by_cell, initial_shifts_by_cell
+
 
         # iter_real_amplitudes and iter_delays have shape (n_cells, max_n_electrodes, n_canonical_waveforms)
         # now we have to reshape iter_real_amplitudes and iter_delays
@@ -417,7 +413,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(waveforms_by_cell: np.nda
         )
 
         # shape (n_canonical_waveforms, n_samples)
-        iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_timepoints, axis=1))
+        iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_frequencies_not_rfft, axis=1))
 
         # now rescale the waveforms and amplitudes so that the basis waveforms each have L2 norm 1
         raw_optimized_waveform_magnitude = np.linalg.norm(iter_canonical_waveform_td, axis=1)
@@ -552,7 +548,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
     waveform_observation_weights_by_cell = (mag_by_cell_one_padded * mag_by_cell_one_padded)
 
     # shape (n_cells, max_n_electrodes, n_timepoints)
-    padded_channels_by_cell_norm = padded_channels_by_cell / mag_by_cell[:, :, None]
+    padded_channels_by_cell_norm = padded_channels_by_cell / mag_by_cell_one_padded[:, :, None]
 
     # amplitudes has shape (n_total_waveforms, n_basis_vectors)
     # waveforms has shape (n_basis_vectors, n_timepoints)
@@ -564,7 +560,6 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
         waveforms,
         neighbor_mean_matrices_by_cell,
         amplitudes_initialized_unflattened,
-        phases_unflattened,
         spatial_regularization_lambda,
         shifts,
         grid_search_step,
@@ -576,7 +571,8 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
         l1_regularization_lambda=l1_regularize_lambda,
         normalization_scale_factor=mag_by_cell_one_padded,
         sobolev_regularization_lambda=sobolev_regularize_lambda,
-        waveform_observation_loss_weight=waveform_observation_weights_by_cell
+        # waveform_observation_loss_weight=waveform_observation_weights_by_cell FIXME this one is correct
+        waveform_observation_loss_weight=None  # FIXME this is for debugging
     )
 
     result_dict = pack_by_cell_amplitudes_and_phases_into_ei_shape(amplitudes_by_cell,
@@ -596,3 +592,114 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
         return result_dict, canonical_waveforms, mse, debug_dict
 
     return result_dict, canonical_waveforms, mse
+
+
+def spatial_factorization_debug_only(loaded_previous_fit: Dict[str, Any],
+                                     loaded_previous_fit_metadata: Dict[str, Any],
+                                     eis_by_cell_id: Dict[int, np.ndarray],
+                                     device : torch.device):
+    # determine how many electrodes there are in a complete EI
+    n_electrodes_total = -1
+    for cell_id, ei_matrix in eis_by_cell_id.items():
+        n_electrodes_total = ei_matrix.shape[0]
+        break
+
+    snr_abs_threshold = loaded_previous_fit_metadata['thresh']
+    shifts = loaded_previous_fit_metadata['padding']
+    l1_reg = loaded_previous_fit_metadata['l1_reg']
+    sobolev_reg = loaded_previous_fit_metadata['sobolev_reg']
+    supersample_factor = loaded_previous_fit_metadata['upsample']
+
+    temp_cell_order = list(eis_by_cell_id.keys())
+    max_n_electrodes, selected_above_threshold_els = grab_above_threshold_electrodes_and_order(eis_by_cell_id,
+                                                                                               snr_abs_threshold)
+
+    ei_data_mat, matrix_indices_by_cell_id, last_valid_indices = make_electrode_padded_ei_data_matrix(
+        eis_by_cell_id,
+        temp_cell_order,
+        max_n_electrodes,
+        selected_above_threshold_els
+    )
+
+    prefit_decomposition = loaded_previous_fit['decomposition']
+    prefit_waveforms = loaded_previous_fit['waveforms']
+
+    amplitudes_packed_by_cell, phases_packed_by_cell = pack_full_by_cell_into_matrix_by_cell(prefit_decomposition,
+                                                                                             temp_cell_order,
+                                                                                             max_n_electrodes,
+                                                                                             selected_above_threshold_els)
+
+    # shape (n_cells, max_n_electrodes, n_timepoints_unpadded)
+    bspline_supersampled_by_cell = bspline_upsample_waveforms_padded_by_cell(ei_data_mat,
+                                                                             last_valid_indices,
+                                                                             supersample_factor)
+
+    # now zero pad before and after
+    # shape (n_cells, max_n_electrodes, n_timepoints)
+    padded_data_by_cell = np.pad(bspline_supersampled_by_cell,
+                                     [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
+                                     mode='constant')
+
+    # shape (n_cells, max_n_electrodes), may contain zeros or nonsense for disused electrodes
+    # on a cell-by-cell basis, need to set those to one because we only use this
+    # for multiplication and division
+    mag_by_cell = np.linalg.norm(padded_data_by_cell, axis=2)
+
+    # shape (n_cells, max_n_electrodes), does not contain any zeros
+    mag_by_cell_one_padded = one_pad_disused_by_cell(mag_by_cell, last_valid_indices)
+
+    # shape (n_cells, max_n_electrodes, n_timepoints)
+    padded_data_by_cell_normalized = padded_data_by_cell / mag_by_cell_one_padded[:, :, None]
+    amplitude_matrix_normalized = amplitudes_packed_by_cell / mag_by_cell_one_padded[:, :, None]
+
+    initialized_waveform_ft = np.fft.rfft(prefit_waveforms, axis=1)
+
+    # calculate the Fourier transforms necessary to just do the waveform optimization step with the padding
+    # in the current arrangement
+
+    # order of operations: FT, then change the shape into (n_waveforms, ...) then waveform optimization
+    n_frequencies_not_rfft = padded_data_by_cell_normalized.shape[2]
+    normalized_data_ft_by_cell = np.fft.rfft(padded_data_by_cell_normalized, axis=2)
+    flattened_data_ft = pack_by_cell_into_flat(normalized_data_ft_by_cell, last_valid_indices)
+
+    amplitude_matrix_flattened = pack_by_cell_into_flat(amplitude_matrix_normalized, last_valid_indices)
+    phase_matrix_flattened = pack_by_cell_into_flat(phases_packed_by_cell, last_valid_indices)
+
+    # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
+    # print("Iter {0}, Waveform complex least squares".format(iter_count))
+    iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms3(
+        amplitude_matrix_flattened,
+        phase_matrix_flattened,
+        flattened_data_ft,
+        n_frequencies_not_rfft,
+        device,
+        sobolev_lambda=sobolev_reg,
+        observation_loss_weight=None
+    )
+
+    fitted_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, axis=1, n=n_frequencies_not_rfft))
+    fitted_waveform_norm = np.linalg.norm(fitted_waveform_td, axis=1)
+
+    fitted_waveform_td = fitted_waveform_td / fitted_waveform_norm[:, None]
+    fitted_waveform_ft = iter_canonical_waveform_ft / fitted_waveform_norm[:, None]
+
+    mse = debug_evaluate_error(flattened_data_ft,
+                               amplitude_matrix_flattened,
+                               fitted_waveform_ft,
+                               phase_matrix_flattened,
+                               n_frequencies_not_rfft)
+
+    print(mse)
+
+    result_dict = pack_by_cell_amplitudes_and_phases_into_ei_shape(amplitudes_packed_by_cell,
+                                                                   phases_packed_by_cell,
+                                                                   selected_above_threshold_els,
+                                                                   temp_cell_order,
+                                                                   n_electrodes_total)
+
+    return result_dict, fitted_waveform_td, mse
+
+
+
+
+

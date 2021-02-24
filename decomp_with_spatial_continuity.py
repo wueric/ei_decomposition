@@ -21,10 +21,12 @@ if __name__ == '__main__':
     parser.add_argument('--init_fit', type=str, help='path to initial decomposition')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--maxiter', '-m', type=int, default=25, help='maximum number of iterations to run')
-    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2, help='L1 regularization lambda for amplitudes')
+    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
+                        help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
                         help='L2 regularization for waveform second derivatives')
-    parser.add_argument('--spatial_reg', '-q', type=float, default=1e-3, help='Spatial continuity regularization lambda')
+    parser.add_argument('--spatial_reg', '-q', type=float, default=1e-3,
+                        help='Spatial continuity regularization lambda')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
@@ -63,24 +65,22 @@ if __name__ == '__main__':
     initial_basis = None
     if args.initialize_basis is not None:
         with open(args.initialize_basis, 'rb') as pfile:
-
             basis_dict = pickle.load(pfile)
             initial_basis = basis_dict['basis']
 
-
     shift_tuple = (-args.before, args.after)
 
-    #FIXME get rid of later
+    # FIXME get rid of later
     with open(args.init_fit, 'rb') as pfile:
-        _ = pickle.load(pfile)
-        intial_prefit = pickle.load(pfile)
+        initial_metadata = pickle.load(pfile)
+        initial_prefit = pickle.load(pfile)
 
     if initial_basis is None:
         decomposition_dict, basis_waveforms, mse = spat_decomp.spatial_cont_time_optimization(
             eis_by_cell_id,
             dataset_adjacency_map,
             args.spatial_reg,
-            intial_prefit,
+            initial_prefit,
             compute_device,
             snr_abs_threshold=args.thresh,
             supersample_factor=args.upsample,
@@ -98,7 +98,7 @@ if __name__ == '__main__':
             eis_by_cell_id,
             dataset_adjacency_map,
             args.spatial_reg,
-            intial_prefit,
+            initial_prefit,
             compute_device,
             snr_abs_threshold=args.thresh,
             supersample_factor=args.upsample,
@@ -110,7 +110,6 @@ if __name__ == '__main__':
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
         )
-        pass
 
     with open(args.output, 'wb') as joint_fit_file:
         metadata_dict = {

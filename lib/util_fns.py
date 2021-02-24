@@ -209,7 +209,7 @@ def pack_by_cell_into_flat(waveforms_arranged_by_cell: np.ndarray,
     output_flat_matrix_dims = [n_legit_waveforms, ]
     output_flat_matrix_dims.extend(list(remaining_dimensions))
 
-    output_flat_matrix = np.zeros(output_flat_matrix_dims, dtype=np.float32)
+    output_flat_matrix = np.zeros(output_flat_matrix_dims, dtype=waveforms_arranged_by_cell.dtype)
 
     write_offset = 0
     for cell_idx in range(n_cells):
