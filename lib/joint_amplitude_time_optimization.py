@@ -43,7 +43,7 @@ def make_by_cell_weighted_l1_regularizer(problem_weights: np.ndarray,
     :return:
     '''
 
-    # shape (n_different_problems, batch_size)
+    # shape (n_different_problems, )
     l1_problem_weights = torch.tensor(problem_weights, dtype=torch.float32, device=device)
 
     def gradient_weighted_l1_regularizer() -> torch.Tensor:

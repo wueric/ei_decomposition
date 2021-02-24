@@ -183,12 +183,14 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         '''
         _, batch_size, _ = batched_normalized_electrode_amplitudes.shape
 
+        # this is all of the plausible A' (one for each possible shift for electrde_idx)
         # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
         batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
         batched_amplitude_mat[:, :, :, 0] = batched_normalized_electrode_amplitudes
 
         # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
-        a_prime_diag = batched_amplitude_mat * mag_outer_product_torch[:, None, None, :]
+        print(batched_amplitude_mat.shape, mag_outer_product_torch.shape)
+        a_prime_diag = batched_amplitude_mat @ mag_outer_product_torch[:, None, None, :]
 
         # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
         a_prime_diag_m = a_prime_diag @ mean_submatrices_torch[:, None, :, :]
@@ -224,7 +226,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
                                              l1_regularization_lambda: Optional[float] = None,
                                              amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
                                              least_squares_converge_epsilon: float = 1e-3,
-                                             max_batch_size: Optional[int] = 8192) \
+                                             max_batch_size: Optional[int] = 4096) \
         -> Tuple[np.ndarray, np.ndarray]:
     '''
     Does one pass of coordinate descent on the amplitudes and time shifts, parallelizing by cell
@@ -297,7 +299,8 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
                                                                                l1_regularization_lambda,
                                                                                device)
             else:
-                l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(1.0,
+                l1_scale_factor = np.ones((observed_data_scaling.shape[0], ), dtype=np.float32)
+                l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(l1_scale_factor,
                                                                                l1_regularization_lambda,
                                                                                device)
 
@@ -341,7 +344,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                        n_iter: int,
                                                        device: torch.device,
                                                        l1_regularization_lambda: Optional[float] = None,
-                                                       use_scaled_mse_penalty : bool = False,
+                                                       use_scaled_mse_penalty: bool = False,
                                                        use_scaled_regularization_terms: bool = False,
                                                        sobolev_regularization_lambda: Optional[float] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
@@ -388,7 +391,9 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
     n_frequencies_not_rfft = n_timepoints
 
     raw_waveform_norms = np.linalg.norm(raw_waveforms_by_cell, axis=2)
-    normalized_raw_waveforms_by_cell = raw_waveforms_by_cell / raw_waveform_norms[:, :, None]
+    raw_waveform_norms_one_padded = one_pad_disused_by_cell(raw_waveform_norms,
+                                                            last_valid_indices)
+    normalized_raw_waveforms_by_cell = raw_waveforms_by_cell / raw_waveform_norms_one_padded[:, :, None]
 
     # compute Fourier transform of the observed data once, ahead of time
     # shape (n_cells, max_n_electrodes, n_rfft_frequencies)
@@ -401,14 +406,14 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
 
     flattened_waveform_weights = None
     if not use_scaled_mse_penalty:
-        # shape (n_cells, max_n_electrodes)
+        # shape (n_observations, )
         flattened_waveform_weights = pack_by_cell_into_flat(normalized_raw_waveforms_by_cell,
                                                             last_valid_indices)
     if not use_scaled_regularization_terms:
-        waveform_weights_one_padded = one_pad_disused_by_cell(normalized_raw_waveforms_by_cell,
-                                                              last_valid_indices)
+        # shape (n_cells, max_n_electrodes)
+        waveform_weights_one_padded = raw_waveform_norms_one_padded
     else:
-        waveform_weights_one_padded = np.ones((flattened_data_ft.shape[0],), dtype=np.float32)
+        waveform_weights_one_padded = np.ones((n_cells, max_n_electrodes), dtype=np.float32)
 
     print("Beginning optimization loop")
     pbar = tqdm.tqdm(total=n_iter, desc='Spatially regularized optimization')
@@ -496,7 +501,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                                    maxiter_spatial_reg_decomp: int = 10,
                                    l1_regularize_lambda: Optional[float] = None,
                                    sobolev_regularize_lambda: Optional[float] = None,
-                                   use_scaled_mse_penalty : bool = False,
+                                   use_scaled_mse_penalty: bool = False,
                                    use_scaled_regularization_terms: bool = False,
                                    output_debug_dict: bool = False) \
         -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, float],
@@ -607,26 +612,12 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                                      [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                      mode='constant')
 
-    # shape (n_cells, max_n_electrodes), may contain zeros for disused electrodes
-    # on a cell-by-cell basis, need to set those to one because we only use this
-    # for multiplication and division
-    mag_by_cell = np.linalg.norm(padded_channels_by_cell, axis=2)
-
-    # shape (n_cells, max_n_electrodes), does not contain any zeros
-    mag_by_cell_one_padded = one_pad_disused_by_cell(mag_by_cell, last_valid_indices)
-
-    # shape (n_cells, max_n_electrodes)
-    waveform_observation_weights_by_cell = (mag_by_cell_one_padded * mag_by_cell_one_padded)
-
-    # shape (n_cells, max_n_electrodes, n_timepoints)
-    padded_channels_by_cell_norm = padded_channels_by_cell / mag_by_cell_one_padded[:, :, None]
-
     # amplitudes has shape (n_total_waveforms, n_basis_vectors)
     # waveforms has shape (n_basis_vectors, n_timepoints)
     # delays has shape (n_total_waveforms, n_basis_vectors) and is integer-valued
     # mse has shape (n_total_waveforms, )
     amplitudes_by_cell, canonical_waveforms, delays_by_cell, mse = shifted_fourier_nmf_iterative_optimization_spatial(
-        padded_channels_by_cell_norm,
+        padded_channels_by_cell,
         last_valid_indices,
         basis_waveforms,
         neighbor_mean_matrices_by_cell,
