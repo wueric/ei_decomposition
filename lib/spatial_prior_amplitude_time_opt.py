@@ -197,7 +197,7 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         center_aprime_diag = diag_magnitude_for_nbd_torch[:, 0, None, None] * batched_normalized_electrode_amplitudes
 
         # shape (n_cells, batch_size, n_basis_waveforms, max_submatrix_electrodes)
-        unshared_center_mean = center_aprime_diag[:, :, :, None] @ mean_submatrices_torch[:, None, 0, :]
+        unshared_center_mean = center_aprime_diag[:, :, :, None] @ mean_submatrices_torch[:, None, 0, None, :]
 
         # shape (n_cells, n_basis_waveforms, max_n_submatrix_electrodes - 1)
         nbd_aprime_diag = amplitude_mat_torch_without_electrode[:, :, 1:] * diag_magnitude_for_nbd_torch[:, None, 1:]
@@ -205,7 +205,7 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         # shape (n_cells, n_basis_waveforms, max_n_submatrix_electrodes - 1) @
         #       shape (n_cells, max_n_submatrix_electrodes - 1, max_n_submatrix_electrodes)
         # which has shape (n_cells, n_basis_waveforms, max_n_submatrix_electrodes)
-        shared_neighborhood_mean = nbd_aprime_diag[:, :, 1:] @ mean_submatrices_torch[:, 1:, :]
+        shared_neighborhood_mean = nbd_aprime_diag @ mean_submatrices_torch[:, 1:, :]
 
         # shape (n_cells, batch_size, n_basis_waveforms, max_n_submatrix_electrodes)
         aprime_diag_m_product = unshared_center_mean + shared_neighborhood_mean[:, None, :, :]
@@ -411,9 +411,11 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                             last_valid_indices)
     normalized_raw_waveforms_by_cell = raw_waveforms_by_cell / raw_waveform_norms_one_padded[:, :, None]
 
+    normalized_prev_iter_amplitudes = prev_iter_amplitudes_by_cell / raw_waveform_norms_one_padded[:, : , None]
+
     # compute Fourier transform of the observed data once, ahead of time
     # shape (n_cells, max_n_electrodes, n_rfft_frequencies)
-    data_ft = np.fft.rfft(raw_waveforms_by_cell, axis=2)
+    data_ft = np.fft.rfft(normalized_raw_waveforms_by_cell, axis=2)
     iter_canonical_waveform_ft = np.fft.rfft(initialized_canonical_waveforms, axis=1)
 
     # also want to keep a flattened representation of the data Fourier transforms
@@ -423,7 +425,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
     flattened_waveform_weights = None
     if not use_scaled_mse_penalty:
         # shape (n_observations, )
-        flattened_waveform_weights = pack_by_cell_into_flat(normalized_raw_waveforms_by_cell,
+        flattened_waveform_weights = pack_by_cell_into_flat(raw_waveform_norms,
                                                             last_valid_indices)
     if not use_scaled_regularization_terms:
         # shape (n_cells, max_n_electrodes)
@@ -447,7 +449,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
             n_frequencies_not_rfft,
             last_valid_indices,
             neighborhood_mean_mat,
-            prev_iter_amplitudes_by_cell,
+            normalized_prev_iter_amplitudes,
             spatial_regularization_lambda,
             valid_shift_range,
             shift_grid_step,
@@ -468,7 +470,6 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
         flattened_delays_mat = pack_by_cell_into_flat(iter_delays, last_valid_indices)
 
         # complex valued np.ndarray, shape (n_canonical_waveforms, n_frequencies)
-        # print("Iter {0}, Waveform complex least squares".format(iter_count))
         iter_canonical_waveform_ft = fourier_complex_least_squares_optimize_waveforms3(
             flattened_amplitude_mat,
             flattened_delays_mat,

@@ -37,6 +37,9 @@ if __name__ == '__main__':
     parser.add_argument('--cell_list', '-c', type=str, default=None,
                         help='Override cell_type argument, instead use cell ids in specified file')
     parser.add_argument('--initialize_basis', '-i', type=str, default=None, help='path to initialized basis')
+    parser.add_argument('--renormalize_loss', '-r', action='store_true', default=False, help='renormalize data waveforms')
+    parser.add_argument('--renormalize_penalty', '-p', action='store_true', default=False, help='renormalize data waveforms')
+
 
     args = parser.parse_args()
 
@@ -91,6 +94,8 @@ if __name__ == '__main__':
             maxiter_spatial_reg_decomp=args.maxiter,
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
+            use_scaled_mse_penalty=args.renormalize_loss,
+            use_scaled_regularization_terms=args.renormalize_penalty
         )
 
     else:
@@ -109,6 +114,8 @@ if __name__ == '__main__':
             maxiter_spatial_reg_decomp=args.maxiter,
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
+            use_scaled_mse_penalty=args.renormalize_loss,
+            use_scaled_regularization_terms=args.renormalize_penalty
         )
 
     with open(args.output, 'wb') as joint_fit_file:
