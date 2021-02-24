@@ -10,8 +10,9 @@ from lib.frequency_domain_optimization import fourier_complex_least_squares_opti
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
     make_unweighted_l1_regularizer, make_by_cell_weighted_l1_regularizer
 from lib.template_matching import greedy_template_match_time_shift, torch_fit_integer_shifts_all_but_one_template_match
-from lib.util_fns import bspline_upsample_waveforms, generate_fourier_phase_shift_matrices, debug_evaluate_error, \
+from lib.util_fns import bspline_upsample_waveforms, generate_fourier_phase_shift_matrices, \
     EIDecomposition, pack_significant_electrodes_into_matrix, unpack_amplitudes_and_phases_into_ei_shape
+from lib.losseval import evaluate_mse_flat
 
 
 def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray,
@@ -129,11 +130,16 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
                                                              n_frequencies_not_rfft)
 
         # calculate progress metrics
-        mse = debug_evaluate_error(observations_fourier_transform,
-                                   iter_real_amplitudes,
-                                   iter_canonical_waveform_ft,
-                                   intialized_delays,
-                                   n_frequencies_not_rfft)
+
+
+
+
+
+        mse = debug_evaluate_error_rescaled(observations_fourier_transform,
+                                            iter_real_amplitudes,
+                                            iter_canonical_waveform_ft,
+                                            intialized_delays,
+                                            n_frequencies_not_rfft)
 
         pbar.set_postfix({'MSE': mse})
         pbar.update(1)
@@ -160,11 +166,11 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
                                                                            device,
                                                                            l1_regularization_lambda=l1_regularization_lambda)
 
-    mse = debug_evaluate_error(observations_fourier_transform,
-                               initialized_amplitudes,
-                               canonical_waveform_ft,
-                               intialized_delays,
-                               n_frequencies_not_rfft)
+    mse = debug_evaluate_error_rescaled(observations_fourier_transform,
+                                        initialized_amplitudes,
+                                        canonical_waveform_ft,
+                                        intialized_delays,
+                                        n_frequencies_not_rfft)
 
     pbar.set_postfix({'MSE': mse})
     pbar.update(1)
@@ -279,11 +285,11 @@ def shifted_fourier_nmf_iterative_optimization3(waveform_data_matrix: np.ndarray
         iter_canonical_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
         iter_real_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude[None, :]
 
-        mse = debug_evaluate_error(observations_fourier_transform,
-                                   iter_real_amplitudes,
-                                   iter_canonical_waveform_ft,
-                                   iter_delays,
-                                   n_frequencies_not_rfft)
+        mse = debug_evaluate_error_rescaled(observations_fourier_transform,
+                                            iter_real_amplitudes,
+                                            iter_canonical_waveform_ft,
+                                            iter_delays,
+                                            n_frequencies_not_rfft)
 
         pbar.set_postfix({'MSE': mse})
         pbar.update(1)
@@ -394,11 +400,11 @@ def shifted_fourier_nmf_iterative_optimization(waveform_data_matrix: np.ndarray,
         # calculate progress metrics
         # (probably best done in Fourier domain, doesn't require clever shifting and can
         #  be trivially parallelized...)
-        mse = debug_evaluate_error(observations_fourier_transform,
-                                   iter_real_amplitudes,
-                                   iter_canonical_waveform_ft,
-                                   iter_sample_delays,
-                                   n_frequencies_not_rfft)
+        mse = debug_evaluate_error_rescaled(observations_fourier_transform,
+                                            iter_real_amplitudes,
+                                            iter_canonical_waveform_ft,
+                                            iter_sample_delays,
+                                            n_frequencies_not_rfft)
 
         # now rescale the waveforms and amplitudes
         # such that the waveforms each have L2 norm 1

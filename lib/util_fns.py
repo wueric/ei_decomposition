@@ -3,7 +3,7 @@ from collections import namedtuple
 import numpy as np
 from scipy import interpolate as interpolate
 
-from typing import List, Dict, Union, Tuple, Sequence
+from typing import List, Dict, Union, Tuple, Sequence, Optional
 
 EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
 
@@ -291,7 +291,6 @@ def get_neighborhood_indices_from_adj_mat_dfs(by_cell_adj_mat: np.ndarray,
 
         return neighborhood_list
 
-
     n_cells = by_cell_adj_mat.shape[0]
     output_adj_lists = np.empty((n_cells,), dtype=np.object)
 
@@ -391,43 +390,6 @@ def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,
     return np.exp(complex_exponential_argument)
 
 
-def debug_evaluate_error(observed_ft: np.ndarray,
-                         fit_real_amplitudes: np.ndarray,
-                         canonical_waveform_ft: np.ndarray,
-                         time_shifts: np.ndarray,
-                         n_true_frequencies: int) -> float:
-    '''
-
-    :param observed_ft: Fourier transform of observed data, complex-valued,
-        shape (n_observations, n_frequencies)
-    :param fit_real_amplitudes: real-valued scale amplitude of each canonical waveform,
-        shape (n_observations, n_canonical_waveforms)
-    :param canonical_waveform_ft: Fourier transform of canonical waveforms, complex-valued,
-        shape (n_canonical_waveforms, n_frequencies)
-    :param time_shifts: Time shifts required for each canonical waveform to fit each observation,
-        shape (n_observations, n_canonical_waveforms)
-    :param n_true_frequencies: int, the number of normal FFT frequencies (not the number of
-        rFFT frequencies)
-    :return: MSE error, real valued time domain power, imaginary valued time domain power
-    '''
-    n_observations, _ = observed_ft.shape
-
-    # shape (n_observations, n_canonical_waveforms, n_frequencies)
-    time_shift_matrices = generate_fourier_phase_shift_matrices(time_shifts,
-                                                                n_true_frequencies)
-
-    # shape (n_observations, n_canonical_waveforms, n_frequencies)
-    shifted_no_scale_ft = canonical_waveform_ft[None, :, :] * time_shift_matrices
-
-    model_ft = np.squeeze(fit_real_amplitudes[:, None, :] @ shifted_no_scale_ft, axis=1)
-
-    diff = observed_ft - model_ft
-    errors = np.linalg.norm(diff, axis=1)
-    mean_error = np.mean(errors)  # type: float
-
-    return mean_error
-
-
 def pack_significant_electrodes_into_matrix(eis_by_cell_id: Dict[int, np.ndarray],
                                             cell_order: List[int],
                                             snr_abs_threshold: Union[float, int]) \
@@ -481,7 +443,7 @@ def unpack_amplitudes_and_phases_into_ei_shape(packed_amplitude_matrix: np.ndarr
 
 def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: np.ndarray,
                                                      by_cell_phase_matrix: np.ndarray,
-                                                     above_threshold_els_by_cell : Dict[int, np.ndarray],
+                                                     above_threshold_els_by_cell: Dict[int, np.ndarray],
                                                      cell_order: List[int],
                                                      orig_ei_n_electrodes: int) \
         -> Dict[int, EIDecomposition]:

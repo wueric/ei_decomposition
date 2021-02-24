@@ -16,7 +16,7 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
     grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, \
     get_neighborhood_indices_from_adj_mat_dfs
 
-from lib.ei_decomposition import debug_evaluate_error
+from lib.losseval import evaluate_mse_by_cell
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
     make_by_cell_weighted_l1_regularizer
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
@@ -487,20 +487,22 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
         raw_optimized_waveform_magnitude = np.linalg.norm(iter_canonical_waveform_td, axis=1)
         iter_canonical_waveform_ft = iter_canonical_waveform_ft / raw_optimized_waveform_magnitude[:, None]
         iter_canonical_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
-        flattened_amplitude_mat = flattened_amplitude_mat * raw_optimized_waveform_magnitude[None, :]
+        iter_real_amplitudes = iter_real_amplitudes * raw_waveform_norms[None, None, :]
 
-        mse = debug_evaluate_error(flattened_data_ft,
-                                   flattened_amplitude_mat,
+        mse = evaluate_mse_by_cell(flattened_data_ft,
+                                   iter_real_amplitudes,
+                                   last_valid_indices,
                                    iter_canonical_waveform_ft,
-                                   flattened_delays_mat,
-                                   n_frequencies_not_rfft)
+                                   iter_delays,
+                                   n_frequencies_not_rfft,
+                                   waveform_weights_one_padded,
+                                   use_scaled_mse=use_scaled_mse_penalty)
 
         pbar.set_postfix({'MSE': mse})
         pbar.update(1)
 
     # now we want to unflatten the final result
-    fitted_amplitudes_by_cell = unpack_flat_into_by_cell(flattened_amplitude_mat, last_valid_indices)
-    return fitted_amplitudes_by_cell, iter_canonical_waveform_td, iter_delays, mse
+    return iter_real_amplitudes, iter_canonical_waveform_td, iter_delays, mse
 
 
 def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
