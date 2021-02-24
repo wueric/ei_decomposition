@@ -85,6 +85,8 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
 
     ###### and pack the M-I submatrices #################################################################
     ###### also select the subset of electrode ampltiudes that matter for the calculation ###############
+    diag_magnitude_for_neighborhood = np.zeros((n_cells, max_n_submatrix_electrodes),
+                                               dtype=np.float32)
 
     # this is M
     # shape (n_cells, max_n_submatrix_electrodes, max_n_submatrix_electrodes)
@@ -108,6 +110,9 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         if len(neighbor_indices) > 1:
             n_included_els = len(neighbor_indices)
 
+            diag_magnitude_for_neighborhood[cell_idx, :n_included_els] = data_waveform_scaling[
+                cell_idx, neighbor_indices]
+
             mean_submatrix = mean_matrix_for_cell[np.ix_(neighbor_indices, neighbor_indices)]
             mean_submatrices[cell_idx, :n_included_els, :n_included_els] = mean_submatrix
 
@@ -122,6 +127,11 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
 
     ###### Transfer stuff over to GPU and calculate shared quantities ##########################
     # shape (n_cells, max_n_submatrix_electrodes)
+    diag_magnitude_for_nbd_torch = torch.tensor(diag_magnitude_for_neighborhood,
+                                                dtype=torch.float32,
+                                                device=device)
+
+    # shape (n_cells, max_n_submatrix_electrodes, max_n_submatrix_electrodes)
     mag_outer_product_torch = torch.tensor(mag_outer_product, dtype=torch.float32, device=device)
 
     # shape (n_cells, max_n_submatrix_electrodes, max_n_submatrix_electrodes)
@@ -177,29 +187,35 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
         Note that the implementation of this needs to careful to avoid including the unused electrodes at the
             end of the data
 
-        :param batched_normalized_amplitudes: shape (n_cells, batch_size, n_canonical_waveforms), with normalization
-            This is A', which if used directly will not fit the raw EIs
+        :param batched_normalized_amplitudes: shape (n_cells, batch_size, n_basis_waveforms), with normalization
+            This is A' for the center electrode, which if used directly will not fit the raw EIs
         :return: loss value, shape (n_cells, ...)
         '''
         _, batch_size, _ = batched_normalized_electrode_amplitudes.shape
 
-        # this is all of the plausible A' (one for each possible shift for electrde_idx)
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
-        batched_amplitude_mat = amplitude_mat_torch_without_electrode[:, None, :, :].repeat(1, batch_size, 1, 1)
-        batched_amplitude_mat[:, :, :, 0] = batched_normalized_electrode_amplitudes
+        # shape (n_cells, batch_size, n_basis_waveforms)
+        center_aprime_diag = diag_magnitude_for_nbd_torch[:, 0, None, None] * batched_normalized_electrode_amplitudes
 
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
-        print(batched_amplitude_mat.shape, mag_outer_product_torch.shape)
-        a_prime_diag = batched_amplitude_mat @ mag_outer_product_torch[:, None, None, :]
+        # shape (n_cells, batch_size, n_basis_waveforms, max_submatrix_electrodes)
+        unshared_center_mean = center_aprime_diag[:, :, :, None] @ mean_submatrices_torch[:, None, 0, :]
 
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
-        a_prime_diag_m = a_prime_diag @ mean_submatrices_torch[:, None, :, :]
+        # shape (n_cells, n_basis_waveforms, max_n_submatrix_electrodes - 1)
+        nbd_aprime_diag = amplitude_mat_torch_without_electrode[:, :, 1:] * diag_magnitude_for_nbd_torch[:, None, 1:]
 
-        # shape (n_cells, batch_size, n_canonical_waveforms, max_n_submatrix_electrodes)
-        diff_matrix = a_prime_diag_m - a_prime_diag
+        # shape (n_cells, n_basis_waveforms, max_n_submatrix_electrodes - 1) @
+        #       shape (n_cells, max_n_submatrix_electrodes - 1, max_n_submatrix_electrodes)
+        # which has shape (n_cells, n_basis_waveforms, max_n_submatrix_electrodes)
+        shared_neighborhood_mean = nbd_aprime_diag[:, :, 1:] @ mean_submatrices_torch[:, 1:, :]
 
-        # shape (n_cells, batch_size)
-        frob_norm = torch.sum(diff_matrix * diff_matrix, dim=(2, 3))
+        # shape (n_cells, batch_size, n_basis_waveforms, max_n_submatrix_electrodes)
+        aprime_diag_m_product = unshared_center_mean + shared_neighborhood_mean[:, None, :, :]
+
+        # shape (n_cells, batch_size, n_basis_waveforms, max_n_submatrix_electrodes)
+        aprime_diag_m_minus_aprime = aprime_diag_m_product.clone().detach()
+        aprime_diag_m_minus_aprime[:, :, :, 0] -= center_aprime_diag
+        aprime_diag_m_minus_aprime[:, :, :, 1:] -= nbd_aprime_diag[:, None, :, :]
+
+        frob_norm = torch.sum(aprime_diag_m_minus_aprime * aprime_diag_m_minus_aprime, dim=(2, 3))
 
         if not use_scaled_regularization:
             return lambda_spatial * frob_norm * loss_unscaler_torch[:, None] / 2.0
@@ -299,7 +315,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
                                                                                l1_regularization_lambda,
                                                                                device)
             else:
-                l1_scale_factor = np.ones((observed_data_scaling.shape[0], ), dtype=np.float32)
+                l1_scale_factor = np.ones((observed_data_scaling.shape[0],), dtype=np.float32)
                 l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(l1_scale_factor,
                                                                                l1_regularization_lambda,
                                                                                device)
