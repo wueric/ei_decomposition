@@ -31,7 +31,8 @@ if __name__ == '__main__':
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
     parser.add_argument('--cell_list', '-c', type=str, default=None,
                         help='Override cell_type argument, instead use cell ids in specified file')
-    parser.add_argument('--renormalize', '-r', action='store_true', default=False, help='renormalize data waveforms')
+    parser.add_argument('--renormalize_loss', '-r', action='store_true', default=False, help='renormalize data waveforms')
+    parser.add_argument('--renormalize_penalty', '-p', action='store_true', default=False, help='renormalize data waveforms')
     parser.add_argument('--select_by_l1', '-d', action='store_true', default=False,
                         help='include L1 regularization when picking best search candidates')
     parser.add_argument('--initialize_basis', '-i', type=str, default=None, help='path to initialized basis')
@@ -77,7 +78,6 @@ if __name__ == '__main__':
             maxiter_decomp=args.maxiter,
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
-            renormalize_data_waveforms_waveform_fit=args.renormalize,
             output_debug_dict=False,
             shifts=shift_tuple,
             supersample_factor=args.upsample,
@@ -86,6 +86,9 @@ if __name__ == '__main__':
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
             grid_search_batch_size=args.grid_batch_size,
+            use_scaled_mse_penalty=args.renormalize_loss,
+            use_scaled_regularization_terms=args.renormalize_penalty
+
         )
     else:
         decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
@@ -95,7 +98,6 @@ if __name__ == '__main__':
             maxiter_decomp=args.maxiter,
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
-            renormalize_data_waveforms_waveform_fit=args.renormalize,
             output_debug_dict=False,
             shifts=shift_tuple,
             supersample_factor=args.upsample,
@@ -104,6 +106,8 @@ if __name__ == '__main__':
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
             grid_search_batch_size=args.grid_batch_size,
+            use_scaled_mse_penalty=args.renormalize_loss,
+            use_scaled_regularization_terms=args.renormalize_penalty
         )
 
 
