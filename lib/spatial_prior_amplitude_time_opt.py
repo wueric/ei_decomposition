@@ -16,7 +16,7 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
     grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, \
     get_neighborhood_indices_from_adj_mat_dfs
 
-from lib.losseval import evaluate_mse_by_cell
+from lib.losseval import by_cell_evaluate_loss
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
     make_by_cell_weighted_l1_regularizer
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
@@ -333,7 +333,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
             kill_problems=kill_problems,
             amplitude_initialize_range=amplitude_initialize_range,
             l1_regularization_callable=l1_regularizer_callable,
-            spatial_continuity_regularizer=spatial_regularizer_callable,
+            #spatial_continuity_regularizer=spatial_regularizer_callable,
             max_batch_size=max_batch_size
         )
 
@@ -351,7 +351,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                        initialized_canonical_waveforms: np.ndarray,
                                                        neighborhood_mean_mat: np.ndarray,
                                                        prev_iter_amplitudes_by_cell: np.ndarray,
-                                                       prev_iter_delays_by_cell : np.ndarray,
+                                                       prev_iter_delays_by_cell: np.ndarray,
                                                        spatial_regularization_lambda: float,
                                                        valid_shift_range: Tuple[int, int],
                                                        shift_grid_step: int,
@@ -437,14 +437,19 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
     else:
         waveform_weights_one_padded = np.ones((n_cells, max_n_electrodes), dtype=np.float32)
 
-    before_mse = evaluate_mse_by_cell(flattened_data_ft,
-                                      normalized_prev_iter_amplitudes,
-                                      last_valid_indices,
-                                      iter_canonical_waveform_ft,
-                                      prev_iter_delays_by_cell,
-                                      n_frequencies_not_rfft,
-                                      waveform_weights_one_padded,
-                                      use_scaled_mse=use_scaled_mse_penalty)
+    before_mse = by_cell_evaluate_loss(data_ft,
+                                       normalized_prev_iter_amplitudes,
+                                       last_valid_indices,
+                                       waveform_weights_one_padded,
+                                       iter_canonical_waveform_ft,
+                                       prev_iter_delays_by_cell,
+                                       n_frequencies_not_rfft,
+                                       neighborhood_mean_matrices=neighborhood_mean_mat,
+                                       lambda_l1 = l1_regularization_lambda,
+                                       lambda_spatial = spatial_regularization_lambda,
+                                       use_scaled_mse=use_scaled_mse_penalty,
+                                       use_scaled_reg_penalty=use_scaled_regularization_terms)
+
     print("Before MSE: {0}".format(before_mse))
 
     print("Beginning optimization loop")
@@ -501,22 +506,27 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
         raw_optimized_waveform_magnitude = np.linalg.norm(iter_canonical_waveform_td, axis=1)
         iter_canonical_waveform_ft = iter_canonical_waveform_ft / raw_optimized_waveform_magnitude[:, None]
         iter_canonical_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
-        iter_real_amplitudes = iter_real_amplitudes * raw_waveform_norms[:, :, None]
+        iter_real_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude[None, None, :]
 
-        mse = evaluate_mse_by_cell(flattened_data_ft,
-                                   iter_real_amplitudes,
-                                   last_valid_indices,
-                                   iter_canonical_waveform_ft,
-                                   iter_delays,
-                                   n_frequencies_not_rfft,
-                                   waveform_weights_one_padded,
-                                   use_scaled_mse=use_scaled_mse_penalty)
+        mse = by_cell_evaluate_loss(data_ft,
+                                    iter_real_amplitudes,
+                                    last_valid_indices,
+                                    waveform_weights_one_padded,
+                                    iter_canonical_waveform_ft,
+                                    iter_delays,
+                                    n_frequencies_not_rfft,
+                                    neighborhood_mean_matrices=neighborhood_mean_mat,
+                                    lambda_l1=l1_regularization_lambda,
+                                    lambda_spatial=spatial_regularization_lambda,
+                                    use_scaled_mse=use_scaled_mse_penalty,
+                                    use_scaled_reg_penalty=use_scaled_regularization_terms)
 
         pbar.set_postfix({'MSE': mse})
         pbar.update(1)
 
     # now we want to unflatten the final result
-    return iter_real_amplitudes, iter_canonical_waveform_td, iter_delays, mse
+    iter_real_amplitudes_orig_scaling = iter_real_amplitudes * raw_waveform_norms[:, :, None]
+    return iter_real_amplitudes_orig_scaling, iter_canonical_waveform_td, iter_delays, mse
 
 
 def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
@@ -655,6 +665,7 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
         basis_waveforms,
         neighbor_mean_matrices_by_cell,
         amplitudes_initialized_unflattened,
+        phases_unflattened,
         spatial_regularization_lambda,
         shifts,
         grid_search_step,

@@ -7,7 +7,8 @@ from .util_fns import generate_fourier_phase_shift_matrices
 def calculate_spatial_continuity_penalty(fitted_amplitudes_by_cell: np.ndarray,
                                          observed_norms_by_cell: np.ndarray,
                                          mean_matrices_by_cell: np.ndarray,
-                                         lambda_spatial: float) -> float:
+                                         lambda_spatial: float,
+                                         use_scaled_spatial_penalty : bool = False) -> float:
     '''
     Calculates the value of the spatial continuity penalty
 
@@ -34,9 +35,15 @@ def calculate_spatial_continuity_penalty(fitted_amplitudes_by_cell: np.ndarray,
     # shape (n_cells, n_basis_waveforms, max_n_electrodes)
     am = rescaled_fitted_amplitudes_by_cell_t @ mean_matrices_by_cell
 
+    # this is AM - A
+    # shape (n_cells, n_basis_waveforms, max_n_electrodes)
     diff = am - rescaled_fitted_amplitudes_by_cell_t
 
-    return 0.5 * np.sum(diff * diff) * lambda_spatial
+    if not use_scaled_spatial_penalty:
+        scaled_diff = diff / observed_norms_by_cell[:, :, None]
+        return 0.5 * np.sum(scaled_diff * scaled_diff) * lambda_spatial
+    else:
+        return 0.5 * np.sum(diff * diff) * lambda_spatial
 
 
 def calculate_l1_penalty_flat(fit_real_amplitudes_scaled: np.ndarray,
@@ -91,7 +98,7 @@ def calculate_l1_penalty_by_cell(fit_real_amplitudes_by_cell_scaled: np.ndarray,
         n_channels_for_cell = n_valid_electrodes_by_cell[cell_idx]
 
         # shape (n_channels_for_cell, )
-        l1_for_cell = np.sum(fit_real_amplitudes_by_cell_scaled[cell_idx, :n_channels_for_cell, :], axis=2)
+        l1_for_cell = np.sum(fit_real_amplitudes_by_cell_scaled[cell_idx, :n_channels_for_cell, :], axis=1)
 
         if not use_scaled_l1_penalty:
             norm_scale_relevant = norm_scale_factor_by_cell[cell_idx, :n_channels_for_cell]
@@ -189,8 +196,8 @@ def evaluate_mse_by_cell(observed_ft_by_cell_scaled: np.ndarray,
         n_valid_electrodes = n_valid_electrodes_by_cell[cell_idx]
 
         # shape (n_valid_electrodes, n_basis_waveforms)
-        relevant_time_shifts = time_shifts[cell_idx, :n_valid_electrodes_by_cell, :]
-        relevant_amplitudes = fit_real_amplitudes_by_cell_scaled[cell_idx, :n_valid_electrodes_by_cell, :]
+        relevant_time_shifts = time_shifts[cell_idx, :n_valid_electrodes, :]
+        relevant_amplitudes = fit_real_amplitudes_by_cell_scaled[cell_idx, :n_valid_electrodes, :]
 
         # shape (n_valid_electrodes, n_basis_waveforms, n_rfft_frequencies)
         time_shift_matrices = generate_fourier_phase_shift_matrices(relevant_time_shifts, n_true_frequencies)
@@ -202,7 +209,7 @@ def evaluate_mse_by_cell(observed_ft_by_cell_scaled: np.ndarray,
         model_ft = np.squeeze(relevant_amplitudes[:, None, :] @ shifted_basis_ft, axis=1)
 
         # shape (n_valid_electrodes, n_rfft_frequencies)
-        diff = observed_ft_by_cell_scaled[cell_idx, :n_valid_electrodes_by_cell, :] - model_ft
+        diff = observed_ft_by_cell_scaled[cell_idx, :n_valid_electrodes, :] - model_ft
 
         # shape (n_valid_electrodes, )
         errors = np.linalg.norm(diff, axis=1)
@@ -332,6 +339,7 @@ def by_cell_evaluate_loss(observed_ft_by_cell_scaled: np.ndarray,
         spat_cont_loss = calculate_spatial_continuity_penalty(fit_real_amplitudes_by_cell_scaled,
                                                               norm_scale_factor_by_cell,
                                                               neighborhood_mean_matrices,
-                                                              lambda_spatial)
+                                                              lambda_spatial,
+                                                              use_scaled_spatial_penalty=use_scaled_reg_penalty)
 
     return spat_cont_loss + l1_loss + mse_loss
