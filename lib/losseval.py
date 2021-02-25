@@ -115,7 +115,8 @@ def evaluate_mse_flat(observed_scaled_ft: np.ndarray,
                       time_shifts: np.ndarray,
                       n_true_frequencies: int,
                       use_scaled_mse: bool = False,
-                      observed_norms: Optional[np.ndarray] = None) -> float:
+                      observed_norms: Optional[np.ndarray] = None,
+                      take_mean_over_electrodes : bool = False) -> float:
     '''
     Calculates the unscaled MSE loss
 
@@ -154,8 +155,12 @@ def evaluate_mse_flat(observed_scaled_ft: np.ndarray,
 
     if not use_scaled_mse:
         scaled_errors = errors.dot(observed_norms)
+        if take_mean_over_electrodes:
+            return scaled_errors / n_observations
         return scaled_errors
     else:
+        if take_mean_over_electrodes:
+            return np.mean(errors)
         return np.sum(errors)
 
 
@@ -263,6 +268,7 @@ def flat_pack_evaluate_loss(observed_ft_flat_scaled: np.ndarray,
                                  canonical_waveform_ft,
                                  time_shifts_flat,
                                  n_true_frequencies,
+                                 use_scaled_mse=use_scaled_mse,
                                  observed_norms=None if use_scaled_mse else norm_scale_factor)
 
     l1_loss = 0.0

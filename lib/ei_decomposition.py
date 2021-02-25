@@ -12,7 +12,7 @@ from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and
 from lib.template_matching import greedy_template_match_time_shift, torch_fit_integer_shifts_all_but_one_template_match
 from lib.util_fns import bspline_upsample_waveforms, generate_fourier_phase_shift_matrices, \
     EIDecomposition, pack_significant_electrodes_into_matrix, unpack_amplitudes_and_phases_into_ei_shape
-from lib.losseval import evaluate_mse_flat, calculate_l1_penalty_flat
+from lib.losseval import evaluate_mse_flat, flat_pack_evaluate_loss
 
 
 def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray,
@@ -138,7 +138,7 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
                                 n_frequencies_not_rfft,
                                 use_scaled_mse=False)
 
-        loss_dict = {"MSE" : mse}
+        loss_dict = {"MSE": mse}
 
         pbar.set_postfix(loss_dict)
         pbar.update(1)
@@ -254,20 +254,45 @@ def shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix: np.nda
         iter_canonical_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
         iter_real_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude[None, :]
 
-        mse_flat = evaluate_mse_flat(observations_fourier_transform,
+        orig_MSE = evaluate_mse_flat(observations_fourier_transform,
                                      iter_real_amplitudes,
                                      iter_canonical_waveform_ft,
                                      iter_delays,
                                      n_frequencies_not_rfft,
-                                     use_scaled_mse=use_scaled_mse_penalty,
+                                     use_scaled_mse=True,
+                                     observed_norms=raw_data_magnitude,
+                                     take_mean_over_electrodes=True)
+
+        true_MSE = evaluate_mse_flat(observations_fourier_transform,
+                                     iter_real_amplitudes,
+                                     iter_canonical_waveform_ft,
+                                     iter_delays,
+                                     n_frequencies_not_rfft,
+                                     use_scaled_mse=False,
                                      observed_norms=raw_data_magnitude)
 
-        loss_with_penalty = mse_flat + calculate_l1_penalty_flat(iter_real_amplitudes,
-                                                                 raw_data_magnitude,
-                                                                 l1_regularization_lambda,
-                                                                 use_scaled_l1_penalty=use_scaled_regularization_terms)
+        mse_component = evaluate_mse_flat(observations_fourier_transform,
+                                          iter_real_amplitudes,
+                                          iter_canonical_waveform_ft,
+                                          iter_delays,
+                                          n_frequencies_not_rfft,
+                                          use_scaled_mse=use_scaled_mse_penalty,
+                                          observed_norms=raw_data_magnitude)
+
+        loss_with_penalty = flat_pack_evaluate_loss(observations_fourier_transform,
+                                                    iter_real_amplitudes,
+                                                    raw_data_magnitude,
+                                                    iter_canonical_waveform_ft,
+                                                    iter_delays,
+                                                    n_frequencies_not_rfft,
+                                                    l1_regularization_lambda,
+                                                    use_scaled_reg_penalty=use_scaled_regularization_terms,
+                                                    use_scaled_mse=use_scaled_mse_penalty)
+
         loss_dict = {
-            'MSE': mse_flat,
+            'MSE equalized by electrode' : orig_MSE,
+            'true MSE': true_MSE,
+            'Loss MSE component' : mse_component,
             'Loss': loss_with_penalty
 
         }
@@ -275,7 +300,7 @@ def shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix: np.nda
         pbar.set_postfix(loss_dict)
         pbar.update(1)
 
-    fit_amplitudes_rescaled = iter_real_amplitudes * raw_data_magnitude[:, :, None]
+    fit_amplitudes_rescaled = iter_real_amplitudes * raw_data_magnitude[:, None]
 
     return fit_amplitudes_rescaled, iter_canonical_waveform_td, iter_delays, loss_dict
 
