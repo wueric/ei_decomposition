@@ -351,6 +351,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                        initialized_canonical_waveforms: np.ndarray,
                                                        neighborhood_mean_mat: np.ndarray,
                                                        prev_iter_amplitudes_by_cell: np.ndarray,
+                                                       prev_iter_delays_by_cell : np.ndarray,
                                                        spatial_regularization_lambda: float,
                                                        valid_shift_range: Tuple[int, int],
                                                        shift_grid_step: int,
@@ -377,6 +378,9 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
     :param prev_iter_amplitudes_by_cell : intialized amplitudes, shape (n_cells, max_n_electrodes, n_canonical_waveforms)
             Amplitudes from a previous fit. These amplitudes should fit raw_waveforms_by_cell without any
             additional scaling
+    :param prev_iter_delays_by_cell: sample delays for each cell/electrode, integer valued
+        shape (n_cells, max_n_electrodes, n_canonical_waveforms)
+        Calculated form a previous fit.
     :param spatial_regularization_lambda: lambda scalar multiple for the spatial regularization term
     :param valid_shift_range: (low, high), range of valid sample shifts to consider for each canonical waveform
     :param shift_grid_step: spacing of the grid for the grid search
@@ -411,7 +415,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                             last_valid_indices)
     normalized_raw_waveforms_by_cell = raw_waveforms_by_cell / raw_waveform_norms_one_padded[:, :, None]
 
-    normalized_prev_iter_amplitudes = prev_iter_amplitudes_by_cell / raw_waveform_norms_one_padded[:, : , None]
+    normalized_prev_iter_amplitudes = prev_iter_amplitudes_by_cell / raw_waveform_norms_one_padded[:, :, None]
 
     # compute Fourier transform of the observed data once, ahead of time
     # shape (n_cells, max_n_electrodes, n_rfft_frequencies)
@@ -432,6 +436,16 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
         waveform_weights_one_padded = raw_waveform_norms_one_padded
     else:
         waveform_weights_one_padded = np.ones((n_cells, max_n_electrodes), dtype=np.float32)
+
+    before_mse = evaluate_mse_by_cell(flattened_data_ft,
+                                      normalized_prev_iter_amplitudes,
+                                      last_valid_indices,
+                                      iter_canonical_waveform_ft,
+                                      prev_iter_delays_by_cell,
+                                      n_frequencies_not_rfft,
+                                      waveform_weights_one_padded,
+                                      use_scaled_mse=use_scaled_mse_penalty)
+    print("Before MSE: {0}".format(before_mse))
 
     print("Beginning optimization loop")
     pbar = tqdm.tqdm(total=n_iter, desc='Spatially regularized optimization')
@@ -487,7 +501,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
         raw_optimized_waveform_magnitude = np.linalg.norm(iter_canonical_waveform_td, axis=1)
         iter_canonical_waveform_ft = iter_canonical_waveform_ft / raw_optimized_waveform_magnitude[:, None]
         iter_canonical_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
-        iter_real_amplitudes = iter_real_amplitudes * raw_waveform_norms[None, None, :]
+        iter_real_amplitudes = iter_real_amplitudes * raw_waveform_norms[:, :, None]
 
         mse = evaluate_mse_by_cell(flattened_data_ft,
                                    iter_real_amplitudes,
