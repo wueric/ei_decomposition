@@ -40,7 +40,7 @@ def calculate_spatial_continuity_penalty(fitted_amplitudes_by_cell: np.ndarray,
     diff = am - rescaled_fitted_amplitudes_by_cell_t
 
     if not use_scaled_spatial_penalty:
-        scaled_diff = diff / observed_norms_by_cell[:, :, None]
+        scaled_diff = diff / observed_norms_by_cell[:, None, :]
         return 0.5 * np.sum(scaled_diff * scaled_diff) * lambda_spatial
     else:
         return 0.5 * np.sum(diff * diff) * lambda_spatial
@@ -225,6 +225,8 @@ def evaluate_mse_by_cell(observed_ft_by_cell_scaled: np.ndarray,
         else:
             mse_acc += np.sum(errors)
 
+    if take_mean_over_valid_electrodes:
+        return mse_acc / np.sum(n_valid_electrodes_by_cell)
     return mse_acc
 
 
