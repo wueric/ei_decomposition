@@ -171,7 +171,8 @@ def evaluate_mse_by_cell(observed_ft_by_cell_scaled: np.ndarray,
                          time_shifts: np.ndarray,
                          n_true_frequencies: int,
                          norm_scale_factor_by_cell: Optional[np.ndarray] = None,
-                         use_scaled_mse: bool = False):
+                         use_scaled_mse: bool = False,
+                         take_mean_over_valid_electrodes : bool = False):
     '''
     Calculates the MSE loss for data arranged in the by-cell format
 

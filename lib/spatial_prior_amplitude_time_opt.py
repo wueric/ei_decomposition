@@ -16,7 +16,7 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
     grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, \
     get_neighborhood_indices_from_adj_mat_dfs
 
-from lib.losseval import by_cell_evaluate_loss
+from lib.losseval import by_cell_evaluate_loss, evaluate_mse_by_cell
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
     make_by_cell_weighted_l1_regularizer
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
@@ -333,7 +333,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
             kill_problems=kill_problems,
             amplitude_initialize_range=amplitude_initialize_range,
             l1_regularization_callable=l1_regularizer_callable,
-            #spatial_continuity_regularizer=spatial_regularizer_callable,
+            # spatial_continuity_regularizer=spatial_regularizer_callable,
             max_batch_size=max_batch_size
         )
 
@@ -364,7 +364,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                        use_scaled_mse_penalty: bool = False,
                                                        use_scaled_regularization_terms: bool = False,
                                                        sobolev_regularization_lambda: Optional[float] = None) \
-        -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     '''
     High level wrapper to perform iterative coordinate descent with spatial penalty
 
@@ -445,8 +445,8 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                        prev_iter_delays_by_cell,
                                        n_frequencies_not_rfft,
                                        neighborhood_mean_matrices=neighborhood_mean_mat,
-                                       lambda_l1 = l1_regularization_lambda,
-                                       lambda_spatial = spatial_regularization_lambda,
+                                       lambda_l1=l1_regularization_lambda,
+                                       lambda_spatial=spatial_regularization_lambda,
                                        use_scaled_mse=use_scaled_mse_penalty,
                                        use_scaled_reg_penalty=use_scaled_regularization_terms)
 
@@ -508,25 +508,63 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
         iter_canonical_waveform_td = iter_canonical_waveform_td / raw_optimized_waveform_magnitude[:, None]
         iter_real_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude[None, None, :]
 
-        mse = by_cell_evaluate_loss(data_ft,
-                                    iter_real_amplitudes,
-                                    last_valid_indices,
-                                    waveform_weights_one_padded,
-                                    iter_canonical_waveform_ft,
-                                    iter_delays,
-                                    n_frequencies_not_rfft,
-                                    neighborhood_mean_matrices=neighborhood_mean_mat,
-                                    lambda_l1=l1_regularization_lambda,
-                                    lambda_spatial=spatial_regularization_lambda,
-                                    use_scaled_mse=use_scaled_mse_penalty,
-                                    use_scaled_reg_penalty=use_scaled_regularization_terms)
+        orig_MSE = evaluate_mse_by_cell(data_ft,
+                                        iter_real_amplitudes,
+                                        last_valid_indices,
+                                        iter_canonical_waveform_ft,
+                                        iter_delays,
+                                        n_frequencies_not_rfft,
+                                        norm_scale_factor_by_cell=raw_waveform_norms_one_padded,
+                                        use_scaled_mse=True,
+                                        take_mean_over_valid_electrodes=True)
 
-        pbar.set_postfix({'MSE': mse})
+        true_MSE = evaluate_mse_by_cell(data_ft,
+                                        iter_real_amplitudes,
+                                        last_valid_indices,
+                                        iter_canonical_waveform_ft,
+                                        iter_delays,
+                                        n_frequencies_not_rfft,
+                                        norm_scale_factor_by_cell=raw_waveform_norms_one_padded,
+                                        use_scaled_mse=False,
+                                        take_mean_over_valid_electrodes=False)
+
+        mse_component = evaluate_mse_by_cell(data_ft,
+                                             iter_real_amplitudes,
+                                             last_valid_indices,
+                                             iter_canonical_waveform_ft,
+                                             iter_delays,
+                                             n_frequencies_not_rfft,
+                                             norm_scale_factor_by_cell=raw_waveform_norms_one_padded,
+                                             use_scaled_mse=use_scaled_mse_penalty,
+                                             take_mean_over_valid_electrodes=False)
+
+        loss_with_penalty = by_cell_evaluate_loss(data_ft,
+                                                  iter_real_amplitudes,
+                                                  last_valid_indices,
+                                                  waveform_weights_one_padded,
+                                                  iter_canonical_waveform_ft,
+                                                  iter_delays,
+                                                  n_frequencies_not_rfft,
+                                                  neighborhood_mean_matrices=neighborhood_mean_mat,
+                                                  lambda_l1=l1_regularization_lambda,
+                                                  lambda_spatial=spatial_regularization_lambda,
+                                                  use_scaled_mse=use_scaled_mse_penalty,
+                                                  use_scaled_reg_penalty=use_scaled_regularization_terms)
+
+        loss_dict = {
+            'MSE equalized by electrode' : orig_MSE,
+            'true MSE': true_MSE,
+            'Loss MSE component' : mse_component,
+            'Loss': loss_with_penalty
+
+        }
+
+        pbar.set_postfix(loss_dict)
         pbar.update(1)
 
     # now we want to unflatten the final result
     iter_real_amplitudes_orig_scaling = iter_real_amplitudes * raw_waveform_norms[:, :, None]
-    return iter_real_amplitudes_orig_scaling, iter_canonical_waveform_td, iter_delays, mse
+    return iter_real_amplitudes_orig_scaling, iter_canonical_waveform_td, iter_delays, loss_dict
 
 
 def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
@@ -547,8 +585,8 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                                    use_scaled_mse_penalty: bool = False,
                                    use_scaled_regularization_terms: bool = False,
                                    output_debug_dict: bool = False) \
-        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, float],
-                 Tuple[Dict[int, EIDecomposition], np.ndarray, float, Dict[str, np.ndarray]]]:
+        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float]],
+                 Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
     '''
     Main optimization loop for the two-step optimization process, with spatial continuity regularization.
         Optimization steps are
