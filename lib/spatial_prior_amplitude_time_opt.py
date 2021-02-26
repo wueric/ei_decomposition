@@ -18,7 +18,7 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
 
 from lib.losseval import by_cell_evaluate_loss, evaluate_mse_by_cell
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
-    make_by_cell_weighted_l1_regularizer
+    make_by_cell_weighted_l1_regularizer, make_unweighted_l1_regularizer
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
 
 
@@ -315,10 +315,7 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
                                                                                l1_regularization_lambda,
                                                                                device)
             else:
-                l1_scale_factor = np.ones((observed_data_scaling.shape[0],), dtype=np.float32)
-                l1_regularizer_callable = make_by_cell_weighted_l1_regularizer(l1_scale_factor,
-                                                                               l1_regularization_lambda,
-                                                                               device)
+                l1_regularizer_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
 
         parallel_amplitudes_el, parallel_shifts_el = coarse_to_fine_time_shifts_and_amplitudes(
             observed_ft_by_cell[:, electrode_idx, :],
@@ -415,7 +412,8 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                             last_valid_indices)
     normalized_raw_waveforms_by_cell = raw_waveforms_by_cell / raw_waveform_norms_one_padded[:, :, None]
 
-    normalized_prev_iter_amplitudes = prev_iter_amplitudes_by_cell / raw_waveform_norms_one_padded[:, :, None]
+    iter_real_amplitudes = prev_iter_amplitudes_by_cell / raw_waveform_norms_one_padded[:, :, None]
+    iter_delays = prev_iter_delays_by_cell
 
     # compute Fourier transform of the observed data once, ahead of time
     # shape (n_cells, max_n_electrodes, n_rfft_frequencies)
@@ -438,7 +436,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
         waveform_weights_one_padded = np.ones((n_cells, max_n_electrodes), dtype=np.float32)
 
     before_mse = by_cell_evaluate_loss(data_ft,
-                                       normalized_prev_iter_amplitudes,
+                                       iter_real_amplitudes,
                                        last_valid_indices,
                                        waveform_weights_one_padded,
                                        iter_canonical_waveform_ft,
@@ -461,6 +459,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
         # (2) Given fixed amplitudes and shifts, solve for the waveforms
         #   in frequency domain using unconstrained complex-valued linear least squares
 
+        '''
         iter_real_amplitudes, iter_delays = search_with_coordinate_descent_projected(
             data_ft,
             waveform_weights_one_padded,
@@ -468,7 +467,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
             n_frequencies_not_rfft,
             last_valid_indices,
             neighborhood_mean_mat,
-            normalized_prev_iter_amplitudes,
+            iter_real_amplitudes,
             spatial_regularization_lambda,
             valid_shift_range,
             shift_grid_step,
@@ -479,6 +478,7 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
             amplitude_initialize_range=amplitude_init_range,
             l1_regularization_lambda=l1_regularization_lambda,
         )
+        '''
 
         # iter_real_amplitudes and iter_delays have shape (n_cells, max_n_electrodes, n_canonical_waveforms)
         # now we have to reshape iter_real_amplitudes and iter_delays
