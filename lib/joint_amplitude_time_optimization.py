@@ -325,7 +325,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
             # some of the problems are invalid, and we don't care if some
             # of the invalid problems haven't yet converged
             worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1) # shape (n_observations)
-            all_valid_converged = torch.any(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
             if all_valid_converged.item():
                 break
         else:
@@ -483,7 +483,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
             # some of the problems are invalid, and we don't care if some
             # of the invalid problems haven't yet converged
             worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1) # shape (n_observations)
-            all_valid_converged = torch.any(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
             if all_valid_converged.item():
                 break
         else:
