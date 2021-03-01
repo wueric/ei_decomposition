@@ -138,10 +138,10 @@ def make_sparse_coord_descent_mean_connectivity_regularize_fn(adjacency_mean_mat
     mean_submatrices_minus_i_torch = torch.tensor(mean_submatrices_minus_i, dtype=torch.float32, device=device)
 
     # shape (n_cells, max_n_submatrix_electrodes, max_n_submatrix_electrodes)
-    m_i_t_m_i = mean_submatrices_minus_i_torch.permute(0, 2, 1) @ mean_submatrices_minus_i_torch
+    m_i_m_i_t = mean_submatrices_minus_i_torch @ mean_submatrices_minus_i_torch.permute(0, 2, 1)
 
     # shape (n_cells, max_n_submatrix_electrodes, max_n_submatrix_electrodes)
-    outer_product_m_i_prod = mag_outer_product_torch @ m_i_t_m_i
+    outer_product_m_i_prod = mag_outer_product_torch @ m_i_m_i_t
 
     # shape (n_cells, max_n_submatrix_electrodes)
     outer_product_m_i_prod_relevant = outer_product_m_i_prod[:, :, 0]
