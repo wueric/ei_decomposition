@@ -146,6 +146,100 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
     return initialized_amplitudes, initialized_canonical_waveforms, intialized_delays, loss_dict
 
 
+def one_iteration_amplitude_fit_only(raw_waveform_data_matrix: np.ndarray,
+                                     basis_waveforms: np.ndarray,
+                                     valid_shift_range: Tuple[int, int],
+                                     shift_grid_step: int,
+                                     fine_search_top_n: int,
+                                     fine_search_width: int,
+                                     amplitude_init_range: Tuple[float, float],
+                                     device: torch.device,
+                                     max_batch_size=8192,
+                                     use_scaled_mse_penalty: bool = False,
+                                     use_scaled_regularization_terms: bool = False,
+                                     l1_regularization_lambda: Optional[float] = None) \
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
+    n_observations, n_samples = raw_waveform_data_matrix.shape
+    n_frequencies_not_rfft = n_samples
+
+    raw_data_magnitude = np.linalg.norm(raw_waveform_data_matrix, axis=1)
+    scaled_raw_data = raw_waveform_data_matrix / raw_data_magnitude[:, None]
+
+    # compute the Fourier transform of the observed data once, ahead of time
+    # shape (n_observations, n_frequencies)
+    observations_fourier_transform = np.fft.rfft(scaled_raw_data, axis=1)
+    iter_canonical_waveform_ft = np.fft.rfft(basis_waveforms, axis=1)
+
+    if not use_scaled_regularization_terms:
+        l1_regularization_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
+    else:
+        l1_reg_weight = 1.0 / raw_data_magnitude
+        l1_regularization_callable = make_by_cell_weighted_l1_regularizer(l1_reg_weight,
+                                                                          l1_regularization_lambda,
+                                                                          device)
+
+    iter_real_amplitudes, iter_delays = coarse_to_fine_time_shifts_and_amplitudes(
+        observations_fourier_transform,
+        iter_canonical_waveform_ft,
+        n_frequencies_not_rfft,
+        valid_shift_range,
+        shift_grid_step,
+        fine_search_top_n,
+        fine_search_width,
+        device,
+        l1_regularization_callable=l1_regularization_callable,
+        amplitude_initialize_range=amplitude_init_range,
+        max_batch_size=max_batch_size
+    )
+
+    orig_MSE = evaluate_mse_flat(observations_fourier_transform,
+                                 iter_real_amplitudes,
+                                 iter_canonical_waveform_ft,
+                                 iter_delays,
+                                 n_frequencies_not_rfft,
+                                 use_scaled_mse=True,
+                                 observed_norms=raw_data_magnitude,
+                                 take_mean_over_electrodes=True)
+
+    true_MSE = evaluate_mse_flat(observations_fourier_transform,
+                                 iter_real_amplitudes,
+                                 iter_canonical_waveform_ft,
+                                 iter_delays,
+                                 n_frequencies_not_rfft,
+                                 use_scaled_mse=False,
+                                 observed_norms=raw_data_magnitude)
+
+    mse_component = evaluate_mse_flat(observations_fourier_transform,
+                                      iter_real_amplitudes,
+                                      iter_canonical_waveform_ft,
+                                      iter_delays,
+                                      n_frequencies_not_rfft,
+                                      use_scaled_mse=use_scaled_mse_penalty,
+                                      observed_norms=raw_data_magnitude)
+
+    loss_with_penalty = flat_pack_evaluate_loss(observations_fourier_transform,
+                                                iter_real_amplitudes,
+                                                raw_data_magnitude,
+                                                iter_canonical_waveform_ft,
+                                                iter_delays,
+                                                n_frequencies_not_rfft,
+                                                l1_regularization_lambda,
+                                                use_scaled_reg_penalty=use_scaled_regularization_terms,
+                                                use_scaled_mse=use_scaled_mse_penalty)
+
+    loss_dict = {
+        'MSE equalized by electrode': orig_MSE,
+        'true MSE': true_MSE,
+        'Loss MSE component': mse_component,
+        'Loss': loss_with_penalty
+
+    }
+
+    fit_amplitudes_rescaled = iter_real_amplitudes * raw_data_magnitude[:, None]
+
+    return fit_amplitudes_rescaled, basis_waveforms, iter_delays, loss_dict
+
+
 def shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix: np.ndarray,
                                                 initialized_canonical_waveforms: np.ndarray,
                                                 valid_shift_range: Tuple[int, int],
@@ -290,9 +384,9 @@ def shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix: np.nda
                                                     use_scaled_mse=use_scaled_mse_penalty)
 
         loss_dict = {
-            'MSE equalized by electrode' : orig_MSE,
+            'MSE equalized by electrode': orig_MSE,
             'true MSE': true_MSE,
-            'Loss MSE component' : mse_component,
+            'Loss MSE component': mse_component,
             'Loss': loss_with_penalty
 
         }
@@ -614,6 +708,73 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
 
     if renormalize_data_waveforms:
         amplitudes = mag_padded[:, None] * amplitudes
+
+    # now unpack the results
+    result_dict = unpack_amplitudes_and_phases_into_ei_shape(amplitudes,
+                                                             delays,
+                                                             eis_by_cell_id,
+                                                             temp_cell_order,
+                                                             matrix_indices_by_cell_id)
+
+    if output_debug_dict:
+        debug_dict = {
+            'amplitudes': amplitudes,
+            'waveforms': waveforms,
+            'delays': delays,
+            'raw_data': padded_channels_sufficient_magnitude
+        }
+
+        return result_dict, waveforms, mse, debug_dict
+
+    return result_dict, waveforms, mse
+
+
+def decompose_cells_amplitudes_only(eis_by_cell_id: Dict[int, np.ndarray],
+                                    device: torch.device,
+                                    basis_vectors: np.ndarray,
+                                    snr_abs_threshold: float = 5.0,
+                                    amplitude_random_init_range: Tuple[float, float] = (0.0, 10.0),
+                                    supersample_factor: int = 5,
+                                    shifts: Tuple[int, int] = (-100, 100),
+                                    grid_search_step: int = 5,
+                                    grid_search_top_n: int = 4,
+                                    fine_search_width: int = 2,
+                                    grid_search_batch_size: int = 8192,
+                                    l1_regularize_lambda: Optional[float] = None,
+                                    use_scaled_mse_penalty: bool = False,
+                                    use_scaled_regularization_terms: bool = False,
+                                    output_debug_dict: bool = False) \
+        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float]],
+                 Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
+
+    temp_cell_order = list(eis_by_cell_id.keys())
+
+    ei_data_mat, matrix_indices_by_cell_id = pack_significant_electrodes_into_matrix(eis_by_cell_id,
+                                                                                     temp_cell_order,
+                                                                                     snr_abs_threshold)
+
+    bspline_supersampled = bspline_upsample_waveforms(ei_data_mat, supersample_factor)
+
+    # now zero pad before and after
+    # shpae (n_observations, n_samples)
+    padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
+                                                  [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
+                                                  mode='constant')
+
+    amplitudes, waveforms, delays, mse = one_iteration_amplitude_fit_only(
+        padded_channels_sufficient_magnitude,
+        basis_vectors,
+        shifts,
+        grid_search_step,
+        grid_search_top_n,
+        fine_search_width,
+        amplitude_random_init_range,
+        device,
+        max_batch_size=grid_search_batch_size,
+        l1_regularization_lambda=l1_regularize_lambda,
+        use_scaled_mse_penalty=use_scaled_mse_penalty,
+        use_scaled_regularization_terms=use_scaled_regularization_terms
+    )
 
     # now unpack the results
     result_dict = unpack_amplitudes_and_phases_into_ei_shape(amplitudes,

@@ -475,3 +475,20 @@ def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: n
         result_dict[cell_id] = (amplitude_matrix, delay_matrix)
 
     return result_dict
+
+
+def shift_align_abs_peak(normalized_data_matrix: np.ndarray,
+                         abs_peak_alignment_point: int) -> np.ndarray:
+    # shift all of the waveforms such that their maximum deviation from zero
+    # is at the same point
+    n_waveforms, n_samples = normalized_data_matrix.shape
+
+    max_point = np.argmax(np.abs(normalized_data_matrix), axis=1)
+    delays = abs_peak_alignment_point - max_point
+
+    data_ft = np.fft.rfft(normalized_data_matrix, axis=1)
+    shift_matrix = generate_fourier_phase_shift_matrices(delays, n_samples)
+
+    aligned_data = np.real(np.fft.irfft(data_ft * shift_matrix, axis=1, n=n_samples))
+
+    return aligned_data
