@@ -68,7 +68,7 @@ if __name__ == '__main__':
 
     for idx in range(n_basis_waveforms):
         selector = (cluster_values == idx)
-        cluster_means[idx,:] = np.mean(aligned_data_unscaled[selector, :])
+        cluster_means[idx,:] = np.mean(aligned_data_unscaled[selector, :], axis=0)
 
     cluster_means = cluster_means / np.linalg.norm(cluster_means, axis=1, keepdims=True)
 

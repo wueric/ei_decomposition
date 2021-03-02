@@ -23,6 +23,7 @@ if __name__ == '__main__':
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
+    parser.add_argument('--grid_batch_size', type=int, default=8192, help='grid search batch size')
     parser.add_argument('--grid_step', type=int, default=5, help='step size for grid search')
     parser.add_argument('--grid_top_n', type=int, default=4, help='top n for grid search')
     parser.add_argument('--fine_search_width', type=int, default=2, help='width for fine search')
@@ -56,7 +57,7 @@ if __name__ == '__main__':
         cell_id_list = dataset.get_all_cells_of_type(args.cell_type)
         eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
 
-    with open(args.initialize_basis, 'rb') as pfile:
+    with open(args.basis_pickle, 'rb') as pfile:
 
         basis_dict = pickle.load(pfile)
         initial_basis = basis_dict['basis']
@@ -80,11 +81,11 @@ if __name__ == '__main__':
         use_scaled_regularization_terms=args.renormalize_penalty
     )
 
+    print(mse)
+
     with open(args.output, 'wb') as joint_fit_file:
         metadata_dict = {
             'l1_reg': args.weight_reg,
-            'sobolev_reg': args.sobolev_reg,
-            'maxiter': args.maxiter,
             'padding': shift_tuple,
             'upsample': args.upsample,
             'thresh': args.thresh
