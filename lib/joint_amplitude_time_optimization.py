@@ -1,19 +1,157 @@
-from typing import Optional, Tuple, Callable
+from typing import Optional, Tuple, Callable, List
 
 import numpy as np
 import torch
 import tqdm
 
 
+def make_group_l2_l1_unweighted_regularizer(lambda_overall: float,
+                                            n_basis_vectors: int,
+                                            group_assignments: List[np.ndarray],
+                                            device: torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    Suppose that we have variable groups g \in G, each of which contains some variables.
+        Each variable is in exactly 1 group
+
+    This regularization function is of the form
+
+    \lambda ( \sum_{g \in G} |w_g|_2)
+
+    :param lambda_overall: Overall lambda for the penalty
+    :param group_assignments: assignments of the groups. Does not check that each variable is in
+        exactly one group
+
+    :return:
+    '''
+
+    gather_index = np.zeros((len(group_assignments), n_basis_vectors), dtype=np.int32)
+    for idx, group_indices in enumerate(group_assignments):
+        gather_index[idx, group_indices] = 1
+
+    # shape (n_groups, n_basis_vectors)
+    gather_index = torch.tensor(gather_index, device=device)
+
+    def gradient_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (n_different_problems, batch_size, n_canonical_waveforms)
+        :return: gradient, shape (n_different_problems, batch_size, n_canonical_waveforms)
+        '''
+
+        # shape (n_problems, batch_size, n_groups, n_basis_vectors)
+        coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
+
+        # shape (n_problems, batch_size, n_groups)
+        l2_norm = torch.norm(coefficients_by_group, dim=3)
+
+        # shape (n_problems, batch_size, n_groups, n_basis_vectors)
+        division = coefficients_by_group / l2_norm[:, :, :, None]
+
+        return lambda_overall * torch.sum(division, dim=2)
+
+
+    def loss_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (n_different_problems, batch_size, n_canonical_waveforms)
+        :return: gradient, shape (n_different_problems, batch_size)
+        '''
+
+        # shape (n_problems, batch_size, n_groups, n_basis_vectors)
+        coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
+
+        # shape (n_problems, batch_size, n_groups)
+        l2_norm = torch.norm(coefficients_by_group, dim=3)
+
+        # shape (n_problems, batch_size)
+        return lambda_overall * torch.sum(coefficients_by_group, dim=2)
+
+    return gradient_group_l2_l1_regularizer, loss_group_l2_l1_regularizer
+
+
+def make_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
+                                          lambda_overall: float,
+                                          n_basis_vectors : int,
+                                          group_assignments : List[np.ndarray],
+                                          device : torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    Suppose that we have variable groups g \in G, each of which contains some variables.
+        Each variable is in exactly 1 group
+
+    This regularization function is of the form
+
+    \lambda ( \sum_{g \in G} |w_g|_2)
+
+    Here \lambda may differ for each specific problem, depending on the pre-specified problem weight
+
+    :param problem_weights: L1 weights that we should have for each optimization problem.
+        Shape (n_different_problems, )
+    :param lambda_overall:
+    :param n_basis_vectors:
+    :param group_assignments: assignments of the groups. Does not check that each variable is in
+        exactly one group
+    :param device
+    :return:
+    '''
+    gather_index = np.zeros((len(group_assignments), n_basis_vectors), dtype=np.int32)
+    for idx, group_indices in enumerate(group_assignments):
+        gather_index[idx, group_indices] = 1
+
+    # shape (n_groups, n_basis_vectors)
+    gather_index = torch.tensor(gather_index, device=device)
+
+    # shape (n_different_problems, )
+    problem_weights_torch = torch.tensor(problem_weights, device=device, dtype=torch.float32)
+
+    def gradient_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (n_different_problems, batch_size, n_canonical_waveforms)
+        :return: gradient, shape (n_different_problems, batch_size, n_canonical_waveforms)
+        '''
+
+        # shape (n_problems, batch_size, n_groups, n_basis_vectors)
+        coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
+
+        # shape (n_problems, batch_size, n_groups)
+        l2_norm = torch.norm(coefficients_by_group, dim=3)
+
+        # shape (n_problems, batch_size, n_groups, n_basis_vectors)
+        division = coefficients_by_group / l2_norm[:, :, :, None]
+
+        return lambda_overall * torch.sum(division, dim=2) * problem_weights_torch[:, None, None]
+
+
+    def loss_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (n_different_problems, batch_size, n_canonical_waveforms)
+        :return: gradient, shape (n_different_problems, batch_size)
+        '''
+
+        # shape (n_problems, batch_size, n_groups, n_basis_vectors)
+        coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
+
+        # shape (n_problems, batch_size, n_groups)
+        l2_norm = torch.norm(coefficients_by_group, dim=3)
+
+        # shape (n_problems, batch_size)
+        return lambda_overall * torch.sum(coefficients_by_group, dim=2) * problem_weights_torch[:, None]
+
+    return gradient_group_l2_l1_regularizer, loss_group_l2_l1_regularizer
+
+
 def make_unweighted_l1_regularizer(lambda_l1: float) \
-        -> Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
     '''
 
     :param lambda_l1:
     :return:
     '''
 
-    def gradient_l1_regularizer() -> torch.Tensor:
+    def gradient_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
         return lambda_l1
 
     def loss_l1_regularizer(batched_amplitudes: torch.Tensor) -> torch.Tensor:
@@ -32,7 +170,7 @@ def make_unweighted_l1_regularizer(lambda_l1: float) \
 def make_by_cell_weighted_l1_regularizer(problem_weights: np.ndarray,
                                          lambda_l1: float,
                                          device: torch.device) \
-        -> Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
     '''
     Makes lambda function for weighted L1 regularization
 
@@ -46,7 +184,7 @@ def make_by_cell_weighted_l1_regularizer(problem_weights: np.ndarray,
     # shape (n_different_problems, )
     l1_problem_weights = torch.tensor(problem_weights, dtype=torch.float32, device=device)
 
-    def gradient_weighted_l1_regularizer() -> torch.Tensor:
+    def gradient_weighted_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
         '''
         Calculates the gradient of the weighted L1 loss term in the nonnegative orthant
 
@@ -217,7 +355,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         converge_epsilon: float = 1e-3,
         kill_problems: Optional[np.ndarray] = None,
         l1_regularization_callable: Optional[
-            Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) \
         -> Tuple[np.ndarray, np.ndarray]:
@@ -290,7 +428,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
     gradient = at_a_x - unshared_at_b_vector
     if l1_regularization_callable is not None:
         l1_regularize_grad_callable, _ = l1_regularization_callable
-        gradient += l1_regularize_grad_callable()
+        gradient += l1_regularize_grad_callable(amplitudes)
 
     if spatial_continuity_regularizer is not None:
         spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
@@ -309,7 +447,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         gradient = at_a_x - unshared_at_b_vector
         if l1_regularization_callable is not None:
             l1_regularize_grad_callable, _ = l1_regularization_callable
-            gradient += l1_regularize_grad_callable()
+            gradient += l1_regularize_grad_callable(amplitudes)
 
         if spatial_continuity_regularizer is not None:
             spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
@@ -324,7 +462,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         if kill_problems_torch is not None:
             # some of the problems are invalid, and we don't care if some
             # of the invalid problems haven't yet converged
-            worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1) # shape (n_observations)
+            worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1)  # shape (n_observations)
             all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
             if all_valid_converged.item():
                 break
@@ -362,9 +500,9 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         max_iter: int,
         device: torch.device,
         converge_epsilon: float = 1e-3,
-        kill_problems : Optional[np.ndarray] = None,
+        kill_problems: Optional[np.ndarray] = None,
         l1_regularization_callable: Optional[
-            Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) \
         -> Tuple[np.ndarray, np.ndarray]:
@@ -449,7 +587,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
     gradient = at_a_x - at_b_torch
     if l1_regularization_callable is not None:
         l1_regularize_grad_callable, _ = l1_regularization_callable
-        gradient += l1_regularize_grad_callable()
+        gradient += l1_regularize_grad_callable(amplitudes)
 
     if spatial_continuity_regularizer is not None:
         spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
@@ -467,7 +605,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         gradient = at_a_x - at_b_torch
         if l1_regularization_callable is not None:
             l1_regularize_grad_callable, _ = l1_regularization_callable
-            gradient += l1_regularize_grad_callable()
+            gradient += l1_regularize_grad_callable(amplitudes)
 
         if spatial_continuity_regularizer is not None:
             spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
@@ -482,7 +620,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         if kill_problems_torch is not None:
             # some of the problems are invalid, and we don't care if some
             # of the invalid problems haven't yet converged
-            worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1) # shape (n_observations)
+            worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1)  # shape (n_observations)
             all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
             if all_valid_converged.item():
                 break
@@ -523,11 +661,11 @@ def coarse_to_fine_time_shifts_and_amplitudes(
         second_pass_width: int,
         device: torch.device,
         converge_epsilon: float = 1e-3,
-        kill_problems : Optional[np.ndarray] = None,
+        kill_problems: Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
         max_batch_size: int = 8192,
         l1_regularization_callable: Optional[
-            Tuple[Callable[[], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) -> \
         Tuple[np.ndarray, np.ndarray]:
