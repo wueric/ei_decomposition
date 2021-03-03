@@ -1,14 +1,15 @@
 import numpy as np
 import torch
 
-from typing import List, Dict, Tuple, Sequence, Optional, Union
+from typing import List, Dict, Tuple, Sequence, Optional, Union, Callable
 
 import tqdm
 
 from lib.amplitude_optimization import nonnegative_least_squares_optimize_amplitudes
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
-    make_unweighted_l1_regularizer, make_by_cell_weighted_l1_regularizer
+    make_unweighted_l1_regularizer, make_by_cell_weighted_l1_regularizer, make_group_l2_l1_unweighted_regularizer, \
+    make_group_l2_l1_weighted_regularizer, make_component_l1_unweighted_regularizer, make_component_l1_weighted_regularizer
 from lib.template_matching import greedy_template_match_time_shift, torch_fit_integer_shifts_all_but_one_template_match
 from lib.util_fns import bspline_upsample_waveforms, generate_fourier_phase_shift_matrices, \
     EIDecomposition, pack_significant_electrodes_into_matrix, unpack_amplitudes_and_phases_into_ei_shape
@@ -146,6 +147,73 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
     return initialized_amplitudes, initialized_canonical_waveforms, intialized_delays, loss_dict
 
 
+def select_l1_regularizer_callable(l1_regularization_lambda: Optional[float],
+                                   n_basis_waveforms : int,
+                                   use_scaled_regularization_terms: bool,
+                                   per_problem_weights: Optional[np.ndarray],
+                                   use_grouped_l1l2_norm: bool,
+                                   grouped_l1l2_groups: Optional[List[np.ndarray]],
+                                   use_basis_weighted_l1_norm: bool,
+                                   basis_weights: Optional[np.ndarray],
+                                   device : torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    Selects the regularization loss function
+    
+    :param l1_regularization_lambda: 
+    :param use_scaled_regularization_terms: 
+    :param use_grouped_l1l2_norm: 
+    :param grouped_l1l2_groups: 
+    :param use_basis_weighted_l1_norm: 
+    :param basis_weights: 
+    :return: 
+    '''
+
+    # Check correctness of inputs
+    if use_scaled_regularization_terms and per_problem_weights is None:
+        assert False, "must specify problem weights if using scaled regularization terms"
+    if use_grouped_l1l2_norm and grouped_l1l2_groups is None:
+        assert False, "must specify L1L2 groups if using L1L2 regularization"
+    if use_basis_weighted_l1_norm and basis_weights is None:
+        assert False, "must specify basis weights if using component-wise weighted L1 regularization"
+
+    if use_scaled_regularization_terms:
+
+        if use_grouped_l1l2_norm:
+            l1_regularization_callable = make_group_l2_l1_unweighted_regularizer(l1_regularization_lambda,
+                                                                                 n_basis_waveforms,
+                                                                                 grouped_l1l2_groups,
+                                                                                 device)
+        elif use_basis_weighted_l1_norm:
+            l1_regularization_callable = make_component_l1_unweighted_regularizer(l1_regularization_lambda,
+                                                                                  basis_weights,
+                                                                                  device)
+        else:
+            l1_regularization_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
+
+    else:
+        l1_reg_weight = 1.0 / per_problem_weights
+
+        # dispatch table for setting up the correct regularization scheme
+        if use_grouped_l1l2_norm:
+            l1_regularization_callable = make_group_l2_l1_weighted_regularizer(l1_reg_weight,
+                                                                               l1_regularization_lambda,
+                                                                               n_basis_waveforms,
+                                                                               grouped_l1l2_groups,
+                                                                               device)
+        elif use_basis_weighted_l1_norm:
+            l1_regularization_callable = make_component_l1_weighted_regularizer(l1_reg_weight,
+                                                                                l1_regularization_lambda,
+                                                                                basis_weights,
+                                                                                device)
+        else:
+            l1_regularization_callable = make_by_cell_weighted_l1_regularizer(l1_reg_weight,
+                                                                              l1_regularization_lambda,
+                                                                              device)
+
+    return l1_regularization_callable
+
+
 def one_iteration_amplitude_fit_only(raw_waveform_data_matrix: np.ndarray,
                                      basis_waveforms: np.ndarray,
                                      valid_shift_range: Tuple[int, int],
@@ -157,11 +225,16 @@ def one_iteration_amplitude_fit_only(raw_waveform_data_matrix: np.ndarray,
                                      max_batch_size=8192,
                                      use_scaled_mse_penalty: bool = False,
                                      use_scaled_regularization_terms: bool = False,
+                                     use_grouped_l1l2_norm: bool = False,
+                                     grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
+                                     use_basis_weighted_l1_norm: bool = False,
+                                     basis_weights_for_l1: Optional[np.ndarray] = None,
                                      l1_regularization_lambda: Optional[float] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
-    
     n_observations, n_samples = raw_waveform_data_matrix.shape
     n_frequencies_not_rfft = n_samples
+
+    n_basis_waveforms = basis_waveforms.shape[0]
 
     raw_data_magnitude = np.linalg.norm(raw_waveform_data_matrix, axis=1)
     scaled_raw_data = raw_waveform_data_matrix / raw_data_magnitude[:, None]
@@ -171,13 +244,17 @@ def one_iteration_amplitude_fit_only(raw_waveform_data_matrix: np.ndarray,
     observations_fourier_transform = np.fft.rfft(scaled_raw_data, axis=1)
     iter_canonical_waveform_ft = np.fft.rfft(basis_waveforms, axis=1)
 
-    if not use_scaled_regularization_terms:
-        l1_regularization_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
-    else:
-        l1_reg_weight = 1.0 / raw_data_magnitude
-        l1_regularization_callable = make_by_cell_weighted_l1_regularizer(l1_reg_weight,
-                                                                          l1_regularization_lambda,
-                                                                          device)
+    l1_regularization_callable = None
+    if l1_regularization_lambda is not None:
+        l1_regularization_callable = select_l1_regularizer_callable(l1_regularization_lambda,
+                                                                    n_basis_waveforms,
+                                                                    use_scaled_regularization_terms,
+                                                                    raw_data_magnitude,
+                                                                    use_grouped_l1l2_norm,
+                                                                    grouped_l1l2_groups,
+                                                                    use_basis_weighted_l1_norm,
+                                                                    basis_weights_for_l1,
+                                                                    device)
 
     iter_real_amplitudes, iter_delays = coarse_to_fine_time_shifts_and_amplitudes(
         observations_fourier_transform,
@@ -253,6 +330,10 @@ def shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix: np.nda
                                                 max_batch_size=8192,
                                                 use_scaled_mse_penalty: bool = False,
                                                 use_scaled_regularization_terms: bool = False,
+                                                use_grouped_l1l2_norm: bool = False,
+                                                grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
+                                                use_basis_weighted_l1_norm: bool = False,
+                                                basis_weights_for_l1: Optional[np.ndarray] = None,
                                                 l1_regularization_lambda: Optional[float] = None,
                                                 sobolev_regularization_lambda: Optional[float] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
@@ -280,8 +361,13 @@ def shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix: np.nda
     :return:
     '''
 
+    # check input flag correctness
+    if use_grouped_l1l2_norm and grouped_l1l2_groups is None:
+        assert False, 'must specify groups if using L1L2 group norm regularization'
+
     n_observations, n_samples = raw_waveform_data_matrix.shape
     n_frequencies_not_rfft = n_samples
+    n_canonical_waveforms = initialized_canonical_waveforms.shape[0]
 
     raw_data_magnitude = np.linalg.norm(raw_waveform_data_matrix, axis=1)
     scaled_raw_data = raw_waveform_data_matrix / raw_data_magnitude[:, None]
@@ -291,13 +377,15 @@ def shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix: np.nda
     observations_fourier_transform = np.fft.rfft(scaled_raw_data, axis=1)
     iter_canonical_waveform_ft = np.fft.rfft(initialized_canonical_waveforms, axis=1)
 
-    if not use_scaled_regularization_terms:
-        l1_regularization_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
-    else:
-        l1_reg_weight = 1.0 / raw_data_magnitude
-        l1_regularization_callable = make_by_cell_weighted_l1_regularizer(l1_reg_weight,
-                                                                          l1_regularization_lambda,
-                                                                          device)
+    l1_regularization_callable = select_l1_regularizer_callable(l1_regularization_lambda,
+                                                                n_canonical_waveforms,
+                                                                use_scaled_regularization_terms,
+                                                                raw_data_magnitude,
+                                                                use_grouped_l1l2_norm,
+                                                                grouped_l1l2_groups,
+                                                                use_basis_weighted_l1_norm,
+                                                                basis_weights_for_l1,
+                                                                device)
 
     waveform_observation_loss_weight = None
     if not use_scaled_mse_penalty:
@@ -550,6 +638,10 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
                                                     sobolev_regularize_lambda: Optional[float] = None,
                                                     use_scaled_mse_penalty: bool = False,
                                                     use_scaled_regularization_terms: bool = False,
+                                                    use_grouped_l1l2_norm: bool = False,
+                                                    grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
+                                                    use_basis_weighted_l1_norm: bool = False,
+                                                    basis_weights_for_l1: Optional[np.ndarray] = None,
                                                     output_debug_dict: bool = False) \
         -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float]],
                  Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
@@ -607,7 +699,11 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
         l1_regularization_lambda=l1_regularize_lambda,
         sobolev_regularization_lambda=sobolev_regularize_lambda,
         use_scaled_mse_penalty=use_scaled_mse_penalty,
-        use_scaled_regularization_terms=use_scaled_regularization_terms
+        use_scaled_regularization_terms=use_scaled_regularization_terms,
+        use_grouped_l1l2_norm=use_grouped_l1l2_norm,
+        grouped_l1l2_groups=grouped_l1l2_groups,
+        use_basis_weighted_l1_norm=use_basis_weighted_l1_norm,
+        basis_weights_for_l1=basis_weights_for_l1
     )
 
     # now unpack the results
@@ -744,10 +840,13 @@ def decompose_cells_amplitudes_only(eis_by_cell_id: Dict[int, np.ndarray],
                                     l1_regularize_lambda: Optional[float] = None,
                                     use_scaled_mse_penalty: bool = False,
                                     use_scaled_regularization_terms: bool = False,
+                                    use_grouped_l1l2_norm: bool = False,
+                                    grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
+                                    use_basis_weighted_l1_norm: bool = False,
+                                    basis_weights_for_l1: Optional[np.ndarray] = None,
                                     output_debug_dict: bool = False) \
         -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float]],
                  Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
-
     temp_cell_order = list(eis_by_cell_id.keys())
 
     ei_data_mat, matrix_indices_by_cell_id = pack_significant_electrodes_into_matrix(eis_by_cell_id,
@@ -774,7 +873,11 @@ def decompose_cells_amplitudes_only(eis_by_cell_id: Dict[int, np.ndarray],
         max_batch_size=grid_search_batch_size,
         l1_regularization_lambda=l1_regularize_lambda,
         use_scaled_mse_penalty=use_scaled_mse_penalty,
-        use_scaled_regularization_terms=use_scaled_regularization_terms
+        use_scaled_regularization_terms=use_scaled_regularization_terms,
+        use_grouped_l1l2_norm=use_grouped_l1l2_norm,
+        grouped_l1l2_groups=grouped_l1l2_groups,
+        use_basis_weighted_l1_norm=use_basis_weighted_l1_norm,
+        basis_weights_for_l1=basis_weights_for_l1
     )
 
     # now unpack the results

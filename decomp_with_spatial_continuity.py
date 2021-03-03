@@ -39,6 +39,11 @@ if __name__ == '__main__':
     parser.add_argument('--initialize_basis', '-i', type=str, default=None, help='path to initialized basis')
     parser.add_argument('--renormalize_loss', '-r', action='store_true', default=False, help='renormalize data waveforms')
     parser.add_argument('--renormalize_penalty', '-p', action='store_true', default=False, help='renormalize data waveforms')
+    parser.add_argument('--group', '-g', action='store_true', default=False,
+                        help='whether or not to use group L1L2 regularization')
+    parser.add_argument('--l1_comp_weights', '-l', action='store_true', default=False,
+                        help='whether or not to use componentwise weighted L1 regularization')
+
 
 
     args = parser.parse_args()
@@ -115,7 +120,11 @@ if __name__ == '__main__':
             l1_regularize_lambda=args.weight_reg,
             sobolev_regularize_lambda=args.sobolev_reg,
             use_scaled_mse_penalty=args.renormalize_loss,
-            use_scaled_regularization_terms=args.renormalize_penalty
+            use_scaled_regularization_terms=args.renormalize_penalty,
+            use_grouped_l1l2_norm=args.group,
+            grouped_l1l2_groups=group_assignments,
+            use_basis_weighted_l1_norm=args.l1_comp_weights,
+            basis_weights_for_l1=componentwise_weights
         )
 
     with open(args.output, 'wb') as joint_fit_file:

@@ -34,6 +34,11 @@ if __name__ == '__main__':
                         help='renormalize data waveforms')
     parser.add_argument('--renormalize_penalty', '-p', action='store_true', default=False,
                         help='renormalize data waveforms')
+    parser.add_argument('--group', '-g', action='store_true', default=False,
+                        help='whether or not to use group L1L2 regularization')
+    parser.add_argument('--l1_comp_weights', '-l', action='store_true', default=False,
+                        help='whether or not to use componentwise weighted L1 regularization')
+
 
     args = parser.parse_args()
 
@@ -58,9 +63,17 @@ if __name__ == '__main__':
         eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
 
     with open(args.basis_pickle, 'rb') as pfile:
-
         basis_dict = pickle.load(pfile)
-        initial_basis = basis_dict['basis']
+        
+    initial_basis = basis_dict['basis']
+
+    group_assignments = None
+    if args.group:
+        group_assignments = basis_dict['group_assignments']
+
+    componentwise_weights = None
+    if args.l1_comp_weights:
+        componentwise_weights = basis_dict['componentwise_weights']
 
     shift_tuple = (-args.before, args.after)
 
@@ -78,7 +91,11 @@ if __name__ == '__main__':
         fine_search_width=args.fine_search_width,
         grid_search_batch_size=args.grid_batch_size,
         use_scaled_mse_penalty=args.renormalize_loss,
-        use_scaled_regularization_terms=args.renormalize_penalty
+        use_scaled_regularization_terms=args.renormalize_penalty,
+        use_grouped_l1l2_norm=args.group,
+        grouped_l1l2_groups=group_assignments,
+        use_basis_weighted_l1_norm=args.l1_comp_weights,
+        basis_weights_for_l1=componentwise_weights
     )
 
     print(mse)

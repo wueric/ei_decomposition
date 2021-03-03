@@ -5,6 +5,77 @@ import torch
 import tqdm
 
 
+def make_component_l1_unweighted_regularizer(lambda_overall: float,
+                                             basis_weights: np.ndarray,
+                                             device: torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    
+    :param lambda_overall: 
+    :param basis_weights: shape (n_basis_vectors, )
+    :param device: 
+    :return: 
+    '''
+
+    basis_weights_torch = torch.tensor(basis_weights, dtype=torch.float32, device=device)
+
+    def grad_component_l1(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+        
+        :param coeff: shape (n_different_problems, batch_size, n_basis_vectors)
+        :return:  (n_different_problems, batch_size, n_basis_vectors)
+        '''
+        return lambda_overall * basis_weights_torch[None, None, :]
+
+    def loss_component_l1(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+        
+        :param coeff: coeff: shape (n_different_problems, batch_size, n_basis_vectors)
+        :return: shape (n_different_problems, batch_size)
+        '''
+
+        return lambda_overall * torch.sum(basis_weights_torch[None, None, :] * coeff, dim=2)
+
+    return grad_component_l1, loss_component_l1
+
+
+def make_component_l1_weighted_regularizer(problem_weights: np.ndarray,
+                                           lambda_overall: float,
+                                           basis_weights: np.ndarray,
+                                           device: torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    
+    :param problem_weights: shape (n_different_problems, )
+    :param lambda_overall: 
+    :param basis_weights: shape (n_basis_vectors, )
+    :param device: 
+    :return: 
+    '''
+    basis_weights_torch = torch.tensor(basis_weights, dtype=torch.float32, device=device)
+    problem_weights_torch = torch.tensor(problem_weights, dtype=torch.float32, device=device)
+
+    def grad_component_l1(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (n_different_problems, batch_size, n_basis_vectors)
+        :return:  (n_different_problems, batch_size, n_basis_vectors)
+        '''
+        return lambda_overall * basis_weights_torch[None, None, :] * problem_weights_torch[:, None, None]
+
+    def loss_component_l1(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: coeff: shape (n_different_problems, batch_size, n_basis_vectors)
+        :return: shape (n_different_problems, batch_size)
+        '''
+
+        return lambda_overall * torch.sum(
+            problem_weights_torch[:, None, None] * basis_weights_torch[None, None, :] * coeff, dim=2)
+    
+    return grad_component_l1, loss_component_l1
+
+
 def make_group_l2_l1_unweighted_regularizer(lambda_overall: float,
                                             n_basis_vectors: int,
                                             group_assignments: List[np.ndarray],
@@ -25,12 +96,14 @@ def make_group_l2_l1_unweighted_regularizer(lambda_overall: float,
     :return:
     '''
 
-    gather_index = np.zeros((len(group_assignments), n_basis_vectors), dtype=np.int32)
+    EPS = 1e-5
+
+    gather_index = np.zeros((len(group_assignments), n_basis_vectors), dtype=np.float32)
     for idx, group_indices in enumerate(group_assignments):
-        gather_index[idx, group_indices] = 1
+        gather_index[idx, group_indices] = 1.0
 
     # shape (n_groups, n_basis_vectors)
-    gather_index = torch.tensor(gather_index, device=device)
+    gather_index = torch.tensor(gather_index, device=device, dtype=torch.float32)
 
     def gradient_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
         '''
@@ -43,13 +116,12 @@ def make_group_l2_l1_unweighted_regularizer(lambda_overall: float,
         coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
 
         # shape (n_problems, batch_size, n_groups)
-        l2_norm = torch.norm(coefficients_by_group, dim=3)
+        l2_norm = torch.norm(coefficients_by_group, dim=3, p=2)
 
         # shape (n_problems, batch_size, n_groups, n_basis_vectors)
-        division = coefficients_by_group / l2_norm[:, :, :, None]
+        division = coefficients_by_group / (l2_norm[:, :, :, None] + EPS)
 
         return lambda_overall * torch.sum(division, dim=2)
-
 
     def loss_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
         '''
@@ -62,19 +134,19 @@ def make_group_l2_l1_unweighted_regularizer(lambda_overall: float,
         coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
 
         # shape (n_problems, batch_size, n_groups)
-        l2_norm = torch.norm(coefficients_by_group, dim=3)
+        l2_norm = torch.norm(coefficients_by_group, dim=3, p=2)
 
         # shape (n_problems, batch_size)
-        return lambda_overall * torch.sum(coefficients_by_group, dim=2)
+        return lambda_overall * torch.sum(l2_norm, dim=2)
 
     return gradient_group_l2_l1_regularizer, loss_group_l2_l1_regularizer
 
 
 def make_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
                                           lambda_overall: float,
-                                          n_basis_vectors : int,
-                                          group_assignments : List[np.ndarray],
-                                          device : torch.device) \
+                                          n_basis_vectors: int,
+                                          group_assignments: List[np.ndarray],
+                                          device: torch.device) \
         -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
     '''
     Suppose that we have variable groups g \in G, each of which contains some variables.
@@ -116,13 +188,12 @@ def make_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
         coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
 
         # shape (n_problems, batch_size, n_groups)
-        l2_norm = torch.norm(coefficients_by_group, dim=3)
+        l2_norm = torch.linalg.norm(coefficients_by_group, dim=3, p=2)
 
         # shape (n_problems, batch_size, n_groups, n_basis_vectors)
-        division = coefficients_by_group / l2_norm[:, :, :, None]
+        division = coefficients_by_group / (l2_norm[:, :, :, None] + EPS)
 
         return lambda_overall * torch.sum(division, dim=2) * problem_weights_torch[:, None, None]
-
 
     def loss_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
         '''
@@ -135,10 +206,10 @@ def make_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
         coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
 
         # shape (n_problems, batch_size, n_groups)
-        l2_norm = torch.norm(coefficients_by_group, dim=3)
+        l2_norm = torch.norm(coefficients_by_group, dim=3, p=2)
 
         # shape (n_problems, batch_size)
-        return lambda_overall * torch.sum(coefficients_by_group, dim=2) * problem_weights_torch[:, None]
+        return lambda_overall * torch.sum(l2_norm, dim=2) * problem_weights_torch[:, None]
 
     return gradient_group_l2_l1_regularizer, loss_group_l2_l1_regularizer
 

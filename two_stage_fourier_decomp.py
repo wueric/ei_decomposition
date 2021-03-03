@@ -18,7 +18,8 @@ if __name__ == '__main__':
     parser.add_argument('output', type=str, help='path to output pickle file')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--maxiter', '-m', type=int, default=25, help='maximum number of iterations to run')
-    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2, help='L1 regularization lambda for amplitudes')
+    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
+                        help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
                         help='L2 regularization for waveform second derivatives')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
@@ -31,11 +32,15 @@ if __name__ == '__main__':
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
     parser.add_argument('--cell_list', '-c', type=str, default=None,
                         help='Override cell_type argument, instead use cell ids in specified file')
-    parser.add_argument('--renormalize_loss', '-r', action='store_true', default=False, help='renormalize data waveforms')
-    parser.add_argument('--renormalize_penalty', '-p', action='store_true', default=False, help='renormalize data waveforms')
-    parser.add_argument('--select_by_l1', '-d', action='store_true', default=False,
-                        help='include L1 regularization when picking best search candidates')
+    parser.add_argument('--renormalize_loss', '-r', action='store_true', default=False,
+                        help='renormalize data waveforms')
+    parser.add_argument('--renormalize_penalty', '-p', action='store_true', default=False,
+                        help='renormalize data waveforms')
     parser.add_argument('--initialize_basis', '-i', type=str, default=None, help='path to initialized basis')
+    parser.add_argument('--group', '-g', action='store_true', default=False,
+                        help='whether or not to use group L1L2 regularization')
+    parser.add_argument('--l1_comp_weights', '-l', action='store_true', default=False,
+                        help='whether or not to use componentwise weighted L1 regularization')
 
     args = parser.parse_args()
 
@@ -63,10 +68,16 @@ if __name__ == '__main__':
     initial_basis = None
     if args.initialize_basis is not None:
         with open(args.initialize_basis, 'rb') as pfile:
-
             basis_dict = pickle.load(pfile)
-            initial_basis = basis_dict['basis']
+        initial_basis = basis_dict['basis']
 
+        group_assignments = None
+        if args.group:
+            group_assignments = basis_dict['group_assignments']
+
+        componentwise_weights = None
+        if args.l1_comp_weights:
+            componentwise_weights = basis_dict['componentwise_weights']
 
     shift_tuple = (-args.before, args.after)
 
@@ -87,8 +98,7 @@ if __name__ == '__main__':
             fine_search_width=args.fine_search_width,
             grid_search_batch_size=args.grid_batch_size,
             use_scaled_mse_penalty=args.renormalize_loss,
-            use_scaled_regularization_terms=args.renormalize_penalty
-
+            use_scaled_regularization_terms=args.renormalize_penalty,
         )
     else:
         decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
@@ -107,9 +117,12 @@ if __name__ == '__main__':
             fine_search_width=args.fine_search_width,
             grid_search_batch_size=args.grid_batch_size,
             use_scaled_mse_penalty=args.renormalize_loss,
-            use_scaled_regularization_terms=args.renormalize_penalty
+            use_scaled_regularization_terms=args.renormalize_penalty,
+            use_grouped_l1l2_norm=args.group,
+            grouped_l1l2_groups=group_assignments,
+            use_basis_weighted_l1_norm=args.l1_comp_weights,
+            basis_weights_for_l1=componentwise_weights
         )
-
 
     with open(args.output, 'wb') as joint_fit_file:
         metadata_dict = {

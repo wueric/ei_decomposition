@@ -16,6 +16,8 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
     grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, \
     get_neighborhood_indices_from_adj_mat_dfs
 
+from lib.ei_decomposition import select_l1_regularizer_callable
+
 from lib.losseval import by_cell_evaluate_loss, evaluate_mse_by_cell
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
     make_by_cell_weighted_l1_regularizer, make_unweighted_l1_regularizer
@@ -239,6 +241,10 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
                                              second_pass_width: int,
                                              device: torch.device,
                                              use_scaled_regularization_terms: bool = False,
+                                             use_grouped_l1l2_norm: bool = False,
+                                             grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
+                                             use_basis_weighted_l1_norm: bool = False,
+                                             basis_weights_for_l1: Optional[np.ndarray] = None,
                                              l1_regularization_lambda: Optional[float] = None,
                                              amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
                                              least_squares_converge_epsilon: float = 1e-3,
@@ -309,13 +315,15 @@ def search_with_coordinate_descent_projected(observed_ft_by_cell: np.ndarray,
 
         l1_regularization_callable = None
         if l1_regularization_lambda is not None:
-            if use_scaled_regularization_terms:
-                l1_scale_factor = 1.0 / observed_data_scaling[:, electrode_idx]
-                l1_regularization_callable = make_by_cell_weighted_l1_regularizer(l1_scale_factor,
-                                                                               l1_regularization_lambda,
-                                                                               device)
-            else:
-                l1_regularization_callable = make_unweighted_l1_regularizer(l1_regularization_lambda)
+            l1_regularization_callable = select_l1_regularizer_callable(l1_regularization_lambda,
+                                                                        n_canonical_waveforms,
+                                                                        use_scaled_regularization_terms,
+                                                                        observed_data_scaling[:, electrode_idx],
+                                                                        use_grouped_l1l2_norm,
+                                                                        grouped_l1l2_groups,
+                                                                        use_basis_weighted_l1_norm,
+                                                                        basis_weights_for_l1,
+                                                                        device)
 
         parallel_amplitudes_el, parallel_shifts_el = coarse_to_fine_time_shifts_and_amplitudes(
             observed_ft_by_cell[:, electrode_idx, :],
@@ -360,6 +368,10 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                        l1_regularization_lambda: Optional[float] = None,
                                                        use_scaled_mse_penalty: bool = False,
                                                        use_scaled_regularization_terms: bool = False,
+                                                       use_grouped_l1l2_norm: bool = False,
+                                                       grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
+                                                       use_basis_weighted_l1_norm: bool = False,
+                                                       basis_weights_for_l1: Optional[np.ndarray] = None,
                                                        sobolev_regularization_lambda: Optional[float] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     '''
@@ -471,6 +483,10 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
             use_scaled_regularization_terms=use_scaled_regularization_terms,
             amplitude_initialize_range=amplitude_init_range,
             l1_regularization_lambda=l1_regularization_lambda,
+            use_grouped_l1l2_norm=use_grouped_l1l2_norm,
+            grouped_l1l2_groups=grouped_l1l2_groups,
+            use_basis_weighted_l1_norm=use_basis_weighted_l1_norm,
+            basis_weights_for_l1=basis_weights_for_l1
         )
 
         # iter_real_amplitudes and iter_delays have shape (n_cells, max_n_electrodes, n_canonical_waveforms)
@@ -545,9 +561,9 @@ def shifted_fourier_nmf_iterative_optimization_spatial(raw_waveforms_by_cell: np
                                                   use_scaled_reg_penalty=use_scaled_regularization_terms)
 
         loss_dict = {
-            'MSE equalized by electrode' : orig_MSE,
+            'MSE equalized by electrode': orig_MSE,
             'true MSE': true_MSE,
-            'Loss MSE component' : mse_component,
+            'Loss MSE component': mse_component,
             'Loss': loss_with_penalty
 
         }
@@ -577,6 +593,10 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                                    sobolev_regularize_lambda: Optional[float] = None,
                                    use_scaled_mse_penalty: bool = False,
                                    use_scaled_regularization_terms: bool = False,
+                                   use_grouped_l1l2_norm: bool = False,
+                                   grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
+                                   use_basis_weighted_l1_norm: bool = False,
+                                   basis_weights_for_l1: Optional[np.ndarray] = None,
                                    output_debug_dict: bool = False) \
         -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float]],
                  Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
@@ -709,6 +729,10 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
         use_scaled_mse_penalty=use_scaled_mse_penalty,
         use_scaled_regularization_terms=use_scaled_regularization_terms,
         sobolev_regularization_lambda=sobolev_regularize_lambda,
+        use_grouped_l1l2_norm=use_grouped_l1l2_norm,
+        grouped_l1l2_groups=grouped_l1l2_groups,
+        use_basis_weighted_l1_norm=use_basis_weighted_l1_norm,
+        basis_weights_for_l1=basis_weights_for_l1
     )
 
     result_dict = pack_by_cell_amplitudes_and_phases_into_ei_shape(amplitudes_by_cell,
