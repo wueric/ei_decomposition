@@ -9,7 +9,8 @@ from lib.amplitude_optimization import nonnegative_least_squares_optimize_amplit
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
 from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
     make_unweighted_l1_regularizer, make_by_cell_weighted_l1_regularizer, make_group_l2_l1_unweighted_regularizer, \
-    make_group_l2_l1_weighted_regularizer, make_component_l1_unweighted_regularizer, make_component_l1_weighted_regularizer
+    make_group_l2_l1_weighted_regularizer, make_component_l1_unweighted_regularizer, \
+    make_component_l1_weighted_regularizer
 from lib.template_matching import greedy_template_match_time_shift, torch_fit_integer_shifts_all_but_one_template_match
 from lib.util_fns import bspline_upsample_waveforms, generate_fourier_phase_shift_matrices, \
     EIDecomposition, pack_significant_electrodes_into_matrix, unpack_amplitudes_and_phases_into_ei_shape
@@ -148,14 +149,14 @@ def shifted_fourier_nmf_iterative_optimization2(waveform_data_matrix: np.ndarray
 
 
 def select_l1_regularizer_callable(l1_regularization_lambda: Optional[float],
-                                   n_basis_waveforms : int,
+                                   n_basis_waveforms: int,
                                    use_scaled_regularization_terms: bool,
                                    per_problem_weights: Optional[np.ndarray],
                                    use_grouped_l1l2_norm: bool,
                                    grouped_l1l2_groups: Optional[List[np.ndarray]],
                                    use_basis_weighted_l1_norm: bool,
                                    basis_weights: Optional[np.ndarray],
-                                   device : torch.device) \
+                                   device: torch.device) \
         -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
     '''
     Selects the regularization loss function
@@ -670,24 +671,16 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
 
     if n_basis_vectors is not None:
         # have to randomly initialize basis waveforms
-        init_basis = np.zeros((n_basis_vectors, n_samples),
-                              dtype=np.float32)
+        initialized_basis_vectors = np.zeros((n_basis_vectors, n_samples),
+                                             dtype=np.float32)
         rand_choice_data_waveform = np.random.randint(0, n_observations, size=n_basis_vectors)
-        init_basis[:, :] = padded_channels_sufficient_magnitude[rand_choice_data_waveform, :]
-        init_basis = init_basis / np.linalg.norm(init_basis, axis=1, keepdims=True)
-
-    else:
-
-        # also need to supersample and pad the initial basis waveforms
-        bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
-        init_basis = np.pad(bspline_supersampled_basis,
-                            [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
-                            mode='constant')
-        init_basis = init_basis / np.linalg.norm(init_basis, axis=1, keepdims=True)
+        initialized_basis_vectors[:, :] = padded_channels_sufficient_magnitude[rand_choice_data_waveform, :]
+        initialized_basis_vectors = initialized_basis_vectors / np.linalg.norm(initialized_basis_vectors, axis=1,
+                                                                               keepdims=True)
 
     amplitudes, waveforms, delays, mse = shifted_fourier_nmf_iterative_optimization3(
         padded_channels_sufficient_magnitude,
-        init_basis,
+        initialized_basis_vectors,
         shifts,
         grid_search_step,
         grid_search_top_n,

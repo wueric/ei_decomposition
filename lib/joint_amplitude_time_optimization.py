@@ -177,6 +177,8 @@ def make_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
     # shape (n_different_problems, )
     problem_weights_torch = torch.tensor(problem_weights, device=device, dtype=torch.float32)
 
+    EPS = 1e-5
+
     def gradient_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
         '''
 
@@ -188,7 +190,7 @@ def make_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
         coefficients_by_group = coeff[:, :, None, :] * gather_index[None, None, :, :]
 
         # shape (n_problems, batch_size, n_groups)
-        l2_norm = torch.linalg.norm(coefficients_by_group, dim=3, p=2)
+        l2_norm = torch.norm(coefficients_by_group, dim=3, p=2)
 
         # shape (n_problems, batch_size, n_groups, n_basis_vectors)
         division = coefficients_by_group / (l2_norm[:, :, :, None] + EPS)
@@ -423,7 +425,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         n_true_frequencies: int,
         max_iter: int,
         device: torch.device,
-        converge_epsilon: float = 1e-3,
+        converge_epsilon: float = 1e-2, # FIXME
         kill_problems: Optional[np.ndarray] = None,
         l1_regularization_callable: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
@@ -570,7 +572,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         n_true_frequencies: int,
         max_iter: int,
         device: torch.device,
-        converge_epsilon: float = 1e-3,
+        converge_epsilon: float = 1e-2, # FIXME
         kill_problems: Optional[np.ndarray] = None,
         l1_regularization_callable: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
@@ -731,7 +733,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(
         second_pass_best_n: int,
         second_pass_width: int,
         device: torch.device,
-        converge_epsilon: float = 1e-3,
+        converge_epsilon: float = 1e-2, # FIXME
         kill_problems: Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
         max_batch_size: int = 8192,
