@@ -66,6 +66,8 @@ if __name__ == '__main__':
 
     # use the initialized basis if specified, otherwise specify the number of basis vectors
     initial_basis = None
+    group_assignments = None,
+    componentwise_weights = None
     if args.initialize_basis is not None:
         with open(args.initialize_basis, 'rb') as pfile:
             basis_dict = pickle.load(pfile)
@@ -131,7 +133,13 @@ if __name__ == '__main__':
             'maxiter': args.maxiter,
             'padding': shift_tuple,
             'upsample': args.upsample,
-            'thresh': args.thresh
+            'thresh': args.thresh,
+            'scale_mse_for_waveforms' : args.renormalize_loss,
+            'scale_regularization_terms' : args.renormalize_penalty,
+            'use_grouped_l1l2_norm' : args.group,
+            'group_assignments' : group_assignments,
+            'use_basis_weighted_l1' : args.l1_comp_weights,
+            'basis_weights_for_l1' : componentwise_weights
         }
 
         pickle_dict = {

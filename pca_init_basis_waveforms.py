@@ -16,6 +16,7 @@ if __name__ == '__main__':
     parser.add_argument('ds_name', type=str, help='name of Vision dataset')
     parser.add_argument('basis_pickle', type=str, help='path to output pickle file')
     parser.add_argument('cell_type', type=str, help='type of cell to fetch')
+    parser.add_argument('-c', '--cell_list', type=str, help='path to cell list file')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
