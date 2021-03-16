@@ -7,16 +7,15 @@ import argparse
 
 from sklearn.mixture import GaussianMixture
 
+from typing import Dict
+
 import visionloader as vl
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Select initial basis waveforms')
 
-    parser.add_argument('ds_path', type=str, help='path to Vision dataset')
-    parser.add_argument('ds_name', type=str, help='name of Vision dataset')
+    parser.add_argument('data_pickle', type=str, help='path to data pickle')
     parser.add_argument('basis_pickle', type=str, help='path to output pickle file')
-    parser.add_argument('cell_type', type=str, help='type of cell to fetch')
-    parser.add_argument('-c', '--cell_list', type=str, help='path to cell list file')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
@@ -31,13 +30,12 @@ if __name__ == '__main__':
     n_pca_components = args.n_pca_components
     n_basis_waveforms = args.nbasis
 
-    dataset = vl.load_vision_data(args.ds_path,
-                                  args.ds_name,
-                                  include_params=True,
-                                  include_ei=True)
+    with open(args.data_pickle, 'rb') as pfile:
 
-    cell_list = dataset.get_all_cells_of_type(args.cell_type)
-    eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_list}
+        preprocessed_dict = pickle.load(pfile)
+
+    eis_by_cell_id = preprocessed_dict['eis_by_cell_id'] # type: Dict[int, np.ndarray]
+    cell_list = list(eis_by_cell_id.keys())
 
     ei_data_mat, matrix_indices_by_cell_id = pack_significant_electrodes_into_matrix(eis_by_cell_id,
                                                                                      cell_list,
@@ -75,7 +73,11 @@ if __name__ == '__main__':
 
     with open(args.basis_pickle, 'wb') as pfile:
         pickle_dict = {
-            'basis' : cluster_means
+            'basis' : cluster_means,
+            'upsample' : args.upsample,
+            'before': args.before,
+            'after' : args.after,
+            'thresh' : args.thresh
         }
         pickle.dump(pickle_dict, pfile)
 

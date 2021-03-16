@@ -12,9 +12,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='jointly decompose noramlized EIs for a given cell type into constituent waveforms by jointly optimizing waveforms, shifts, and amplitudes')
 
-    parser.add_argument('ds_path', type=str, help='path to Vision dataset')
-    parser.add_argument('ds_name', type=str, help='name of Vision dataset')
-    parser.add_argument('cell_type', type=str, help='cell type of interest')
+    parser.add_argument('data_pickle', type=str, help='path to raw data pickle')
     parser.add_argument('output', type=str, help='path to output pickle file')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--maxiter', '-m', type=int, default=25, help='maximum number of iterations to run')
@@ -30,8 +28,6 @@ if __name__ == '__main__':
     parser.add_argument('--fine_search_width', type=int, default=2, help='width for fine search')
     parser.add_argument('--grid_batch_size', type=int, default=8192, help='grid search batch size')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
-    parser.add_argument('--cell_list', '-c', type=str, default=None,
-                        help='Override cell_type argument, instead use cell ids in specified file')
     parser.add_argument('--renormalize_loss', '-r', action='store_true', default=False,
                         help='renormalize data waveforms')
     parser.add_argument('--renormalize_penalty', '-p', action='store_true', default=False,
@@ -47,22 +43,11 @@ if __name__ == '__main__':
     compute_device = torch.device('cuda')
 
     print("Loading data")
-    dataset = vl.load_vision_data(args.ds_path,
-                                  args.ds_name,
-                                  include_params=True,
-                                  include_ei=True)
-    dataset_el_map = dataset.get_electrode_map()
+    with open(args.data_pickle, 'rb') as pfile:
 
-    if args.cell_list is not None:
-
-        with open(args.cell_list, 'r') as cell_id_file:
-            cell_id_list = list(
-                map(lambda x: int(x), cell_id_file.readline().strip('\n').split(',')))
-
-        eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
-    else:
-        cell_id_list = dataset.get_all_cells_of_type(args.cell_type)
-        eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
+        preprocessed_dict = pickle.load(pfile)
+        eis_by_cell_id = preprocessed_dict['eis_by_cell_id'] # type: Dict[int, np.ndarray]
+        dataset_el_map = preprocessed_dict['electrode_map'] # type: np.ndarray
 
     # use the initialized basis if specified, otherwise specify the number of basis vectors
     initial_basis = None
@@ -73,6 +58,11 @@ if __name__ == '__main__':
             basis_dict = pickle.load(pfile)
         initial_basis = basis_dict['basis']
 
+        shift_tuple = (-initial_basis['before'], initial_basis['after'])
+        upsample_factor = basis_dict['upsample']
+        snr_thresh = basis_dict['thresh']
+
+
         group_assignments = None
         if args.group:
             group_assignments = basis_dict['group_assignments']
@@ -81,7 +71,10 @@ if __name__ == '__main__':
         if args.l1_comp_weights:
             componentwise_weights = basis_dict['componentwise_weights']
 
-    shift_tuple = (-args.before, args.after)
+    else:
+        upsample_factor = args.upsample
+        shift_tuple = (-args.before, args.after)
+        snr_thresh = args.thresh
 
     if initial_basis is None:
         decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
@@ -93,8 +86,8 @@ if __name__ == '__main__':
             sobolev_regularize_lambda=args.sobolev_reg,
             output_debug_dict=False,
             shifts=shift_tuple,
-            supersample_factor=args.upsample,
-            snr_abs_threshold=args.thresh,
+            supersample_factor=upsample_factor,
+            snr_abs_threshold=snr_thresh,
             grid_search_step=args.grid_step,
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
@@ -112,8 +105,8 @@ if __name__ == '__main__':
             sobolev_regularize_lambda=args.sobolev_reg,
             output_debug_dict=False,
             shifts=shift_tuple,
-            supersample_factor=args.upsample,
-            snr_abs_threshold=args.thresh,
+            supersample_factor=upsample_factor,
+            snr_abs_threshold=snr_thresh,
             grid_search_step=args.grid_step,
             grid_search_top_n=args.grid_top_n,
             fine_search_width=args.fine_search_width,
