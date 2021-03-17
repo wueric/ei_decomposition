@@ -37,6 +37,10 @@ if __name__ == '__main__':
                         help='whether or not to use group L1L2 regularization')
     parser.add_argument('--l1_comp_weights', '-l', action='store_true', default=False,
                         help='whether or not to use componentwise weighted L1 regularization')
+    parser.add_argument('--eps_cutoff', '-e', type=float, default=1e-3,
+                        help='converge epsilon. Default uses comparison to t^2 |G_t|^2, which is robust but does not guarantee bounds on convergence')
+    parser.add_argument('--eps_eigen', '--f', action='store_true', default=False,
+                        help='use original eigenvalue based convergence, which provides a provable suboptimality for least squares but breaks with strong regularization')
 
     args = parser.parse_args()
 
@@ -46,8 +50,8 @@ if __name__ == '__main__':
     with open(args.data_pickle, 'rb') as pfile:
 
         preprocessed_dict = pickle.load(pfile)
-        eis_by_cell_id = preprocessed_dict['eis_by_cell_id'] # type: Dict[int, np.ndarray]
-        dataset_el_map = preprocessed_dict['electrode_map'] # type: np.ndarray
+        eis_by_cell_id = preprocessed_dict['eis_by_cell_id']  # type: Dict[int, np.ndarray]
+        dataset_el_map = preprocessed_dict['electrode_map']  # type: np.ndarray
 
     # use the initialized basis if specified, otherwise specify the number of basis vectors
     initial_basis = None
@@ -58,10 +62,9 @@ if __name__ == '__main__':
             basis_dict = pickle.load(pfile)
         initial_basis = basis_dict['basis']
 
-        shift_tuple = (-initial_basis['before'], initial_basis['after'])
+        shift_tuple = (-basis_dict['before'], basis_dict['after'])
         upsample_factor = basis_dict['upsample']
         snr_thresh = basis_dict['thresh']
-
 
         group_assignments = None
         if args.group:
@@ -94,6 +97,8 @@ if __name__ == '__main__':
             grid_search_batch_size=args.grid_batch_size,
             use_scaled_mse_penalty=args.renormalize_loss,
             use_scaled_regularization_terms=args.renormalize_penalty,
+            converge_epsilon=args.eps_cutoff,
+            converge_step_cutoff=args.eps_cutoff if not args.eps_eigen else None
         )
     else:
         decomposition_dict, basis_waveforms, mse = ei_decomp.two_step_decompose_cells_by_fitted_compartments(
@@ -116,7 +121,9 @@ if __name__ == '__main__':
             use_grouped_l1l2_norm=args.group,
             grouped_l1l2_groups=group_assignments,
             use_basis_weighted_l1_norm=args.l1_comp_weights,
-            basis_weights_for_l1=componentwise_weights
+            basis_weights_for_l1=componentwise_weights,
+            converge_epsilon=args.eps_cutoff,
+            converge_step_cutoff=args.eps_cutoff if not args.eps_eigen else None
         )
 
     with open(args.output, 'wb') as joint_fit_file:
@@ -127,12 +134,12 @@ if __name__ == '__main__':
             'padding': shift_tuple,
             'upsample': args.upsample,
             'thresh': args.thresh,
-            'scale_mse_for_waveforms' : args.renormalize_loss,
-            'scale_regularization_terms' : args.renormalize_penalty,
-            'use_grouped_l1l2_norm' : args.group,
-            'group_assignments' : group_assignments,
-            'use_basis_weighted_l1' : args.l1_comp_weights,
-            'basis_weights_for_l1' : componentwise_weights
+            'scale_mse_for_waveforms': args.renormalize_loss,
+            'scale_regularization_terms': args.renormalize_penalty,
+            'use_grouped_l1l2_norm': args.group,
+            'group_assignments': group_assignments,
+            'use_basis_weighted_l1': args.l1_comp_weights,
+            'basis_weights_for_l1': componentwise_weights
         }
 
         pickle_dict = {

@@ -426,6 +426,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         max_iter: int,
         device: torch.device,
         converge_epsilon: float = 1e-2, # FIXME
+        converge_step_cutoff : Optional[float] = None,
         kill_problems: Optional[np.ndarray] = None,
         l1_regularization_callable: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
@@ -433,7 +434,21 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) \
         -> Tuple[np.ndarray, np.ndarray]:
     '''
-
+    Parallel implementation of the second step fine search, where for a collection of different optimization problems,
+        we consider a separate set of shifts for each problem (i.e. for problems A and B, the basis vectors may be
+        shifted different amounts for problem A and for problem B)
+    
+    Termination logic (how do we know whether we are done?):
+    
+        (1) If converge_step_cutoff is not specified, then we use the m strong-convexity / L-Lipschitz contininuous
+            property that we proved for least squares as the termination condition (this breaks down completely
+            and refuses to declare convergence when regularization is strong. In this case, if L is the largest 
+            eigenvalue of A^T A and m is the smallest eigenvalue of A^T A, the upper bound on suboptimality of the
+            current solution is (L-m)/ 2m^2 |G_t|^2 , and we compare this value to converge_epsilon to determine whether
+            or not the problem has converged
+        (2) if converge_step_cutoff is specified, we compare the value of converge_step_cutoff to 1/2 |G_t|^2
+            and declare the problem solved if 1/2 |G_t|^2 < converge_step_cutoff
+    
     :param observed_ft: observed waveforms in Fourier domain, complex valued, shape (n_observations, n_rfft_frequencies)
     :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
             shape (n_canonical_waveforms, n_rfft_frequencies)
@@ -529,14 +544,22 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
         step_distance = next_amplitudes - amplitudes
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         step_distance = torch.sum(step_distance * step_distance, dim=2)  # shape (n_observations, n_valid_phase_shifts)
-        convergence_bound = convergence_factor * step_distance  # shape (n_observations, n_valid_phase_shifts)
         amplitudes = next_amplitudes
+
+        if converge_step_cutoff is None:
+            convergence_bound = convergence_factor * step_distance  # shape (n_observations, n_valid_phase_shifts)
+        else:
+            convergence_bound = 0.5 * step_distance / (step_size * step_size)
 
         if kill_problems_torch is not None:
             # some of the problems are invalid, and we don't care if some
             # of the invalid problems haven't yet converged
             worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1)  # shape (n_observations)
-            all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            if convergence_step_cutoff is None:
+                all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            else:
+                all_valid_converged = torch.all(((worst_bound_by_problem < converge_step_cutoff) | kill_problems_torch))
+
             if all_valid_converged.item():
                 break
         else:
@@ -544,8 +567,13 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
             # termination condition where we stop when the last problem
             # has converged reasonably
             worst_bound = torch.max(convergence_bound).item()
-            if worst_bound < converge_epsilon:
-                break
+
+            if converge_step_cutoff is None:
+                if worst_bound < converge_epsilon:
+                    break
+            else:
+                if worst_bound < converge_step_cutoff:
+                    break
 
     # now we have to calculate the objective values
     xt_at_a_x = (amplitudes[:, :, None, :] @ at_a_x[:, :, :, None]).squeeze()
@@ -573,6 +601,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         max_iter: int,
         device: torch.device,
         converge_epsilon: float = 1e-2, # FIXME
+        converge_step_cutoff: Optional[float] = None,
         kill_problems: Optional[np.ndarray] = None,
         l1_regularization_callable: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
@@ -595,6 +624,18 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
     (A^T A)_{i,j}^{(z)} corresponds to the cross-correlation of the i^{th} canonical waveform, delayed by
         valid_phase_shifts[i,z] number of samples, with the j^{th} canonical waveform, delayed by
         valid_phase_shifts[j,z] number of samples
+
+    Termination logic (how do we know whether we are done?):
+
+        (1) If converge_step_cutoff is not specified, then we use the m strong-convexity / L-Lipschitz contininuous
+            property that we proved for least squares as the termination condition (this breaks down completely
+            and refuses to declare convergence when regularization is strong. In this case, if L is the largest
+            eigenvalue of A^T A and m is the smallest eigenvalue of A^T A, the upper bound on suboptimality of the
+            current solution is (L-m)/ 2m^2 |G_t|^2 , and we compare this value to converge_epsilon to determine whether
+            or not the problem has converged
+        (2) if converge_step_cutoff is specified, we compare the value of converge_step_cutoff to 1/2 |G_t|^2
+            and declare the problem solved if 1/2 |G_t|^2 < converge_step_cutoff
+
 
     :param observed_ft: observed waveforms in Fourier domain, complex valued, shape (n_observations, n_rfft_frequencies)
     :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
@@ -687,14 +728,22 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
         step_distance = next_amplitudes - amplitudes
         # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
         step_distance = torch.sum(step_distance * step_distance, dim=2)  # shape (n_observations, n_valid_phase_shifts)
-        convergence_bound = convergence_factor[None, :] * step_distance  # shape (n_observations, n_valid_phase_shifts)
         amplitudes = next_amplitudes
+
+        if converge_step_cutoff is None:
+            convergence_bound = convergence_factor * step_distance  # shape (n_observations, n_valid_phase_shifts)
+        else:
+            convergence_bound = 0.5 * step_distance
 
         if kill_problems_torch is not None:
             # some of the problems are invalid, and we don't care if some
             # of the invalid problems haven't yet converged
             worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1)  # shape (n_observations)
-            all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            if convergence_step_cutoff is None:
+                all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            else:
+                all_valid_converged = torch.all(((worst_bound_by_problem < converge_step_cutoff) | kill_problems_torch))
+
             if all_valid_converged.item():
                 break
         else:
@@ -702,8 +751,12 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
             # termination condition where we stop when the last problem
             # has converged reasonably
             worst_bound = torch.max(convergence_bound).item()
-            if worst_bound < converge_epsilon:
-                break
+            if converge_step_cutoff is None:
+                if worst_bound < converge_epsilon:
+                    break
+            else:
+                if worst_bound < converge_step_cutoff:
+                    break
 
     # now we have to calculate the objective values
     xt_at_a_x = (amplitudes[:, :, None, :] @ at_a_x[:, :, :, None]).squeeze()
@@ -733,7 +786,8 @@ def coarse_to_fine_time_shifts_and_amplitudes(
         second_pass_best_n: int,
         second_pass_width: int,
         device: torch.device,
-        converge_epsilon: float = 1e-2, # FIXME
+        converge_epsilon: float = 1e-2,
+        converge_step_cutoff: Optional[float] = None,
         kill_problems: Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
         max_batch_size: int = 8192,
@@ -812,6 +866,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(
             10000,
             device,
             converge_epsilon=converge_epsilon,
+            converge_step_cutoff=converge_step_cutoff,
             kill_problems=kill_problems,
             l1_regularization_callable=l1_regularization_callable,
             spatial_continuity_regularizer=spatial_continuity_regularizer
@@ -871,6 +926,7 @@ def coarse_to_fine_time_shifts_and_amplitudes(
             10000,
             device,
             converge_epsilon=converge_epsilon,
+            converge_step_cutoff=converge_step_cutoff,
             kill_problems=kill_problems,
             l1_regularization_callable=l1_regularization_callable,
             spatial_continuity_regularizer=spatial_continuity_regularizer
