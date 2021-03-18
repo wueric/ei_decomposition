@@ -18,7 +18,8 @@ if __name__ == '__main__':
     parser.add_argument('output', type=str, help='path to output pickle file')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--maxiter', '-m', type=int, default=25, help='maximum number of iterations to run')
-    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2, help='L1 regularization lambda for amplitudes')
+    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
+                        help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
                         help='L2 regularization for waveform second derivatives')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
@@ -32,8 +33,6 @@ if __name__ == '__main__':
 
     compute_device = torch.device('cuda')
 
-    # for now, don't bother with argparse since we still don't have an automatic way
-    # to pick canonical waveforms
     print("Loading data")
     dataset = vl.load_vision_data(args.ds_path,
                                   args.ds_name,
@@ -44,29 +43,29 @@ if __name__ == '__main__':
     if args.cell_list is not None:
 
         with open(args.cell_list, 'r') as cell_id_file:
-            cell_id_list = []
-            for line in cell_id_file.readlines():
-                cell_id = int(line.strip('\n'))
-                cell_id_list.append(cell_id)
-
+            cell_id_list = list(
+                map(lambda x: int(x), cell_id_file.readline().strip('\n').split(',')))
         eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
+
     else:
         cell_id_list = dataset.get_all_cells_of_type(args.cell_type)
         eis_by_cell_id = {cell_id: dataset.get_ei_for_cell(cell_id).ei for cell_id in cell_id_list}
 
     shift_tuple = (-args.before, args.after)
 
-    decomposition_dict, basis_waveforms, mse = ei_decomp.decompose_cells_by_fitted_compartment(eis_by_cell_id,
-                                                                                               compute_device,
-                                                                                               n_basis_vectors=args.nbasis,
-                                                                                               maxiter_decomp=args.maxiter,
-                                                                                               l1_regularize_lambda=args.weight_reg,
-                                                                                               sobolev_regularize_lambda=args.sobolev_reg,
-                                                                                               renormalize_data_waveforms=True,
-                                                                                               output_debug_dict=False,
-                                                                                               shifts=shift_tuple,
-                                                                                               supersample_factor=args.upsample,
-                                                                                               snr_abs_threshold=args.thresh)
+    decomposition_dict, basis_waveforms, mse = ei_decomp.decompose_cells_by_fitted_compartment(
+        eis_by_cell_id,
+        compute_device,
+        n_basis_vectors=args.nbasis,
+        maxiter_decomp=args.maxiter,
+        l1_regularize_lambda=args.weight_reg,
+        sobolev_regularize_lambda=args.sobolev_reg,
+        renormalize_data_waveforms=True,
+        output_debug_dict=False,
+        shifts=shift_tuple,
+        supersample_factor=args.upsample,
+        snr_abs_threshold=args.thresh
+    )
 
     with open(args.output, 'wb') as joint_fit_file:
         metadata_dict = {
