@@ -15,10 +15,10 @@ if __name__ == '__main__':
     parser.add_argument('data_pickle', type=str, help='path to raw data pickle')
     parser.add_argument('output', type=str, help='path to output pickle file')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
-    parser.add_argument('--maxiter', '-m', type=int, default=25, help='maximum number of iterations to run')
+    parser.add_argument('--maxiter', '-m', type=int, default=10, help='maximum number of iterations to run')
     parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
                         help='L1 regularization lambda for amplitudes')
-    parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
+    parser.add_argument('--sobolev_reg', '-s', type=float, default=0.0,
                         help='L2 regularization for waveform second derivatives')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
