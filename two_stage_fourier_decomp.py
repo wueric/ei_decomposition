@@ -1,5 +1,3 @@
-import visionloader as vl
-
 import torch
 
 import pickle
@@ -65,6 +63,7 @@ if __name__ == '__main__':
         shift_tuple = (-basis_dict['before'], basis_dict['after'])
         upsample_factor = basis_dict['upsample']
         snr_thresh = basis_dict['thresh']
+        print(snr_thresh)
 
         group_assignments = None
         if args.group:
@@ -133,7 +132,7 @@ if __name__ == '__main__':
             'maxiter': args.maxiter,
             'padding': shift_tuple,
             'upsample': args.upsample,
-            'thresh': args.thresh,
+            'thresh': snr_thresh,
             'scale_mse_for_waveforms': args.renormalize_loss,
             'scale_regularization_terms': args.renormalize_penalty,
             'use_grouped_l1l2_norm': args.group,
