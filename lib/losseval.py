@@ -8,7 +8,7 @@ def calculate_spatial_continuity_penalty(fitted_amplitudes_by_cell: np.ndarray,
                                          observed_norms_by_cell: np.ndarray,
                                          mean_matrices_by_cell: np.ndarray,
                                          lambda_spatial: float,
-                                         use_scaled_spatial_penalty : bool = False) -> float:
+                                         use_scaled_spatial_penalty: bool = False) -> float:
     '''
     Calculates the value of the spatial continuity penalty
 
@@ -109,6 +109,83 @@ def calculate_l1_penalty_by_cell(fit_real_amplitudes_by_cell_scaled: np.ndarray,
     return l1_acc
 
 
+def batch_evaluate_mse_flat(batch_observed_scaled_ft: np.ndarray,
+                            batch_fit_real_amplitudes_scaled: np.ndarray,
+                            batch_canonical_waveform_ft: np.ndarray,
+                            batch_time_shifts: np.ndarray,
+                            batch_valid_mask: np.ndarray,
+                            n_true_frequencies: int,
+                            use_scaled_mse: bool = False,
+                            batch_observed_norms: Optional[np.ndarray] = None,
+                            take_mean_over_electrodes: bool = False) -> float:
+    '''
+    Calculates the unscaled MSE loss
+
+    (i.e. how well does the decomposition fit the original raw data, with no extra scaling factors involved?)
+
+    :param batch_observed_scaled_ft: scaled Fourier transform of observed data, complex-valued,
+        shape (batch, n_observations, n_rfft_frequencies)
+    :param batch_fit_real_amplitudes_scaled: real-valued scaled amplitudes of each canonical waveform
+        shape (batch, n_observations, n_canonical_waveforms)
+    :param batch_canonical_waveform_ft: Fourier transform of canonical waveforms, complex-valued
+        shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    :param batch_time_shifts: Time shifts required for each basis waveform to fit each observation. Integer valued
+        shape (batch, n_observations, n_canonical_waveforms)
+    :param batch_observed_norms: original scaling factor for the data, i.e. if you multiply this with observed_scaled_ft,
+        you should get the original unscaled Fourier transform
+        shape (batch, n_observations)
+    :param batch_valid_mask: shape (batch, n_observations), 0-1 integer valued, 1 if the corresponding observed waveform
+        is a legit signal and should be included in the loss calculation; 0 if it is padding and should not
+        be included in the loss calculation
+    :param n_true_frequencies: int, the number of normal FFT frequencies (not the number of rFFT frequencies)
+
+    :return: MSE error (not including regularization terms), shape (batch, )
+
+        We either sum or take the mean along the observation dimension
+    '''
+
+    if not use_scaled_mse and batch_observed_norms is None:
+        raise ValueError("If using scaled MSE loss, must also specify norm scaling factors")
+
+    batch_valid_mask_float = batch_valid_mask.astype(np.float32)
+
+    batch, n_observations, _ = batch_observed_scaled_ft.shape
+
+    batched_time_shift_matrices = generate_fourier_phase_shift_matrices(batch_time_shifts,
+                                                                        n_true_frequencies)
+
+    # shape (batch, n_observations, n_basis_waveforms, n_frequencies)
+    shifted_no_scale_ft = batch_canonical_waveform_ft[:, None, :, :] * batched_time_shift_matrices
+
+    # shape (batch, n_observations, 1, n_basis_waveforms) @ (batch, n_observations, n_basis_waveforms, n_frequencies)
+    # -> (batch, n_observations, 1, n_frequencies) -> (batch, n_observations, n_frequencies)
+    model_ft = np.squeeze(batch_fit_real_amplitudes_scaled[:, :, None, :] @ shifted_no_scale_ft, axis=2)
+
+    # we have to apply the mask here to hide "observations" that correspond to padding
+    diff = (batch_observed_scaled_ft - model_ft) * batch_valid_mask_float[:, :, None]
+
+    # shape (batch, )
+    n_valid_per_batch = np.sum(batch_valid_mask_float, axis=1)
+
+    # shape (batch, n_observations)
+    errors = np.linalg.norm(diff, axis=2)
+
+    if not use_scaled_mse:
+
+        # shape (batch, n_observations) * (batch, n_observations) ->
+        # shape (batch, )
+        scaled_errors = np.sum(errors * batch_observed_norms, axis=1)
+
+        if take_mean_over_electrodes:
+            scaled_errors = scaled_errors / n_valid_per_batch
+        return scaled_errors
+
+    else:
+        if take_mean_over_electrodes:
+            scaled_errors = errors / n_valid_per_batch
+        return scaled_errors
+
+
 def evaluate_mse_flat(observed_scaled_ft: np.ndarray,
                       fit_real_amplitudes_scaled: np.ndarray,
                       canonical_waveform_ft: np.ndarray,
@@ -116,7 +193,7 @@ def evaluate_mse_flat(observed_scaled_ft: np.ndarray,
                       n_true_frequencies: int,
                       use_scaled_mse: bool = False,
                       observed_norms: Optional[np.ndarray] = None,
-                      take_mean_over_electrodes : bool = False) -> float:
+                      take_mean_over_electrodes: bool = False) -> float:
     '''
     Calculates the unscaled MSE loss
 
@@ -172,7 +249,7 @@ def evaluate_mse_by_cell(observed_ft_by_cell_scaled: np.ndarray,
                          n_true_frequencies: int,
                          norm_scale_factor_by_cell: Optional[np.ndarray] = None,
                          use_scaled_mse: bool = False,
-                         take_mean_over_valid_electrodes : bool = False):
+                         take_mean_over_valid_electrodes: bool = False):
     '''
     Calculates the MSE loss for data arranged in the by-cell format
 
@@ -263,8 +340,6 @@ def flat_pack_evaluate_loss(observed_ft_flat_scaled: np.ndarray,
     :param lambda_l1: float, weight for the L1 regularization term. 0.0 if not used
     :return: total loss, with the optional L1 penalty
     '''
-
-    n_observations, n_rfft_frequencies = observed_ft_flat_scaled.shape
 
     mse_loss = evaluate_mse_flat(observed_ft_flat_scaled,
                                  fit_real_amplitudes_scaled,

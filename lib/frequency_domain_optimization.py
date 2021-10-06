@@ -6,6 +6,128 @@ import torch
 from lib.util_fns import generate_fourier_phase_shift_matrices
 
 
+def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.ndarray,
+                                                 batched_phase_delays: np.ndarray,
+                                                 batched_ft_observations: np.ndarray,
+                                                 batch_valid_mat: np.ndarray,
+                                                 n_true_frequencies: int,
+                                                 device: torch.device,
+                                                 observation_loss_weight: Optional[np.ndarray] = None) \
+        -> np.ndarray:
+    '''
+
+    :param batched_amplitudes_real: real-valued amplitudes for each observation, each shifted canonical waveform,
+        shape (batch, n_observations, n_canonical_waveforms)
+    :param batched_phase_delays: integer sample delays for each canonical waveform, for each observation
+        shape (batch, n_observations, n_canonical_waveforms)
+    :param batched_ft_observations: complex-valued Fourier transform of the observed data,
+        shape (batch, n_observations, n_rfft_frequencies)
+    :param batch_valid_mat: boolean matrix marking which entries of the above matrices correspond to real data,
+        and which entries correspond to padding.
+        shape (batch, n_observations), boolean valued
+    :param n_true_frequencies : int, number of frequencies = n_samples for the normal FFT
+        (not the number of rFFT frequencies)
+    :param device: torch.device
+    :param observation_loss_weight: lambda vector of weights, for weighting the contribution to the loss
+        of each individual waveform. shape (batch, n_observations, )
+    :return: Fourier transform of least-squares basis waveforms, shape (batch, n_basis_vectors, n_rfft_frequencies)
+        Complex-valued np.ndarray
+    '''
+
+    valid_zero_matrix = batch_valid_mat.astype(np.float32)
+
+    if observation_loss_weight is not None:
+        batched_amplitudes_real = batched_amplitudes_real * observation_loss_weight[:, :, None] * valid_zero_matrix[:, :, None]
+        batched_ft_observations = batched_ft_observations * observation_loss_weight[:, :, None] * valid_zero_matrix[:, :, None]
+
+    batch, n_observations, n_canonical_waveforms = batched_amplitudes_real.shape
+    _, _, n_rfft_frequencies = batched_ft_observations.shape
+
+    # real valued, shape (batch, n_observations, n_canonical_waveforms)
+    amplitude_mat_torch = torch.tensor(batched_amplitudes_real, dtype=torch.float32, device=device)
+
+    # shape (batch, n_observations, n_rfft_frequencies)
+    real_observe_ft_torch = torch.tensor(batched_ft_observations.real, dtype=torch.float32, device=device)
+    imag_observe_ft_torch = torch.tensor(batched_ft_observations.imag, dtype=torch.float32, device=device)
+
+    # complex-valued, shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    complex_phase_matrix = generate_fourier_phase_shift_matrices(batched_phase_delays,
+                                                                 n_true_frequencies)
+
+    # both have shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    real_phase_mat_torch = torch.tensor(complex_phase_matrix.real, dtype=torch.float32, device=device)
+    imag_phase_mat_torch = torch.tensor(complex_phase_matrix.imag, dtype=torch.float32, device=device)
+
+    # shape (n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
+    ####################### (l, k, None, f) ################# (l, None, j, f) ###########
+    real_real_phase = real_phase_mat_torch[:, :, :, None, :] * real_phase_mat_torch[:, :, None, :, :]
+
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is imag{P}^{(l)}_{f,k} * imag{P}^{(l)}_{f,j}
+    imag_imag_phase = imag_phase_mat_torch[:, :, :, None, :] * imag_phase_mat_torch[:, :, None, :, :]
+
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is imag{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
+    imag_real_phase = imag_phase_mat_torch[:, :, :, None, :] * real_phase_mat_torch[:, :, None, :, :]
+
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * imag{P}^{(l)}_{f,j}
+    real_imag_phase = real_phase_mat_torch[:, :, :, None, :] * imag_phase_mat_torch[:, :, None, :, :]
+
+    # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms)
+    # the (l^{th}, k^{th}, j^{th}) entry is A_{k,l} A_{j,l}
+    amplitude_outer_product = amplitude_mat_torch[:, :, :, None] * amplitude_mat_torch[:, :, None, :]
+
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    # each different row in dim0 corresponds to a different equation
+    eq1_group_real_coeff = torch.sum((real_real_phase + imag_imag_phase) * amplitude_outer_product[:, :, :, :, None],
+                                     dim=1)
+    eq1_group_imag_coeff = torch.sum((imag_real_phase - real_imag_phase) * amplitude_outer_product[:, :, :, :, None],
+                                     dim=1)
+    # shape (batch, n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_coeff = torch.cat([eq1_group_real_coeff, eq1_group_imag_coeff], dim=2)
+
+    # shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    ################# (l, k, f) ############### (l, k, None) ########################### (l, None, f)
+    eq1_rhs_re = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :, None, :]
+    eq1_rhs_im = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :, None, :]
+
+    # shape (batch, n_canonical_waveforms, n_frequencies)
+    eq1_rhs = torch.sum(eq1_rhs_re + eq1_rhs_im, dim=1)
+
+    # shape (batch, n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    eq2_group_coeff = torch.cat([-1.0 * eq1_group_imag_coeff, eq1_group_real_coeff], dim=2)
+
+    # shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    eq2_rhs_p = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :, None, :]
+    eq2_rhs_m = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :, None, :]
+
+    # shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    eq2_rhs = torch.sum(eq2_rhs_p - eq2_rhs_m, dim=1)
+
+    # shape (batch, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    joint_coeff_permute = torch.cat([eq1_group_coeff, eq2_group_coeff], dim=1)
+
+    # shape (batch, n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
+    joint_coeff = joint_coeff_permute.permute(0, 3, 1, 2)
+
+    # shape (batch, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    joint_rhs_permute = torch.cat([eq1_rhs, eq2_rhs], dim=1)
+
+    # shape (batch, n_rfft_frequencies, 2 * n_canonical_waveforms)
+    joint_rhs = joint_rhs_permute.permute(0, 2, 1)
+
+    # soln has shape (batch, n_rfft_frequencies, 2 * n_canonical_waveforms)
+    soln, _ = torch.solve(joint_rhs[:, :, :, None], joint_coeff)
+
+    # shape (batch, 2 * n_canonical_waveforms, n_rfft_frequencies)
+    soln_perm = soln.squeeze(3).permute(0, 2, 1)
+
+    # shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    soln_real_seg = soln_perm[:, :n_canonical_waveforms, :].cpu().numpy()
+    soln_imag_seg = soln_perm[:, n_canonical_waveforms:, :].cpu().numpy()
+
+    return soln_real_seg + 1j * soln_imag_seg
+
+
 def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: np.ndarray,
                                                       phase_delays_np: np.ndarray,
                                                       ft_complex_observations_np: np.ndarray,

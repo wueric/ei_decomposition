@@ -45,7 +45,6 @@ if __name__ == '__main__':
 
     shift_tuple = (-args.before, args.after)
 
-    # 5e-3 was good
     decomposition_dict, basis_waveforms, mse = ei_decomp.decompose_cells_by_fitted_compartment(eis_by_cell_id,
                                                                                                compute_device,
                                                                                                initialized_basis_vectors=basis_vectors,

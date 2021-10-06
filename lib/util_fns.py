@@ -6,6 +6,7 @@ from scipy import interpolate as interpolate
 from typing import List, Dict, Union, Tuple, Sequence, Optional
 
 EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
+UnsharedBasisEIDecomposition = namedtuple('UnsharedBasisEIDecomposition', ['amplitude', 'delay', 'basis'])
 
 
 def bspline_upsample_waveforms(waveforms: np.ndarray,
@@ -390,10 +391,138 @@ def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,
     return np.exp(complex_exponential_argument)
 
 
+def batched_pack_significant_electrodes(eis_by_cell_id: Dict[int, np.ndarray],
+                                        cell_order: List[int],
+                                        snr_abs_threshold: Union[float, int]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+    '''
+    Packs the waveforms from each cell into a batched data matrix, where the batch
+        dimension corresponds to the number of cells
+
+    IMPORTANT: TREATS EACH CELL SEPARATELY.
+
+    We use this function when we want each cell to have its own set of basis waveforms
+
+    :param eis_by_cell_id: cell_id -> np.ndarray of shape (n_electrodes, n_timepoints),
+        corresponding to the EI for every cell that we want to pool together
+    :param cell_order: List of cell_id, corresponding to the order of the cells. We do
+        all of our analyses in this order
+    :param snr_abs_threshold: threshold, waveforms with maximum amplitude below this value
+        are discarded
+    :return:
+        np.ndarray of shape (batch, max_n_sig_electrodes, n_timepoints), containing the data matrices
+
+        boolean np.ndarray of shape (batch, max_n_sig_electrodes), where each entry that corresponds to real
+        data is marked True, and each entry that corresponds to no-data (i.e. padding) is marked False
+
+        boolean np.ndarray of shape (batch, n_electrodes_total), where each entry corresponds to the integer
+        index for which channel the given waveform came from. Needed to reconstruct the decomposition
+    '''
+
+    n_cells = len(cell_order)
+    n_electrodes, n_timepoints = eis_by_cell_id[list(eis_by_cell_id.keys())[0]].shape
+
+    to_stack = [] # type: List[np.ndarray]
+    n_valid = [] # type: List[int]
+
+    indices_selected = np.zeros((n_cells, n_electrodes), dtype=bool)
+    max_n_sig_els = 0
+
+    for i, cell_id in enumerate(cell_order):
+        ei_mat = eis_by_cell_id[cell_id]
+
+        chans_sufficient_magnitude = np.max(np.abs(ei_mat), axis=1) > snr_abs_threshold
+
+        n_chans_sufficient = np.sum(chans_sufficient_magnitude)  # type: int
+
+        n_valid.append(n_chans_sufficient)
+        max_n_sig_els = max(n_chans_sufficient, max_n_sig_els)
+
+        to_stack.append(ei_mat[chans_sufficient_magnitude, :])
+        indices_selected[i,:] = chans_sufficient_magnitude
+
+    is_valid_matrix = np.zeros((n_cells, max_n_sig_els), dtype=bool)
+    batched_data_matrix = np.zeros((n_cells, max_n_sig_els, n_timepoints), dtype=np.float32)
+
+    for i, (selected_data, n_valid_chans) in enumerate(zip(to_stack, n_valid)):
+        batched_data_matrix[i, :n_valid_chans, :] = selected_data
+        is_valid_matrix[i, :n_valid_chans] = True
+
+    return batched_data_matrix, is_valid_matrix, indices_selected
+
+
+def batched_unpack_significant_electrodes(batched_amplitudes_matrix : np.ndarray,
+                                          batched_phase_matrix: np.ndarray,
+                                          batched_basis_waveforms: np.ndarray,
+                                          is_valid_matrix: np.ndarray,
+                                          index_sel_matrix: np.ndarray,
+                                          cell_order : List[int]) -> Dict[int, UnsharedBasisEIDecomposition]:
+    '''
+
+    :param batched_amplitudes_matrix: fitted amplitudes, real-valued shape (n_cells, n_observations, n_basis_waveforms)
+    :param batched_phase_matrix: fitted phases, integer-valued shape (n_cells, n_observations, n_basis_waveforms)
+    :param batched_basis_waveforms: fitted basis waveforms, real-valued shape (n_cells, n_basis_waveforms, n_timepoints)
+    :param is_valid_matrix: shape (n_cells, n_observations), 0/1 integer-valued matrix, 1 if valid, 0 if padding
+    :param index_sel_matrix: shape (n_cells, n_electrodes_orig), integer-valued index matrix to use to reconstruct
+        the original EI matrix
+    :param cell_order: order of the cell ids
+    :return:
+    '''
+
+    n_cells, n_observations, n_basis_waveforms = batched_amplitudes_matrix.shape
+    n_orig_els = index_sel_matrix.shape[1]
+
+    output_dict = {} # type: Dict[int, UnsharedBasisEIDecomposition]
+
+    for i, cell_id in enumerate(cell_order):
+
+        put_back_matrix = index_sel_matrix[i,:]
+        valid_selector = is_valid_matrix[i,:].astype(bool)
+
+        amplitudes_reinflated = np.zeros((n_orig_els, n_basis_waveforms), dtype=np.float32)
+        phases_reinflated = np.zeros((n_orig_els, n_basis_waveforms), dtype=np.int32)
+
+        amplitudes_reinflated[put_back_matrix, :] = batched_amplitudes_matrix[i, valid_selector, :]
+        phases_reinflated[put_back_matrix, :] = batched_phase_matrix[i, valid_selector, :]
+
+        output_dict[cell_id] = UnsharedBasisEIDecomposition(amplitudes_reinflated, phases_reinflated,
+                                                            batched_basis_waveforms[i, :, :])
+
+    return output_dict
+
+
 def pack_significant_electrodes_into_matrix(eis_by_cell_id: Dict[int, np.ndarray],
                                             cell_order: List[int],
                                             snr_abs_threshold: Union[float, int]) \
         -> Tuple[np.ndarray, Dict[int, Tuple[slice, Sequence[int]]]]:
+    '''
+    Packs all the waveforms from all cells that exceed a certain SNR threshold
+        into a waveform data matrix.
+
+    IMPORTANT: POOLS ALL OF THE WAVEFORMS FROM THE DIFFERENT CELLS TOGETHER.
+
+    We use this function when we want all of the cells provided as input to share
+        a single basis set.
+
+    :param eis_by_cell_id: cell_id -> np.ndarray of shape (n_electrodes, n_timepoints),
+        corresponding to the EI for every cell that we want to pool together
+    :param cell_order: List of cell_id, corresponding to the order of the cells. We do
+        all of our analyses in this order
+    :param snr_abs_threshold: threshold, waveforms with maximum amplitude below this value
+        are discarded
+    :return:
+
+    The combined data matrix, and all of the information needed to undo the pooling operation
+
+    np.ndarray of shape (n_total_waveforms, n_timepoints)
+
+    Dict cell_id to Tuple, each tuple contains
+        1. A slice object, enabling us to select the waveforms corresponding to this particular
+            cell out of the data matrix
+        2. A np.ndarray of boolean, corresponding to the indices of the electrodes that each of the
+            waveforms corresponded to
+
+    '''
     matrix_indices_by_cell_id = {}  # type: Dict[int, Tuple[slice, Sequence[int]]]
     to_concat = []  # type: List[np.ndarray]
 

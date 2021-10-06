@@ -3,9 +3,11 @@ import pickle
 
 import visionloader as vl
 
+DESCRIPTION = "Extracts EIs from Vision and puts them into a pickle file, one entry for every cell. Not for publication; " + \
+              "this requires Vision datasets and machinery that the outside world does not have"
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='jointly decompose noramlized EIs for a given cell type into constituent waveforms by jointly optimizing waveforms, shifts, and amplitudes')
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
 
     parser.add_argument('ds_path', type=str, help='path to Vision dataset')
     parser.add_argument('ds_name', type=str, help='name of Vision dataset')

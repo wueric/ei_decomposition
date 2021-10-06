@@ -283,6 +283,9 @@ def build_at_a_matrix(ft_canonical: np.ndarray,
                       valid_phase_shifts: np.ndarray,
                       n_true_frequencies: int) -> np.ndarray:
     '''
+    Computes the matrix A^T A for all desired time shifts of the basis waveforms in A
+
+    Assumes that the basis waveforms are shared, and so there is only one set of basis waveforms
 
     :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
             shape (n_canonical_waveforms, n_rfft_frequencies)
@@ -319,11 +322,19 @@ def build_at_b_vector(observed_ft: np.ndarray,
                       valid_phase_shifts: np.ndarray,
                       n_true_frequencies: int) -> np.ndarray:
     '''
+    Computes the vector A^T b for all desired time shifts of the basis waveforms in A
 
-    :param observed_ft:
-    :param ft_canonical:
-    :param valid_phase_shifts:
-    :param n_true_frequencies:
+    Assumes that the basis waveforms are shared, and so there are only ever one set of basis
+        waveforms
+
+    :param observed_ft: shape (n_observations, n_rfft_frequencies), complex-valued, RFFT coefficients
+        of the observations
+    :param ft_canonical: shape (n_basis_waveforms, n_rfft_frequencies), complex-valued, RFFT coefficients
+        of the basis waveforms
+    :param valid_phase_shifts: integer array, shape (n_basis_waveforms, n_valid_phase_shifts) corresponding
+        to the time shifts of the basis waveforms in A
+    :param n_true_frequencies: Number of real frequencies = number of timepoints, so that we can
+        compute the iRFFT without losing or gaining coefficients
     :return:
     '''
     # shape (n_observations, n_canonical_waveforms, n_timepoints)
@@ -486,7 +497,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
     unshared_at_b_vector = torch.tensor(unshared_at_b_vector_np, dtype=torch.float32, device=device)
 
     ##### Set up nonnegative orthant minimization problem ####################################################
-    eigenvalues_np, _ = np.linalg.eigh(unshared_at_a_matrix_np)
+    eigenvalues_np, _ = np.linalg.eigh(0.5 * unshared_at_a_matrix_np)
 
     # shape (n_observations, n_phase_shifts, n_canonical_waveforms)
     eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
@@ -499,6 +510,10 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
     # boundaries for the step size
     # we have to have 0 < step_size <= 1/L where L is the largest eigenvalue
     # we make step_size smaller to be safe
+    # the assumption here is that any additional regularization terms are not going to make
+    # the objective function more than 2L-strong convex
+    # This is a reasonable assumption because we don't expect the regularization to be that strong
+    # a component of the objective function, otherwise we would mostly be minimizing the regularizer
     step_size = 1.0 / (2 * max_eigenvalue)  # has shape (n_observations, n_phase_shifts)
 
     ##### Step 4: do the projected gradient descent (no batching) ################################
@@ -555,7 +570,7 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
             # some of the problems are invalid, and we don't care if some
             # of the invalid problems haven't yet converged
             worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1)  # shape (n_observations)
-            if convergence_step_cutoff is None:
+            if converge_step_cutoff is None:
                 all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
             else:
                 all_valid_converged = torch.all(((worst_bound_by_problem < converge_step_cutoff) | kill_problems_torch))
@@ -674,7 +689,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
     at_b_torch = torch.tensor(at_b_np, dtype=torch.float32, device=device)
 
     #### Step 3: set up projected gradient descent problem #######################################
-    eigenvalues_np, _ = np.linalg.eigh(at_a_matrix_np)
+    eigenvalues_np, _ = np.linalg.eigh(0.5 * at_a_matrix_np)
     eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
 
     # eigenvalues has shape (n_valid_phase_shifts, n_waveforms)
@@ -686,6 +701,10 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
     # boundaries for the step size
     # we have to have 0 < step_size <= 1/L where L is the largest eigenvalue
     # we make step_size smaller to be safe
+    # the assumption here is that any additional regularization terms are not going to make
+    # the objective function more than 2L-strong convex
+    # This is a reasonable assumption because we don't expect the regularization to be that strong
+    # a component of the objective function, otherwise we would mostly be minimizing the regularizer
     step_size = 1.0 / (2 * max_eigenvalue)  # has shape (n_valid_phase_shifts, )
 
     ##### Step 4: do the projected gradient descent (no batching) ################################
@@ -739,7 +758,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
             # some of the problems are invalid, and we don't care if some
             # of the invalid problems haven't yet converged
             worst_bound_by_problem, _ = torch.max(convergence_bound, dim=1)  # shape (n_observations)
-            if convergence_step_cutoff is None:
+            if converge_step_cutoff is None:
                 all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
             else:
                 all_valid_converged = torch.all(((worst_bound_by_problem < converge_step_cutoff) | kill_problems_torch))
