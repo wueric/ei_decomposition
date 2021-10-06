@@ -46,10 +46,11 @@ if __name__ == '__main__':
 
     print("Loading pre-prepared EIs")
     with open(args.ei_pickle, 'rb') as pfile:
-        eis_by_cell_id = pickle.load(pfile)
+        x = pickle.load(pfile)
+        eis_by_cell_id = x['eis_by_cell_id']
 
     print("Loading initial bases")
-    with open(args.initialize_basis, 'rb') as pfile:
+    with open(args.basis_pickle, 'rb') as pfile:
         basis_dict = pickle.load(pfile)
     initial_basis = basis_dict['basis']
 

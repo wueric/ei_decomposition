@@ -133,12 +133,15 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
     if use_grouped_l1l2_norm and grouped_l1l2_groups is None:
         assert False, 'must specify groups if using L1L2 group norm regularization'
 
+    is_valid_bool = is_valid_matrix.astype(bool)
+
     batch, n_observations, n_samples = raw_waveform_data_matrix.shape
     n_frequencies_not_rfft = n_samples
     n_canonical_waveforms = initialized_canonical_waveforms.shape[1]
 
     # shape (batch, n_observations, 1)
     raw_data_magnitude = np.linalg.norm(raw_waveform_data_matrix, axis=2, keepdims=True)
+    raw_data_magnitude[~is_valid_bool,:] = 1.0 # set null magnitudes to 1 to avoid dividing by zero
     # shape (batch, n_observations, n_samples)
     scaled_raw_data = raw_waveform_data_matrix / raw_data_magnitude
 
@@ -278,7 +281,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
         grid_search_step: int = 5,
         grid_search_top_n: int = 4,
         fine_search_width: int = 2,
-        grid_search_batch_size: int = 8192,
+        grid_search_batch_size: int = 1024,
         maxiter_decomp: int = 25,
         l1_regularize_lambda: Optional[float] = None,
         use_scaled_mse_penalty: bool = False,
@@ -336,16 +339,14 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
                                                   [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                                   mode='constant')
 
-    # also need to supersample and pad the initial basis waveforms
-
     # shape (n_basis_waveforms, n_timeponts_upsampled)
-    bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
+    #bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
     # shape (n_basis_waveforms, n_timepoints)
-    padded_basis_waveforms_init = np.pad(bspline_supersampled_basis,
-                                         [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
-                                         mode='constant')
+    #padded_basis_waveforms_init = np.pad(bspline_supersampled_basis,
+    #                                     [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
+    #                                     mode='constant')
     # shape (batch, n_basis_waveforms, n_timepoints)
-    batched_basis_waveforms = np.tile(padded_basis_waveforms_init, (batch, 1, 1))
+    batched_basis_waveforms = np.tile(initialized_basis_vectors, (batch, 1, 1))
 
     # amplitudes has shape (batch, n_observations, n_basis_waveforms))
     # waveforms has shape (batch, n_basis_waveforms, n_timepoints)
