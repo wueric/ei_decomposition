@@ -930,39 +930,34 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes(
 
     by_cell_pbar = tqdm.tqdm(total=int(np.ceil(batch / cell_batch_size)), leave=False, desc='Batching over cells')
 
-    for cell_low in range(0, batch, cell_batch_size):
-        cell_high = min(batch, cell_low + cell_batch_size)
-        n_cells_batch = cell_high - cell_low
+    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False, desc='First pass grid search')
+    for low in range(0, n_valid_phase_shifts, max_batch_size):
+        high = min(n_valid_phase_shifts, low + max_batch_size)
 
-        pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False, desc='First pass grid search')
-        for low in range(0, n_valid_phase_shifts, max_batch_size):
-            high = min(n_valid_phase_shifts, low + max_batch_size)
+        amplitudes_random_init = np.random.uniform(amplitude_initialize_range[0],
+                                                   amplitude_initialize_range[1],
+                                                   size=(batch, n_observations, high - low, n_canonical_waveforms))
 
-            amplitudes_random_init = np.random.uniform(amplitude_initialize_range[0],
-                                                       amplitude_initialize_range[1],
-                                                       size=(n_cells_batch, n_observations, high - low, n_canonical_waveforms))
+        amplitude_batch, objective_batch = batched_fast_time_shifts_and_amplitudes_shared_shifts(
+            observed_ft,
+            ft_canonical,
+            valid_phase_shifts_matrix[None, :, low:high],
+            amplitudes_random_init,
+            n_true_frequencies,
+            10000,
+            device,
+            converge_epsilon=converge_epsilon,
+            converge_step_cutoff=converge_step_cutoff,
+            kill_problems=kill_problems,
+            l1_regularization_callable=l1_regularization_callable,
+            spatial_continuity_regularizer=spatial_continuity_regularizer
+        )
+        amplitude_results[:, :, low:high, :] = amplitude_batch
+        objective_results[:, :, low:high] = objective_batch
+        pbar.update(1)
+    pbar.close()
 
-            amplitude_batch, objective_batch = batched_fast_time_shifts_and_amplitudes_shared_shifts(
-                observed_ft[cell_low:cell_high, ...],
-                ft_canonical[cell_low:cell_high, ...],
-                valid_phase_shifts_matrix[None, :, low:high],
-                amplitudes_random_init,
-                n_true_frequencies,
-                10000,
-                device,
-                converge_epsilon=converge_epsilon,
-                converge_step_cutoff=converge_step_cutoff,
-                kill_problems=kill_problems,
-                l1_regularization_callable=l1_regularization_callable,
-                spatial_continuity_regularizer=spatial_continuity_regularizer
-            )
-            amplitude_results[cell_low:cell_high, :, low:high, :] = amplitude_batch
-            objective_results[cell_low:cell_high, :, low:high] = objective_batch
-            pbar.update(1)
-        pbar.close()
-
-        by_cell_pbar.update(1)
-    by_cell_pbar.close()
+    by_cell_pbar.update(1)
 
     # pick the N best nodes to expand in detail
     # shape (batch, n_observations, second_pass_best_n)
@@ -1000,43 +995,32 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes(
                                  dtype=np.float32)
     objective_results = np.zeros((batch, n_observations, n_second_pass_shifts), dtype=np.float32)
 
+    pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)), leave=False, desc='Second pass fine search')
+    for low in range(0, n_second_pass_shifts, max_batch_size):
+        high = min(n_second_pass_shifts, low + max_batch_size)
 
-    by_cell_pbar = tqdm.tqdm(total=int(np.ceil(batch / cell_batch_size)), leave=False, desc='Batching over cells')
+        amplitudes_random_init = np.random.uniform(amplitude_initialize_range[0],
+                                                   amplitude_initialize_range[1],
+                                                   size=(batch, n_observations, high - low, n_canonical_waveforms))
 
-    for cell_low in range(0, batch, cell_batch_size):
-        cell_high = min(batch, cell_low + cell_batch_size)
-        n_cells_batch = cell_high - cell_low
-
-
-        pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)), leave=False, desc='Second pass fine search')
-        for low in range(0, n_second_pass_shifts, max_batch_size):
-            high = min(n_second_pass_shifts, low + max_batch_size)
-
-            amplitudes_random_init = np.random.uniform(amplitude_initialize_range[0],
-                                                       amplitude_initialize_range[1],
-                                                       size=(n_cells_batch, n_observations, high - low, n_canonical_waveforms))
-
-            amplitude_batch, objective_batch = batched_fast_time_shifts_and_amplitudes_unshared_shifts(
-                observed_ft[cell_low:cell_high,...],
-                ft_canonical[cell_low:cell_high,...],
-                next_iter_phases_flat[cell_low:cell_high, :, :, low:high],
-                amplitudes_random_init,
-                n_true_frequencies,
-                10000,
-                device,
-                converge_epsilon=converge_epsilon,
-                converge_step_cutoff=converge_step_cutoff,
-                kill_problems=kill_problems,
-                l1_regularization_callable=l1_regularization_callable,
-                spatial_continuity_regularizer=spatial_continuity_regularizer
-            )
-            amplitude_results[cell_low:cell_high, :, low:high, :] = amplitude_batch
-            objective_results[cell_low:cell_high, :, low:high] = objective_batch
-            pbar.update(1)
-        pbar.close()
-
-        by_cell_pbar.update(1)
-    by_cell_pbar.close()
+        amplitude_batch, objective_batch = batched_fast_time_shifts_and_amplitudes_unshared_shifts(
+            observed_ft,
+            ft_canonical,
+            next_iter_phases_flat[:, :, :, low:high],
+            amplitudes_random_init,
+            n_true_frequencies,
+            10000,
+            device,
+            converge_epsilon=converge_epsilon,
+            converge_step_cutoff=converge_step_cutoff,
+            kill_problems=kill_problems,
+            l1_regularization_callable=l1_regularization_callable,
+            spatial_continuity_regularizer=spatial_continuity_regularizer
+        )
+        amplitude_results[:, :, low:high, :] = amplitude_batch
+        objective_results[:, :, low:high] = objective_batch
+        pbar.update(1)
+    pbar.close()
 
     #### Now pick the best objective value for each observed waveform ########################
     best_objective = np.argmin(objective_results, axis=2)  # shape (batch, n_observations)

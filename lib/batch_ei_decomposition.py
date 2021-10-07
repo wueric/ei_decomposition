@@ -6,7 +6,7 @@ from typing import List, Dict, Tuple, Sequence, Optional, Union, Callable
 import tqdm
 
 from lib.util_fns import bspline_upsample_waveforms, \
-    UnsharedBasisEIDecomposition, batched_pack_significant_electrodes, batched_unpack_significant_electrodes
+    UnsharedBasisEIDecomposition, auto_prebatch_pack_significant_electrodes, auto_unbatch_unpack_significant_electrodes
 from lib.batch_joint_amplitude_time_opt import batched_coarse_to_fine_time_shifts_and_amplitudes, \
     make_batched_group_l2_l1_weighted_regularizer, make_batched_component_l1_unweighted_regularizer, \
     make_batched_component_l1_weighted_regularizer, make_batched_group_l2_l1_unweighted_regularizer, \
@@ -141,7 +141,7 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
 
     # shape (batch, n_observations, 1)
     raw_data_magnitude = np.linalg.norm(raw_waveform_data_matrix, axis=2, keepdims=True)
-    raw_data_magnitude[~is_valid_bool,:] = 1.0 # set null magnitudes to 1 to avoid dividing by zero
+    raw_data_magnitude[~is_valid_bool, :] = 1.0  # set null magnitudes to 1 to avoid dividing by zero
     # shape (batch, n_observations, n_samples)
     scaled_raw_data = raw_waveform_data_matrix / raw_data_magnitude
 
@@ -291,8 +291,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
         use_basis_weighted_l1_norm: bool = False,
         basis_weights_for_l1: Optional[np.ndarray] = None,
         output_debug_dict: bool = False) \
-        -> Union[Tuple[Dict[int, UnsharedBasisEIDecomposition], np.ndarray, Dict[str, float]],
-                 Tuple[Dict[int, UnsharedBasisEIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
+        -> Union[
+            Tuple[Dict[int, UnsharedBasisEIDecomposition], Dict[str, float]], Dict[int, UnsharedBasisEIDecomposition]]:
     '''
 
     :param eis_by_cell_id: Dict mapping cell id to raw EIs. Each EI must have shape (n_electrodes, n_timepoints)
@@ -312,83 +312,71 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
     :return:
     '''
 
-    cell_order = list(eis_by_cell_id.keys())
+    autobatched_list = auto_prebatch_pack_significant_electrodes(eis_by_cell_id,
+                                                                 snr_abs_threshold)
 
-    # Tensors have the following shapes
-    # 1. (batch, max_n_sig_electrodes, n_timepoints), real-valued float
-    # 2. (batch, max_n_sig_electrodes), boolean valued
-    # 3. (batch, n_electrodes_total), integer indices
-    batched_data_mat, is_valid_mat, ind_sel_mat = batched_pack_significant_electrodes(eis_by_cell_id,
-                                                                                      cell_order,
-                                                                                      snr_abs_threshold)
+    wip_decomp_list = []
+    for batched_data_mat, is_valid_mat, ind_sel_mat, cell_order in autobatched_list:
+        # Tensors have the following shapes
+        # batched_data_mat: shape (batch, max_n_sig_electrodes, n_timepoints), real-valued float
+        # is_valid_mat: shape (batch, max_n_sig_electrodes), boolean valued
+        # ind_sel_mat: shape (batch, n_electrodes_total), integer indices
+        # cell_order: shape (batch, ) integer cell id
 
-    batch, max_n_sig_electrodes, n_timepoints_raw = batched_data_mat.shape
-    flat_data_mat = batched_data_mat.reshape(batch * max_n_sig_electrodes, n_timepoints_raw)
+        batch, max_n_sig_electrodes, n_timepoints_raw = batched_data_mat.shape
+        flat_data_mat = batched_data_mat.reshape(batch * max_n_sig_electrodes, n_timepoints_raw)
 
-    # shape (batch * max_n_sig_electrodes, n_timepoints_upsampled)
-    flat_bspline_supersampled = bspline_upsample_waveforms(flat_data_mat, supersample_factor)
-    _, n_timepoints_upsampled = flat_bspline_supersampled.shape
+        # shape (batch * max_n_sig_electrodes, n_timepoints_upsampled)
+        flat_bspline_supersampled = bspline_upsample_waveforms(flat_data_mat, supersample_factor)
+        _, n_timepoints_upsampled = flat_bspline_supersampled.shape
 
-    # shape (batch, max_n_sig_electrodes, n_timepoints_upsampled)
-    batched_bspline_supersampled = flat_bspline_supersampled.reshape(batch, max_n_sig_electrodes,
-                                                                     n_timepoints_upsampled)
+        # shape (batch, max_n_sig_electrodes, n_timepoints_upsampled)
+        batched_bspline_supersampled = flat_bspline_supersampled.reshape(batch, max_n_sig_electrodes,
+                                                                         n_timepoints_upsampled)
 
-    # now zero pad before and after
-    # shape (batch, max_n_sig_electrodes, n_timepoints)
-    padded_channels_sufficient_magnitude = np.pad(batched_bspline_supersampled,
-                                                  [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
-                                                  mode='constant')
+        # now zero pad before and after
+        # shape (batch, max_n_sig_electrodes, n_timepoints)
+        padded_channels_sufficient_magnitude = np.pad(batched_bspline_supersampled,
+                                                      [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
+                                                      mode='constant')
 
-    # shape (n_basis_waveforms, n_timeponts_upsampled)
-    #bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
-    # shape (n_basis_waveforms, n_timepoints)
-    #padded_basis_waveforms_init = np.pad(bspline_supersampled_basis,
-    #                                     [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
-    #                                     mode='constant')
-    # shape (batch, n_basis_waveforms, n_timepoints)
-    batched_basis_waveforms = np.tile(initialized_basis_vectors, (batch, 1, 1))
+        # shape (n_basis_waveforms, n_timeponts_upsampled)
+        # bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
+        # shape (n_basis_waveforms, n_timepoints)
+        # padded_basis_waveforms_init = np.pad(bspline_supersampled_basis,
+        #                                     [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
+        #                                     mode='constant')
+        # shape (batch, n_basis_waveforms, n_timepoints)
+        batched_basis_waveforms = np.tile(initialized_basis_vectors, (batch, 1, 1))
 
-    # amplitudes has shape (batch, n_observations, n_basis_waveforms))
-    # waveforms has shape (batch, n_basis_waveforms, n_timepoints)
-    amplitudes, waveforms, delays, mse = batched_shifted_fourier_nmf_iterative_optimization3(
-        padded_channels_sufficient_magnitude,
-        is_valid_mat,
-        batched_basis_waveforms,
-        shifts,
-        grid_search_step,
-        grid_search_top_n,
-        fine_search_width,
-        amplitude_random_init_range,
-        maxiter_decomp,
-        device,
-        converge_epsilon=converge_epsilon,
-        converge_step_cutoff=converge_step_cutoff,
-        max_batch_size=grid_search_batch_size,
-        l1_regularization_lambda=l1_regularize_lambda,
-        use_scaled_mse_penalty=use_scaled_mse_penalty,
-        use_scaled_regularization_terms=use_scaled_regularization_terms,
-        use_grouped_l1l2_norm=use_grouped_l1l2_norm,
-        grouped_l1l2_groups=grouped_l1l2_groups,
-        use_basis_weighted_l1_norm=use_basis_weighted_l1_norm,
-        basis_weights_for_l1=basis_weights_for_l1
-    )
+        # amplitudes has shape (batch, n_observations, n_basis_waveforms))
+        # waveforms has shape (batch, n_basis_waveforms, n_timepoints)
+        amplitudes, waveforms, delays, mse = batched_shifted_fourier_nmf_iterative_optimization3(
+            padded_channels_sufficient_magnitude,
+            is_valid_mat,
+            batched_basis_waveforms,
+            shifts,
+            grid_search_step,
+            grid_search_top_n,
+            fine_search_width,
+            amplitude_random_init_range,
+            maxiter_decomp,
+            device,
+            converge_epsilon=converge_epsilon,
+            converge_step_cutoff=converge_step_cutoff,
+            max_batch_size=grid_search_batch_size,
+            l1_regularization_lambda=l1_regularize_lambda,
+            use_scaled_mse_penalty=use_scaled_mse_penalty,
+            use_scaled_regularization_terms=use_scaled_regularization_terms,
+            use_grouped_l1l2_norm=use_grouped_l1l2_norm,
+            grouped_l1l2_groups=grouped_l1l2_groups,
+            use_basis_weighted_l1_norm=use_basis_weighted_l1_norm,
+            basis_weights_for_l1=basis_weights_for_l1
+        )
+
+        wip_decomp_list.append((amplitudes, delays, waveforms))
 
     # now unpack the results
-    result_dict = batched_unpack_significant_electrodes(amplitudes,
-                                                        delays,
-                                                        waveforms,
-                                                        is_valid_mat,
-                                                        ind_sel_mat,
-                                                        cell_order)
+    result_dict = auto_unbatch_unpack_significant_electrodes(wip_decomp_list, autobatched_list)
 
-    if output_debug_dict:
-        debug_dict = {
-            'amplitudes': amplitudes,
-            'waveforms': waveforms,
-            'delays': delays,
-            'raw_data': padded_channels_sufficient_magnitude
-        }
-
-        return result_dict, waveforms, mse, debug_dict
-
-    return result_dict, waveforms, mse
+    return result_dict

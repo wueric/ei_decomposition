@@ -40,8 +40,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    args = parser.parse_args()
-
     compute_device = torch.device('cuda')
 
     print("Loading pre-prepared EIs")
@@ -68,8 +66,7 @@ if __name__ == '__main__':
 
     shift_tuple = (-args.before, args.after)
 
-    # FIXME this function call is wrong
-    decomposition_dict, basis_waveforms, mse = batch_ei_decomp.batch_two_step_decompose_cells_by_fitted_compartments(
+    decomposition_dict = batch_ei_decomp.batch_two_step_decompose_cells_by_fitted_compartments(
         eis_by_cell_id,
         initial_basis,
         compute_device,
@@ -96,7 +93,6 @@ if __name__ == '__main__':
     with open(args.output, 'wb') as joint_fit_file:
         metadata_dict = {
             'l1_reg': args.weight_reg,
-            'sobolev_reg': args.sobolev_reg,
             'maxiter': args.maxiter,
             'padding': shift_tuple,
             'upsample': args.upsample,
@@ -111,10 +107,7 @@ if __name__ == '__main__':
 
         pickle_dict = {
             'decomposition': decomposition_dict,
-            'waveforms': basis_waveforms,
-            'mse': mse
         }
 
         pickle.dump(metadata_dict, joint_fit_file)
         pickle.dump(pickle_dict, joint_fit_file)
-

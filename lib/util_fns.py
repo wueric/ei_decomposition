@@ -391,6 +391,130 @@ def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,
     return np.exp(complex_exponential_argument)
 
 
+def auto_prebatch_pack_significant_electrodes(eis_by_cell_id: Dict[int, np.ndarray],
+                                              snr_abs_threshold: Union[float, int],
+                                              batch_tot_els : int = 5000) \
+        -> List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+
+    '''
+
+    We use this function when we want each cell to have its own set of basis waveforms
+
+    :param eis_by_cell_id: cell_id -> np.ndarray of shape (n_electrodes, n_timepoints),
+        corresponding to the EI for every cell that we want to pool together
+    :param snr_abs_threshold: threshold, waveforms with maximum amplitude below this value
+        are discarded
+    :return:
+        np.ndarray of shape (batch, max_n_sig_electrodes, n_timepoints), containing the data matrices
+
+        boolean np.ndarray of shape (batch, max_n_sig_electrodes), where each entry that corresponds to real
+        data is marked True, and each entry that corresponds to no-data (i.e. padding) is marked False
+
+        boolean np.ndarray of shape (batch, n_electrodes_total), where each entry corresponds to the integer
+        index for which channel the given waveform came from. Needed to reconstruct the decomposition
+    '''
+
+    n_els_total, n_timepoints = eis_by_cell_id[list(eis_by_cell_id.keys())[0]].shape
+
+    initial_order, acc_by_ei = [], []
+    for cell_id, ei_mat in eis_by_cell_id.items():
+        initial_order.append(cell_id)
+        acc_by_ei.append(ei_mat)
+
+    initial_order = np.array(initial_order, dtype=np.int32) # shape (n_cells, )
+    ei_stacked_mat = np.stack(acc_by_ei, axis=0) # shape (n_cells, n_electrodes, n_timepoints)
+    exceeds_thresh = np.max(ei_stacked_mat, axis=2) > snr_abs_threshold # shape (n_cells, n_electrodes)
+    n_exceeds_thresholds_cell = np.sum(exceeds_thresh, axis=1) # shape (n_cells, ), integer valued
+
+    sorted_by_elcount = np.argsort(n_exceeds_thresholds_cell) # shape (n_cells, )
+
+    sorted_elcount = n_exceeds_thresholds_cell[sorted_by_elcount] # shape (n_cells, )
+    sorted_cell_id_order = initial_order[sorted_by_elcount] # shape (n_cells, )
+    exceeds_thresh_sorted_order = exceeds_thresh[sorted_by_elcount, :] # shape (n_cells, n_electrodes)
+    ei_stacked_sorted_order = ei_stacked_mat[sorted_by_elcount,:, :] # shpae (n_cells, n_electrodes, n_timepoints)
+
+    n_cells = sorted_cell_id_order.shape[0]
+
+    autobatched_list = [] # type: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
+    batch_start, i = 0, 1
+    while batch_start < n_cells:
+
+        while i <= n_cells and (sorted_elcount[i-1] * (batch_start - i)) < batch_tot_els:
+            i += 1
+
+        # now we group all electrodes between batch_start and i+1
+        batch_size = i - batch_start
+        batch_n_els = sorted_elcount[i-2]
+
+        batch_waveforms = np.zeros((batch_size, batch_n_els, n_timepoints), dtype=np.float32)
+        batch_valid_els = np.zeros((batch_size, batch_n_els), dtype=bool)
+        batch_recovery_idx = np.zeros((batch_size, n_els_total), dtype=np.int32)
+
+        for write_idx, read_idx in enumerate(range(batch_start, i)):
+
+            n_valid_cell = sorted_elcount[read_idx]
+            exceeds_thresh_cell_selector = exceeds_thresh_sorted_order[read_idx,:] # shape (n_els_total, ) bool-valued
+
+            batch_waveforms[write_idx, :n_valid_cell, :] = ei_stacked_sorted_order[read_idx, exceeds_thresh_cell_selector, :]
+            batch_valid_els[write_idx, :n_valid_cell] = True
+            batch_recovery_idx[write_idx, :] = exceeds_thresh_cell_selector
+
+        batch_cell_ids = sorted_cell_id_order[batch_start:i]
+
+        autobatched_list.append((batch_waveforms, batch_valid_els, batch_recovery_idx, batch_cell_ids))
+
+        batch_start = i
+
+    return autobatched_list
+
+
+def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+                                               batched_raw_data: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]) \
+        -> Dict[int, UnsharedBasisEIDecomposition]:
+    '''
+
+    :param batched_amplitude_phase_list:
+    :param batched_raw_data:
+    :return:
+    '''
+
+    if len(batched_amplitude_phase_list) != len(batched_raw_data):
+        raise ValueError('Batched decomposition list must have same length as batched raw data')
+
+    decomp_dict = {} # type: Dict[int, UnsharedBasisEIDecomposition]
+    for decomp_tuple, data_tuple in zip(batched_amplitude_phase_list, batched_raw_data):
+
+        # batched_amplitudes: shape (batch, n_max_els, n_basis), real floating point valued
+        # batched_phases: shape (batch, n_max_els, n_basis), integer-valued
+        # batched_basis: shape (batch, n_basis, n_timepoints), real floating point valued
+        batched_amplitudes, batched_phases, batched_basis = decomp_tuple
+
+        # batch_valid_els: shape (batch, n_max_els), boolean-valued
+        # batch_recovery_indices: shape (batch, n_tot_els), integer-valued
+        # batch_cell_ids: shape (batch, ), integer-valued cell IDs in order
+        _, batch_valid_els, batch_recovery_indices, batch_cell_ids = data_tuple
+
+        batch_size, n_tot_els = batch_recovery_indices.shape
+        _, n_basis, n_timepoints = batched_basis.shape
+        for idx in range(batch_size):
+            reinflated_amplitudes = np.zeros((n_tot_els, n_basis), dtype=np.float32)
+            reinflated_shifts = np.zeros((n_tot_els, n_basis), dtype=np.int32)
+
+            write_indices = batch_recovery_indices[idx, :]
+            read_indices = batch_valid_els[idx, :]
+
+            reinflated_amplitudes[write_indices, :] = batched_amplitudes[idx, read_indices, :]
+            reinflated_shifts[write_indices, :] = batched_phases[idx, read_indices, :]
+            reinflated_basis = batched_basis[idx, :, :]
+
+            cell_id = batch_cell_ids[idx]
+
+            decomp_dict[cell_id] = UnsharedBasisEIDecomposition(reinflated_amplitudes, reinflated_shifts,
+                                                                reinflated_basis)
+
+    return decomp_dict
+
+
 def batched_pack_significant_electrodes(eis_by_cell_id: Dict[int, np.ndarray],
                                         cell_order: List[int],
                                         snr_abs_threshold: Union[float, int]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
