@@ -201,6 +201,7 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
             iter_delays,
             observations_fourier_transform,
             is_valid_matrix,
+            iter_canonical_waveform_ft,
             n_frequencies_not_rfft,
             device,
             observation_loss_weight=waveform_observation_loss_weight

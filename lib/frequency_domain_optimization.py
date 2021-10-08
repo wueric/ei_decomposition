@@ -254,7 +254,9 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
 
     # shape (n_possible_ranks, ), positive integer-valued. Should typically be <= n_basis_waveforms, since
     # 0-rank is not allowed for obvious reasons
-    unique_ranks_sorted = np.unique(rank_include)
+    unique_ranks_sorted = np.unique(rank_values)
+
+    print(unique_ranks_sorted)
 
     solved_waveforms = np.zeros((batch, n_basis_waveforms, n_rfft_frequencies), dtype=np.complex)
     for rank in unique_ranks_sorted:
@@ -263,9 +265,14 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
 
         # shape (batch, )
         of_this_rank = (rank_values == rank)
+        print(rank, of_this_rank)
 
         # shape (batch, n_basis_waveforms)
         basis_selector = np.logical_and(of_this_rank[:, None], rank_include[:, :])
+
+        print(basis_selector)
+        print(batched_amplitudes_real.shape, basis_selector.shape)
+        print(np.nonzero(basis_selector))
 
         # solve equations with the same rank in parallel
         # shape (batch, rank <= n_basis_waveforms, n_rfft_frequencies)
