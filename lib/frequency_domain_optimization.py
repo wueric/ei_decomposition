@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List, Tuple
 
 import numpy as np
 import torch
@@ -6,39 +6,90 @@ import torch
 from lib.util_fns import generate_fourier_phase_shift_matrices
 
 
-def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.ndarray,
-                                                 batched_phase_delays: np.ndarray,
-                                                 batched_ft_observations: np.ndarray,
-                                                 batch_valid_mat: np.ndarray,
-                                                 n_true_frequencies: int,
-                                                 device: torch.device,
-                                                 observation_loss_weight: Optional[np.ndarray] = None) \
-        -> np.ndarray:
+def _batch_rank_deficient_identifier(batched_amplitudes_real: np.ndarray,
+                                     batched_valid_mat: np.ndarray,
+                                     norm_cutoff: float = 1e-2) -> np.ndarray:
     '''
+    Identifies cases where a cell is missing entire components (i.e. a row of batched_amplitudes_real is so
+        close to 0 that, in effect, this cell is missing the corresponding basis waveform component entirely).
+
+    This is necessary to help us avoid singular or ill-conditioned linear systems when solving for the waveforms
+        in frequency domain
+
+    To keep things really simple, we apply a simple heuristic that should help us identify how present a particular
+        basis waveform is in the data. The heuristic is
+
+        "In order to be included, each basis waveform must make up at least norm_cutoff fraction of the power
+        on at least one channel"
+
+    This function implicitly assumes that batched_amplitudes_real corresponds to amplitudes of already-normalized
+        basis waveforms (i.e. when we computed batched_amplitudes_real, the basis waveforms that we used had to have
+        L2 norm of 1), so power can be computed directly from batched_amplitudes_real without extra
+        normalization factors
 
     :param batched_amplitudes_real: real-valued amplitudes for each observation, each shifted canonical waveform,
         shape (batch, n_observations, n_canonical_waveforms)
+    :param batched_valid_mat: boolean matrix marking which entries of the above matrices correspond to real data,
+        and which entries correspond to padding.
+    :param norm_cutoff: floating point number, in interval [0, 1]. Should typically be very very small, something like
+        1e-2 or something like that, since it is meant to be a fraction
+    :return:
+
+        * waveform_satisfies_crit, shape (batch, n_basis_waveforms), boolean-valued. Each entry is True
+            if the corresponding basis waveform should be included in the linear system, and is False
+            if the basis waveform should not be included in the linear system
+
+    '''
+
+    # shape (batch, n_observations, n_canonical_waveforms)
+    power = batched_amplitudes_real * batched_amplitudes_real
+
+    # shape (batch, n_observations, 1)
+    tot_power = np.sum(power, axis=2, keepdims=True)
+
+    # shape (batch, n_observations, n_canonical_waveforms)
+    power_fraction = power / tot_power
+
+    # shape (batch, n_observations, n_canonical_waveforms)
+    # value is True if exceeds threshold AND the electrode is legit
+    exceeds_power_frac = np.logical_and(power_fraction > norm_cutoff, batched_valid_mat[:, :, None])
+
+    # shape (batch, n_canonical_waveforms)
+    waveform_satisfies_crit = np.any(exceeds_power_frac, axis=1)
+
+    return waveform_satisfies_crit
+
+
+def _batch_assemble_coefficients_and_solve(batched_amplitudes_real: np.ndarray,
+                                           batched_phase_delays: np.ndarray,
+                                           batched_ft_observations: np.ndarray,
+                                           batch_valid_mat: np.ndarray,
+                                           n_true_frequencies: int,
+                                           observation_loss_weight: np.ndarray):
+    '''
+    Can be used to solve reduced rank basis waveform matrices as well; i.e. n_basis_waveforms for the inputs
+        of this function can be less than n_basis_waveforms overall in the case that a particular cell is
+        missing certain compartments
+
+    :param batched_amplitudes_real: real-valued amplitudes for each observation, each shifted canonical waveform,
+        shape (batch, n_observations, n_basis_waveforms)
     :param batched_phase_delays: integer sample delays for each canonical waveform, for each observation
-        shape (batch, n_observations, n_canonical_waveforms)
+        shape (batch, n_observations, n_basis_waveforms)
     :param batched_ft_observations: complex-valued Fourier transform of the observed data,
         shape (batch, n_observations, n_rfft_frequencies)
     :param batch_valid_mat: boolean matrix marking which entries of the above matrices correspond to real data,
         and which entries correspond to padding.
         shape (batch, n_observations), boolean valued
-    :param n_true_frequencies : int, number of frequencies = n_samples for the normal FFT
-        (not the number of rFFT frequencies)
-    :param device: torch.device
-    :param observation_loss_weight: lambda vector of weights, for weighting the contribution to the loss
-        of each individual waveform. shape (batch, n_observations, )
-    :return: Fourier transform of least-squares basis waveforms, shape (batch, n_basis_vectors, n_rfft_frequencies)
+    :return: shape (batch, n_basis_waveforms, n_rfft_frequencies)
         Complex-valued np.ndarray
     '''
 
-    valid_zero_matrix = batch_valid_mat.astype(np.float32)
+    # shape (batch, n_observations)
+    valid_one_matrix = batch_valid_mat.astype(np.float32)
 
     if observation_loss_weight is not None:
-        batched_amplitudes_real = batched_amplitudes_real * observation_loss_weight[:, :, None] * valid_zero_matrix[:, :, None]
-        batched_ft_observations = batched_ft_observations * observation_loss_weight[:, :, None] * valid_zero_matrix[:, :, None]
+        batched_amplitudes_real = batched_amplitudes_real * observation_loss_weight[:, :, None]
+        batched_ft_observations = batched_ft_observations * observation_loss_weight[:, :, None]
 
     batch, n_observations, n_canonical_waveforms = batched_amplitudes_real.shape
     _, _, n_rfft_frequencies = batched_ft_observations.shape
@@ -58,7 +109,7 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
     real_phase_mat_torch = torch.tensor(complex_phase_matrix.real, dtype=torch.float32, device=device)
     imag_phase_mat_torch = torch.tensor(complex_phase_matrix.imag, dtype=torch.float32, device=device)
 
-    # shape (n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
     # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
     ####################### (l, k, None, f) ################# (l, None, j, f) ###########
     real_real_phase = real_phase_mat_torch[:, :, :, None, :] * real_phase_mat_torch[:, :, None, :, :]
@@ -76,32 +127,43 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
     # the (l^{th}, k^{th}, j^{th}) entry is A_{k,l} A_{j,l}
     amplitude_outer_product = amplitude_mat_torch[:, :, :, None] * amplitude_mat_torch[:, :, None, :]
 
+    # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_presum_real_coeff = (real_real_phase + imag_imag_phase) * amplitude_outer_product[:, :, :, :, None]
+    # we need to mask the contributions of some of the observations, since those correspond to null data
+    eq1_group_presum_real_coeff = eq1_group_presum_real_coeff * valid_one_matrix[:, :, None, None, None]
     # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
-    # each different row in dim0 corresponds to a different equation
-    eq1_group_real_coeff = torch.sum((real_real_phase + imag_imag_phase) * amplitude_outer_product[:, :, :, :, None],
-                                     dim=1)
-    eq1_group_imag_coeff = torch.sum((imag_real_phase - real_imag_phase) * amplitude_outer_product[:, :, :, :, None],
-                                     dim=1)
+    eq1_group_real_coeff = torch.sum(eq1_group_presum_real_coeff, dim=1)
+
+    # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_presum_imag_coeff = (imag_real_phase - real_imag_phase) * amplitude_outer_product[:, :, :, :, None]
+    eq1_group_presum_imag_coeff = eq1_group_presum_imag_coeff * valid_one_matrix[:, :, None, None, None]
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_imag_coeff = torch.sum(eq1_group_presum_imag_coeff, dim=1)
+
     # shape (batch, n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
     eq1_group_coeff = torch.cat([eq1_group_real_coeff, eq1_group_imag_coeff], dim=2)
 
     # shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
     ################# (l, k, f) ############### (l, k, None) ########################### (l, None, f)
-    eq1_rhs_re = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :, None, :]
-    eq1_rhs_im = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :, None, :]
+    eq1_rhs_re = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :,
+                                                                                         None, :]
+    eq1_rhs_im = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :,
+                                                                                         None, :]
 
     # shape (batch, n_canonical_waveforms, n_frequencies)
-    eq1_rhs = torch.sum(eq1_rhs_re + eq1_rhs_im, dim=1)
+    eq1_rhs = torch.sum((eq1_rhs_re + eq1_rhs_im) * valid_one_matrix[:, :, None, None], dim=1)
 
     # shape (batch, n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
     eq2_group_coeff = torch.cat([-1.0 * eq1_group_imag_coeff, eq1_group_real_coeff], dim=2)
 
     # shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
-    eq2_rhs_p = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :, None, :]
-    eq2_rhs_m = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :, None, :]
+    eq2_rhs_p = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :,
+                                                                                        None, :]
+    eq2_rhs_m = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :,
+                                                                                        None, :]
 
     # shape (batch, n_canonical_waveforms, n_rfft_frequencies)
-    eq2_rhs = torch.sum(eq2_rhs_p - eq2_rhs_m, dim=1)
+    eq2_rhs = torch.sum((eq2_rhs_p - eq2_rhs_m) * valid_one_matrix[:, :, None, None], dim=1)
 
     # shape (batch, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
     joint_coeff_permute = torch.cat([eq1_group_coeff, eq2_group_coeff], dim=1)
@@ -126,6 +188,105 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
     soln_imag_seg = soln_perm[:, n_canonical_waveforms:, :].cpu().numpy()
 
     return soln_real_seg + 1j * soln_imag_seg
+
+
+def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.ndarray,
+                                                 batched_phase_delays: np.ndarray,
+                                                 batched_ft_observations: np.ndarray,
+                                                 batch_valid_mat: np.ndarray,
+                                                 batched_prev_iter_basis_ft : np.ndarray,
+                                                 n_true_frequencies: int,
+                                                 device: torch.device,
+                                                 norm_cutoff: float=1e-2,
+                                                 observation_loss_weight: Optional[np.ndarray] = None) \
+        -> np.ndarray:
+    '''
+    Computes the Fourier-domain waveform optimization in batch, for cases where we have multiple sets of
+        basis waveforms
+
+    Note that because this is typically used to run the decomposition on each cell individually, where each
+        cell has its own set of basis waveforms, we are virtually guaranteed to have singular matrices because of
+        the sparsity in the decomposition. In particular:
+
+        (1) We explicitly regularize the amplitudes matrix to be sparse with respect to the basis components.
+            Therefore, for cells that don't appear on that many electrodes, it is quite probable that the cell
+            will have 0 or near-0 amplitudes for a given basis waveform (i.e. the cell has no axonal component)
+        (2) This results in 0 or near-0 rows and columns in the frequency-domain matrix.
+
+    This function attempts to identify these near-0 amplitude components, and where identified, the function
+        solves a lower-rank version of the problem rather than the full-rank version to avoid singular matrices.
+        In the cases where a lower-rank matrix is solved for, the basis waveforms that are "missing" are not updated,
+        since there is no data to update them with.
+
+    Algorithm:
+
+    :param batched_amplitudes_real: real-valued amplitudes for each observation, each shifted basis waveform,
+        shape (batch, n_observations, n_basis_waveforms)
+    :param batched_phase_delays: integer sample delays for each basis waveform, for each observation
+        shape (batch, n_observations, n_basis_waveforms)
+    :param batched_ft_observations: complex-valued Fourier transform of the observed data,
+        shape (batch, n_observations, n_rfft_frequencies)
+    :param batch_valid_mat: boolean matrix marking which entries of the above matrices correspond to real data,
+        and which entries correspond to padding.
+        shape (batch, n_observations), boolean valued
+    :param batched_prev_iter_basis_ft: rFFT of the basis waveforms from the previous iteration. We need this matrix
+        in the low-rank case, since in the low rank case, where we don't solve for some of the basis waveforms, we
+        want to write-through those basis waveforms from the previous iteration (i.e. a no-change update)
+
+        shape (batch, n_basis_waveforms, n_rfft_frequencies)
+    :param n_true_frequencies : int, number of frequencies = n_samples for the normal FFT
+        (not the number of rFFT frequencies)
+    :param device: torch.device
+    :param observation_loss_weight: Vector of weights, for weighting the contribution to the loss
+        of each individual waveform. shape (batch, n_observations, )
+    :return: Fourier transform of least-squares basis waveforms, shape (batch, n_basis_waveforms, n_rfft_frequencies)
+        Complex-valued np.ndarray
+    '''
+
+    batch, n_observations, n_basis_waveforms = batched_amplitudes_real.shape
+    _, _, n_rfft_frequencies = batched_ft_observations.shape
+
+    # shape (batch, n_basis_waveforms), boolean-valued
+    rank_include = _batch_rank_deficient_identifier(batched_amplitudes_real, batch_valid_mat, norm_cutoff=norm_cutoff)
+
+    # shape (batch, ), positive integer-valued. If an entry is 0 something is wrong
+    rank_values = np.sum(rank_include, axis=1)
+
+    # shape (n_possible_ranks, ), positive integer-valued. Should typically be <= n_basis_waveforms, since
+    # 0-rank is not allowed for obvious reasons
+    unique_ranks_sorted = np.unique(rank_include)
+
+    solved_waveforms = np.zeros((batch, n_basis_waveforms, n_rfft_frequencies), dtype=np.complex)
+    for rank in unique_ranks_sorted:
+
+        # group the stuff within each batch by rank
+
+        # shape (batch, )
+        of_this_rank = (rank_values == rank)
+
+        # shape (batch, n_basis_waveforms)
+        basis_selector = np.logical_and(of_this_rank[:, None], rank_include[:, :])
+
+        # solve equations with the same rank in parallel
+        # shape (batch, rank <= n_basis_waveforms, n_rfft_frequencies)
+        waveforms_of_rank = _batch_assemble_coefficients_and_solve(
+            batched_amplitudes_real[basis_selector[:, None, :]],
+            batched_phase_delays[basis_selector[:, None, :]],
+            batched_ft_observations[of_this_rank, :, :],
+            batch_valid_mat[of_this_rank, :],
+            n_true_frequencies,
+            observation_loss_weight=observation_loss_weight[of_this_rank, :]
+        )
+
+        # now we have to reassemble the solutions
+        solved_waveforms[basis_selector[:, :, None]] = waveforms_of_rank
+
+        # we're not done yet. We can't throw away the unused bases, since they
+        # may still be useful later. So we have to put them back...
+        unused_basis_selector = ~basis_selector # shape (batch, n_basis_waveforms)
+        solved_waveforms[unused_basis_selector[:, :, None]] = batched_prev_iter_basis_ft[unused_basis_selector[:, :, None]]
+
+    return solved_waveforms
 
 
 def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: np.ndarray,

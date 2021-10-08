@@ -419,7 +419,6 @@ def batched_build_unshared_at_a_matrix(ft_canonical: np.ndarray,
             (batch, n_canonical_waveforms, -1))
 
         # shape (batch, n_canonical_waveforms, n_observations * n_phase_shifts)
-        print(circular_corr_td.shape, unshared_relative_shift_flat.shape)
         taken_piece_flat = np.take_along_axis(circular_corr_td[:, j, :, :], unshared_relative_shift_flat, axis=2)
 
         # shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
