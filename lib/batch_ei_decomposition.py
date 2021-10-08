@@ -167,8 +167,7 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
         # shape (batch, n_observations)
         waveform_observation_loss_weight = raw_data_magnitude.copy().squeeze(2)
 
-    print("Beginning optimization loop")
-    pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization')
+    pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization', leave=False)
     for iter_count in range(n_iter):
         # within each iteration, we have a two step optimization
         # (1) Given fixed canonical waveforms,
@@ -316,6 +315,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
                                                                  snr_abs_threshold)
 
     wip_decomp_list = []
+    batch_pbar = tqdm.tqdm(total=len(autobatched_list), desc='Batch')
     for batched_data_mat, is_valid_mat, ind_sel_mat, cell_order in autobatched_list:
         # Tensors have the following shapes
         # batched_data_mat: shape (batch, max_n_sig_electrodes, n_timepoints), real-valued float
@@ -375,6 +375,9 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
         )
 
         wip_decomp_list.append((amplitudes, delays, waveforms))
+        batch_pbar.update(1) 
+
+    batch_pbar.close()
 
     # now unpack the results
     result_dict = auto_unbatch_unpack_significant_electrodes(wip_decomp_list, autobatched_list)

@@ -439,12 +439,12 @@ def auto_prebatch_pack_significant_electrodes(eis_by_cell_id: Dict[int, np.ndarr
     batch_start, i = 0, 1
     while batch_start < n_cells:
 
-        while i <= n_cells and (sorted_elcount[i-1] * (batch_start - i)) < batch_tot_els:
+        while i < n_cells and (sorted_elcount[i-1] * (i - batch_start)) < batch_tot_els:
             i += 1
 
         # now we group all electrodes between batch_start and i+1
         batch_size = i - batch_start
-        batch_n_els = sorted_elcount[i-2]
+        batch_n_els = sorted_elcount[i-1]
 
         batch_waveforms = np.zeros((batch_size, batch_n_els, n_timepoints), dtype=np.float32)
         batch_valid_els = np.zeros((batch_size, batch_n_els), dtype=bool)

@@ -403,7 +403,7 @@ def batched_build_unshared_at_a_matrix(ft_canonical: np.ndarray,
     # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_timepoints)
     circular_corr_td = np.fft.irfft(ft_canonical[:, :, None, :] * np.conjugate(ft_canonical[:, None, :, :]),
                                     n=n_true_frequencies,
-                                    axis=2)
+                                    axis=3)
 
     # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
     at_a_matrix_np = np.zeros((batch, n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms),
@@ -419,6 +419,7 @@ def batched_build_unshared_at_a_matrix(ft_canonical: np.ndarray,
             (batch, n_canonical_waveforms, -1))
 
         # shape (batch, n_canonical_waveforms, n_observations * n_phase_shifts)
+        print(circular_corr_td.shape, unshared_relative_shift_flat.shape)
         taken_piece_flat = np.take_along_axis(circular_corr_td[:, j, :, :], unshared_relative_shift_flat, axis=2)
 
         # shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
@@ -521,7 +522,7 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts(
     :return:
     '''
 
-    n_observations, n_rfft_frequencies = observed_ft.shape
+    batch, n_observations, n_rfft_frequencies = observed_ft.shape
 
     kill_problems_torch = torch.tensor(kill_problems, dtype=torch.bool,
                                        device=device) if kill_problems is not None else None
@@ -928,8 +929,6 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes(
                                  dtype=np.float32)
     objective_results = np.zeros((batch, n_observations, n_valid_phase_shifts), dtype=np.float32)
 
-    by_cell_pbar = tqdm.tqdm(total=int(np.ceil(batch / cell_batch_size)), leave=False, desc='Batching over cells')
-
     pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False, desc='First pass grid search')
     for low in range(0, n_valid_phase_shifts, max_batch_size):
         high = min(n_valid_phase_shifts, low + max_batch_size)
@@ -957,23 +956,15 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes(
         pbar.update(1)
     pbar.close()
 
-    by_cell_pbar.update(1)
-
     # pick the N best nodes to expand in detail
     # shape (batch, n_observations, second_pass_best_n)
     partition_idx = np.argpartition(objective_results, second_pass_best_n, axis=2)[:, :, :second_pass_best_n]
 
-    # shape (batch, n_observations * second_pass_best_n)
-    partition_idx_flat = partition_idx.reshape((batch, -1))
-
-    # shape (batch, n_canonical_waveforms, n_observations * second_pass_best_n)
-    best_phases_flat = np.take_along_axis(valid_phase_shifts_matrix, partition_idx_flat, axis=2)
+    # shape (n_canonical_waveforms, batch, n_observations, second_pass_best_n)
+    best_phases_needs_reorder = valid_phase_shifts_matrix[:, partition_idx]
 
     # shape (batch, n_canonical_waveforms, n_observations, second_pass_best_n)
-    # -> (batch, n_observations, n_canonical_waveforms, second_pass_best_n)
-    best_phases = best_phases_flat.reshape(
-        (batch, n_canonical_waveforms, n_observations, second_pass_best_n)).transpose(
-        (0, 2, 1, 3))
+    best_phases = best_phases_needs_reorder.transpose((1, 0, 2, 3))
 
     #### Do the fine search ###################################################
 
@@ -984,8 +975,10 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes(
     second_pass_mg = np.stack(np.meshgrid(*[second_pass_fine_steps for _ in range(n_canonical_waveforms)]), axis=0)
     second_pass_mg_flat = second_pass_mg.reshape((second_pass_mg.shape[0], -1))
 
-    # shape (batch, n_observations, n_canonical_waveforms, 1, n_fine_phases, second_past_best_n)
-    next_iter_phases = best_phases[:, :, :, None, :] + second_pass_mg_flat[:, None, :, :, None]
+    # shape (batch, n_canonical_waveforms, n_observations, 1, second_pass_best_n)
+    # + shape (1, n_canonical_waveforms, 1, n_fine_phases, 1)
+    # -> (batch, n_canonical_waveforms, n_observations, n_fine_phases, second_pass_best_n)
+    next_iter_phases = best_phases[:, :, :, None, :] + second_pass_mg_flat[None, :, None, :, None]
 
     # shape (batch, n_observations, n_canonical_waveforms, second_pass_best_n * n_fine_phases)
     next_iter_phases_flat = next_iter_phases.reshape((batch, n_observations, n_canonical_waveforms, -1))
