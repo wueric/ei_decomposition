@@ -478,43 +478,42 @@ def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : Li
     :return:
     '''
 
-    # FIXME commented out safety check for debugging
-    #if len(batched_amplitude_phase_list) != len(batched_raw_data):
-    #    raise ValueError('Batched decomposition list must have same length as batched raw data')
+    if len(batched_amplitude_phase_list) != len(batched_raw_data):
+        raise ValueError('Batched decomposition list must have same length as batched raw data')
 
     decomp_dict = {} # type: Dict[int, UnsharedBasisEIDecomposition]
 
-    decomp_tuple, data_tuple = batched_amplitude_phase_list[0], batched_raw_data[0] # FIXME add the the loop back
+    decomp_tuple, data_tuple = batched_amplitude_phase_list[0], batched_raw_data[0]
  
-    #for decomp_tuple, data_tuple in zip(batched_amplitude_phase_list, batched_raw_data):
+    for decomp_tuple, data_tuple in zip(batched_amplitude_phase_list, batched_raw_data):
 
-    # batched_amplitudes: shape (batch, n_max_els, n_basis), real floating point valued
-    # batched_phases: shape (batch, n_max_els, n_basis), integer-valued
-    # batched_basis: shape (batch, n_basis, n_timepoints), real floating point valued
-    batched_amplitudes, batched_phases, batched_basis = decomp_tuple
+        # batched_amplitudes: shape (batch, n_max_els, n_basis), real floating point valued
+        # batched_phases: shape (batch, n_max_els, n_basis), integer-valued
+        # batched_basis: shape (batch, n_basis, n_timepoints), real floating point valued
+        batched_amplitudes, batched_phases, batched_basis = decomp_tuple
 
-    # batch_valid_els: shape (batch, n_max_els), boolean-valued
-    # batch_recovery_indices: shape (batch, n_tot_els), integer-valued
-    # batch_cell_ids: shape (batch, ), integer-valued cell IDs in order
-    _, batch_valid_els, batch_recovery_indices, batch_cell_ids = data_tuple
+        # batch_valid_els: shape (batch, n_max_els), boolean-valued
+        # batch_recovery_indices: shape (batch, n_tot_els), integer-valued
+        # batch_cell_ids: shape (batch, ), integer-valued cell IDs in order
+        _, batch_valid_els, batch_recovery_indices, batch_cell_ids = data_tuple
 
-    batch_size, n_tot_els = batch_recovery_indices.shape
-    _, n_basis, n_timepoints = batched_basis.shape
-    for idx in range(batch_size):
-        reinflated_amplitudes = np.zeros((n_tot_els, n_basis), dtype=np.float32)
-        reinflated_shifts = np.zeros((n_tot_els, n_basis), dtype=np.int32)
+        batch_size, n_tot_els = batch_recovery_indices.shape
+        _, n_basis, n_timepoints = batched_basis.shape
+        for idx in range(batch_size):
+            reinflated_amplitudes = np.zeros((n_tot_els, n_basis), dtype=np.float32)
+            reinflated_shifts = np.zeros((n_tot_els, n_basis), dtype=np.int32)
 
-        write_indices = batch_recovery_indices[idx, :]
-        read_indices = batch_valid_els[idx, :]
+            write_indices = batch_recovery_indices[idx, :]
+            read_indices = batch_valid_els[idx, :]
 
-        reinflated_amplitudes[write_indices, :] = batched_amplitudes[idx, read_indices, :]
-        reinflated_shifts[write_indices, :] = batched_phases[idx, read_indices, :]
-        reinflated_basis = batched_basis[idx, :, :]
+            reinflated_amplitudes[write_indices, :] = batched_amplitudes[idx, read_indices, :]
+            reinflated_shifts[write_indices, :] = batched_phases[idx, read_indices, :]
+            reinflated_basis = batched_basis[idx, :, :]
 
-        cell_id = batch_cell_ids[idx]
+            cell_id = batch_cell_ids[idx]
 
-        decomp_dict[cell_id] = UnsharedBasisEIDecomposition(reinflated_amplitudes, reinflated_shifts,
-                                                            reinflated_basis)
+            decomp_dict[cell_id] = UnsharedBasisEIDecomposition(reinflated_amplitudes, reinflated_shifts,
+                                                                reinflated_basis)
 
     return decomp_dict
 

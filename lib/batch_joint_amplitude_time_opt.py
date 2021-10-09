@@ -334,8 +334,7 @@ def batched_build_at_a_matrix(ft_canonical: np.ndarray,
     relative_shifts = valid_phase_shifts[:, None, :, :] - valid_phase_shifts[:, :, None, :]
 
     # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_valid_phase_shifts)
-    taken_piece = np.take_along_axis(circular_corr_td, relative_shifts, axis=3)  # FIXME we're going
-    # to have to test this for batch 1, since I don't actually remember what take_along_axis is supposed to do
+    taken_piece = np.take_along_axis(circular_corr_td, relative_shifts, axis=3)
 
     # shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
     at_a_matrix_np = taken_piece.transpose((0, 3, 1, 2))
