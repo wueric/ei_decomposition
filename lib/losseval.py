@@ -181,8 +181,9 @@ def batch_evaluate_mse_flat(batch_observed_scaled_ft: np.ndarray,
         return scaled_errors
 
     else:
+        scaled_errors = np.sum(errors, axis=1)
         if take_mean_over_electrodes:
-            scaled_errors = errors / n_valid_per_batch
+            scaled_errors = scaled_errors / n_valid_per_batch
         return scaled_errors
 
 

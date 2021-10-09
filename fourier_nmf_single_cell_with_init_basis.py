@@ -90,7 +90,7 @@ if __name__ == '__main__':
         converge_step_cutoff=args.eps_cutoff if not args.eps_eigen else None
     )
 
-    with open(args.output, 'wb') as joint_fit_file:
+    with open(args.output_pickle, 'wb') as joint_fit_file:
         metadata_dict = {
             'l1_reg': args.weight_reg,
             'maxiter': args.maxiter,

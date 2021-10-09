@@ -195,6 +195,8 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
             max_batch_size=max_batch_size
         )
 
+        # FIXME
+        '''
         # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
         iter_canonical_waveform_ft = batch_fourier_complex_least_square_optimize3(
             iter_real_amplitudes,
@@ -206,6 +208,7 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
             device,
             observation_loss_weight=waveform_observation_loss_weight
         )
+        '''
 
         # shape (batch, n_canonical_waveforms, n_samples), real-valued float
         iter_canonical_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=2))
@@ -238,7 +241,7 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
                                            is_valid_matrix,
                                            n_frequencies_not_rfft,
                                            use_scaled_mse=False,
-                                           batch_observed_norms=waveform_observation_loss_weight)
+                                           batch_observed_norms=raw_data_magnitude.squeeze(2))
 
         mse_component = batch_evaluate_mse_flat(observations_fourier_transform,
                                                 iter_real_amplitudes,
@@ -377,6 +380,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
 
         wip_decomp_list.append((amplitudes, delays, waveforms))
         batch_pbar.update(1) 
+
+        break # FIXME debug mode only
 
     batch_pbar.close()
 

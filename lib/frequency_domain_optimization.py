@@ -44,11 +44,12 @@ def _batch_rank_deficient_identifier(batched_amplitudes_real: np.ndarray,
     # shape (batch, n_observations, n_canonical_waveforms)
     power = batched_amplitudes_real * batched_amplitudes_real
 
-    # shape (batch, n_observations, 1)
-    tot_power = np.sum(power, axis=2, keepdims=True)
+    # shape (batch, n_observations)
+    tot_power = np.sum(power, axis=2)
+    tot_power[~batched_valid_mat] = 1.0
 
     # shape (batch, n_observations, n_canonical_waveforms)
-    power_fraction = power / tot_power
+    power_fraction = power / tot_power[:, :, None]
 
     # shape (batch, n_observations, n_canonical_waveforms)
     # value is True if exceeds threshold AND the electrode is legit
@@ -65,7 +66,8 @@ def _batch_assemble_coefficients_and_solve(batched_amplitudes_real: np.ndarray,
                                            batched_ft_observations: np.ndarray,
                                            batch_valid_mat: np.ndarray,
                                            n_true_frequencies: int,
-                                           observation_loss_weight: np.ndarray):
+                                           device: torch.device,
+                                           observation_loss_weight: Optional[np.ndarray] = None):
     '''
     Can be used to solve reduced rank basis waveform matrices as well; i.e. n_basis_waveforms for the inputs
         of this function can be less than n_basis_waveforms overall in the case that a particular cell is
@@ -84,15 +86,15 @@ def _batch_assemble_coefficients_and_solve(batched_amplitudes_real: np.ndarray,
         Complex-valued np.ndarray
     '''
 
-    # shape (batch, n_observations)
-    valid_one_matrix = batch_valid_mat.astype(np.float32)
-
     if observation_loss_weight is not None:
         batched_amplitudes_real = batched_amplitudes_real * observation_loss_weight[:, :, None]
         batched_ft_observations = batched_ft_observations * observation_loss_weight[:, :, None]
 
     batch, n_observations, n_canonical_waveforms = batched_amplitudes_real.shape
     _, _, n_rfft_frequencies = batched_ft_observations.shape
+
+    # shape (batch, n_observations)
+    valid_one_matrix = torch.tensor(batch_valid_mat.astype(np.float32), dtype=torch.float32, device=device)
 
     # real valued, shape (batch, n_observations, n_canonical_waveforms)
     amplitude_mat_torch = torch.tensor(batched_amplitudes_real, dtype=torch.float32, device=device)
@@ -178,7 +180,7 @@ def _batch_assemble_coefficients_and_solve(batched_amplitudes_real: np.ndarray,
     joint_rhs = joint_rhs_permute.permute(0, 2, 1)
 
     # soln has shape (batch, n_rfft_frequencies, 2 * n_canonical_waveforms)
-    soln, _ = torch.solve(joint_rhs[:, :, :, None], joint_coeff)
+    soln = torch.linalg.solve(joint_coeff, joint_rhs[:, :, :, None])
 
     # shape (batch, 2 * n_canonical_waveforms, n_rfft_frequencies)
     soln_perm = soln.squeeze(3).permute(0, 2, 1)
@@ -256,42 +258,47 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
     # 0-rank is not allowed for obvious reasons
     unique_ranks_sorted = np.unique(rank_values)
 
-    print(unique_ranks_sorted)
-
-    solved_waveforms = np.zeros((batch, n_basis_waveforms, n_rfft_frequencies), dtype=np.complex)
+    solved_waveforms = batched_prev_iter_basis_ft.copy()
     for rank in unique_ranks_sorted:
+
+        if rank == 1:
+            continue
 
         # group the stuff within each batch by rank
 
         # shape (batch, )
         of_this_rank = (rank_values == rank)
-        print(rank, of_this_rank)
+        num_of_this_rank = np.sum(of_this_rank)
 
         # shape (batch, n_basis_waveforms)
         basis_selector = np.logical_and(of_this_rank[:, None], rank_include[:, :])
 
-        print(basis_selector)
-        print(batched_amplitudes_real.shape, basis_selector.shape)
-        print(np.nonzero(basis_selector))
+        # each of these has shape (num_of_this_rank * rank, )
+        batch_sel, rank_sel = np.nonzero(basis_selector) # FIXME SOMEWHAT UNDEFINED BEHAVIOR HERE
+        # We use the fact that batch_sel is sorted in non-decreasing order
+        # to play some games with shapes
+        # each unique value in batch_sel should be repeated rank number of times in a row
+
+        batch_sel_reshape = batch_sel.reshape(num_of_this_rank, rank)
+        rank_sel_reshape = rank_sel.reshape(num_of_this_rank, rank)
+
+        selected_amplitudes = batched_amplitudes_real[batch_sel_reshape, :, rank_sel_reshape].transpose(0, 2, 1)
+        selected_phases = batched_phase_delays[batch_sel_reshape, :, rank_sel_reshape].transpose(0, 2, 1)
 
         # solve equations with the same rank in parallel
         # shape (batch, rank <= n_basis_waveforms, n_rfft_frequencies)
         waveforms_of_rank = _batch_assemble_coefficients_and_solve(
-            batched_amplitudes_real[basis_selector[:, None, :]],
-            batched_phase_delays[basis_selector[:, None, :]],
+            selected_amplitudes,
+            selected_phases,
             batched_ft_observations[of_this_rank, :, :],
             batch_valid_mat[of_this_rank, :],
             n_true_frequencies,
-            observation_loss_weight=observation_loss_weight[of_this_rank, :]
+            device,
+            observation_loss_weight=None if observation_loss_weight is None else observation_loss_weight[of_this_rank, :],
         )
 
         # now we have to reassemble the solutions
-        solved_waveforms[basis_selector[:, :, None]] = waveforms_of_rank
-
-        # we're not done yet. We can't throw away the unused bases, since they
-        # may still be useful later. So we have to put them back...
-        unused_basis_selector = ~basis_selector # shape (batch, n_basis_waveforms)
-        solved_waveforms[unused_basis_selector[:, :, None]] = batched_prev_iter_basis_ft[unused_basis_selector[:, :, None]]
+        solved_waveforms[batch_sel_reshape, rank_sel_reshape, :] = waveforms_of_rank
 
     return solved_waveforms
 
@@ -418,7 +425,7 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     joint_rhs = joint_rhs_permute.permute(1, 0)
 
     # soln has shape (n_rfft_frequencies, 2 * n_canonical_waveforms)
-    soln, _ = torch.solve(joint_rhs[:, :, None], joint_coeff)
+    soln = torch.linalg.solve(joint_coeff, joint_rhs[:, :, None])
 
     # shape (2 * n_canonical_waveforms, n_rfft_frequencies)
     soln_perm = soln.squeeze(2).permute(1, 0)
