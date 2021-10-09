@@ -47,6 +47,7 @@ def _batch_rank_deficient_identifier(batched_amplitudes_real: np.ndarray,
     # shape (batch, n_observations)
     tot_power = np.sum(power, axis=2)
     tot_power[~batched_valid_mat] = 1.0
+    tot_power[tot_power==0.0] = 1.0
 
     # shape (batch, n_observations, n_canonical_waveforms)
     power_fraction = power / tot_power[:, :, None]

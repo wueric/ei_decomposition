@@ -261,6 +261,7 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
 
         pbar.set_postfix(loss_dict)
         pbar.update(1)
+    pbar.close()
 
     # shape (batch, n_observations, n_basis_waveforms) * (batch, n_observations, 1)
     # -> (batch, n_observations, n_basis_waveforms)
