@@ -17,6 +17,7 @@ def make_component_l1_unweighted_regularizer(lambda_overall: float,
     :return: 
     '''
 
+    # shape (n_basis_vectors, )
     basis_weights_torch = torch.tensor(basis_weights, dtype=torch.float32, device=device)
 
     def grad_component_l1(coeff: torch.Tensor) -> torch.Tensor:
@@ -52,7 +53,11 @@ def make_component_l1_weighted_regularizer(problem_weights: np.ndarray,
     :param device: 
     :return: 
     '''
+
+    # shape (n_basis_vectors, )
     basis_weights_torch = torch.tensor(basis_weights, dtype=torch.float32, device=device)
+
+    # shape (n_different_problems, )
     problem_weights_torch = torch.tensor(problem_weights, dtype=torch.float32, device=device)
 
     def grad_component_l1(coeff: torch.Tensor) -> torch.Tensor:
@@ -98,6 +103,7 @@ def make_group_l2_l1_unweighted_regularizer(lambda_overall: float,
 
     EPS = 1e-5
 
+    # shape (n_groups, n_basis_vectors)
     gather_index = np.zeros((len(group_assignments), n_basis_vectors), dtype=np.float32)
     for idx, group_indices in enumerate(group_assignments):
         gather_index[idx, group_indices] = 1.0
@@ -497,10 +503,10 @@ def fast_time_shifts_and_amplitudes_unshared_shifts(
     unshared_at_b_vector = torch.tensor(unshared_at_b_vector_np, dtype=torch.float32, device=device)
 
     ##### Set up nonnegative orthant minimization problem ####################################################
-    eigenvalues_np, _ = np.linalg.eigh(0.5 * unshared_at_a_matrix_np)
+    eigenvalues_np, _ = np.linalg.eigh(unshared_at_a_matrix_np)
 
     # shape (n_observations, n_phase_shifts, n_canonical_waveforms)
-    eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
+    eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device) # FIXME check scaling
 
     max_eigenvalue, _ = torch.max(eigenvalues, dim=2)  # shape (n_observations, n_phase_shifts)
     min_eigenvalue, _ = torch.min(eigenvalues, dim=2)  # shape (n_observations, n_phase_shifts)
@@ -689,7 +695,7 @@ def fast_time_shifts_and_amplitudes_shared_shifts(
     at_b_torch = torch.tensor(at_b_np, dtype=torch.float32, device=device)
 
     #### Step 3: set up projected gradient descent problem #######################################
-    eigenvalues_np, _ = np.linalg.eigh(0.5 * at_a_matrix_np)
+    eigenvalues_np, _ = np.linalg.eigh(at_a_matrix_np) # FIXME check scaling
     eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
 
     # eigenvalues has shape (n_valid_phase_shifts, n_waveforms)
@@ -904,6 +910,8 @@ def coarse_to_fine_time_shifts_and_amplitudes(
 
     # shape (n_canonical_waveforms, n_observations * second_pass_best_n)
     best_phases_flat = valid_phase_shifts_matrix[:, partition_idx_flat]
+
+    # shape (n_observations, n_canonical_waveforms, second_pass_best_n)
     best_phases = best_phases_flat.reshape((n_canonical_waveforms, n_observations, second_pass_best_n)).transpose(
         (1, 0, 2))
 

@@ -52,7 +52,11 @@ def make_batched_component_l1_weighted_regularizer(problem_weights: np.ndarray,
     :param device:
     :return:
     '''
+
+    # shape (batch, n_basis_vectors)
     basis_weights_torch = torch.tensor(basis_weights, dtype=torch.float32, device=device)
+
+    # shape (batch, n_different_problems)
     problem_weights_torch = torch.tensor(problem_weights, dtype=torch.float32, device=device)
 
     def grad_component_l1(coeff: torch.Tensor) -> torch.Tensor:
@@ -106,6 +110,7 @@ def make_batched_group_l2_l1_unweighted_regularizer(lambda_overall: float,
 
     EPS = 1e-5
 
+    # shape (n_groups, n_basis_vectors)
     gather_index = np.zeros((len(group_assignments), n_basis_vectors), dtype=np.float32)
     for idx, group_indices in enumerate(group_assignments):
         gather_index[idx, group_indices] = 1.0
@@ -198,7 +203,7 @@ def make_batched_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
         '''
 
         # shape (batch, n_problems, n_shifted_problems, n_groups, n_basis_vectors)
-        coefficients_by_group = coeff[:, :, :, None, :] * gather_index[:, None, None, :, :]
+        coefficients_by_group = coeff[:, :, :, None, :] * gather_index[None, None, None, :, :]
 
         # shape (batch, n_problems, n_shifted_problems, n_groups, 1)
         l2_norm = torch.norm(coefficients_by_group, dim=4, p=2, keepdim=True)
@@ -216,7 +221,7 @@ def make_batched_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
         '''
 
         # shape (batch, n_problems, n_shifted_problems, n_groups, n_basis_vectors)
-        coefficients_by_group = coeff[:, :, :, None, :] * gather_index[:, None, None, :, :]
+        coefficients_by_group = coeff[:, :, :, None, :] * gather_index[None, None, None, :, :]
 
         # shape (batch, n_problems, n_shifted_problems, n_groups)
         l2_norm = torch.norm(coefficients_by_group, dim=4, p=2)
@@ -523,6 +528,7 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts(
 
     batch, n_observations, n_rfft_frequencies = observed_ft.shape
 
+    # shape (batch, n_observations)
     kill_problems_torch = torch.tensor(kill_problems, dtype=torch.bool,
                                        device=device) if kill_problems is not None else None
 
@@ -540,10 +546,10 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts(
 
     ##### Set up nonnegative orthant minimization problem ####################################################
     # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
-    eigenvalues_np, _ = np.linalg.eigh(0.5 * unshared_at_a_matrix_np)
+    eigenvalues_np, _ = np.linalg.eigh(unshared_at_a_matrix_np)
 
     # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
-    eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
+    eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device) # FIXME check scaling
 
     max_eigenvalue, _ = torch.max(eigenvalues, dim=-1)  # shape (batch, n_observations, n_phase_shifts)
     min_eigenvalue, _ = torch.min(eigenvalues, dim=-1)  # shape (batch, n_observations, n_phase_shifts)
@@ -746,7 +752,7 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts(
 
     #### Step 3: set up projected gradient descent problem #######################################
     # shape (batch, n_valid_phase_shifts, n_canonical_waveforms)
-    eigenvalues_np, _ = np.linalg.eigh(0.5 * at_a_matrix_np)  # FIXME propagate this change everywhere
+    eigenvalues_np, _ = np.linalg.eigh(at_a_matrix_np)  # FIXME check scaling
     # if it checks out
     eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
 
@@ -959,11 +965,14 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes(
     # shape (batch, n_observations, second_pass_best_n)
     partition_idx = np.argpartition(objective_results, second_pass_best_n, axis=2)[:, :, :second_pass_best_n]
 
-    # shape (n_canonical_waveforms, batch, n_observations, second_pass_best_n)
-    best_phases_needs_reorder = valid_phase_shifts_matrix[:, partition_idx]
+    # shape (batch * n_observations * second_pass_best_n)
+    partition_idx_flat = partition_idx.reshape((-1))
 
-    # shape (batch, n_canonical_waveforms, n_observations, second_pass_best_n)
-    best_phases = best_phases_needs_reorder.transpose((1, 0, 2, 3))
+    # shape (n_canonical_waveforms, batch * n_observations * second_pass_best)
+    best_phases_flat = valid_phase_shifts_matrix[:, partition_idx_flat]
+
+    # shape (batch, n_observations, n_canonical_waveforms, second_pass_best_n)
+    best_phases = best_phases_flat.reshape(n_canonical_waveforms, batch, n_observations, second_pass_best_n).transpose(1, 2, 0, 3)
 
     #### Do the fine search ###################################################
 
@@ -974,10 +983,10 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes(
     second_pass_mg = np.stack(np.meshgrid(*[second_pass_fine_steps for _ in range(n_canonical_waveforms)]), axis=0)
     second_pass_mg_flat = second_pass_mg.reshape((second_pass_mg.shape[0], -1))
 
-    # shape (batch, n_canonical_waveforms, n_observations, 1, second_pass_best_n)
-    # + shape (1, n_canonical_waveforms, 1, n_fine_phases, 1)
-    # -> (batch, n_canonical_waveforms, n_observations, n_fine_phases, second_pass_best_n)
-    next_iter_phases = best_phases[:, :, :, None, :] + second_pass_mg_flat[None, :, None, :, None]
+    # shape (batch, n_observations, n_canonical_waveforms, 1, second_pass_best_n)
+    # + shape (1, 1, n_canonical_waveforms, n_fine_phases, 1)
+    # -> (batch, n_observations, n_canonical_waveforms, n_fine_phases, second_pass_best_n)
+    next_iter_phases = best_phases[:, :, :, None, :] + second_pass_mg_flat[None, None, :, :, None]
 
     # shape (batch, n_observations, n_canonical_waveforms, second_pass_best_n * n_fine_phases)
     next_iter_phases_flat = next_iter_phases.reshape((batch, n_observations, n_canonical_waveforms, -1))

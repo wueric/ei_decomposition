@@ -261,9 +261,6 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
     solved_waveforms = batched_prev_iter_basis_ft.copy()
     for rank in unique_ranks_sorted:
 
-        if rank == 1:
-            continue
-
         # group the stuff within each batch by rank
 
         # shape (batch, )
