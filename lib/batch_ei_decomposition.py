@@ -101,7 +101,8 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
                                                         grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
                                                         use_basis_weighted_l1_norm: bool = False,
                                                         basis_weights_for_l1: Optional[np.ndarray] = None,
-                                                        l1_regularization_lambda: Optional[float] = None) \
+                                                        l1_regularization_lambda: Optional[float] = None,
+                                                        sobolev_lambda : Optional[float] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     '''
     Batched version of the main iteration loop for the two-step (as opposed to three-step) optimization process.
@@ -204,7 +205,8 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
             iter_canonical_waveform_ft,
             n_frequencies_not_rfft,
             device,
-            observation_loss_weight=waveform_observation_loss_weight
+            observation_loss_weight=waveform_observation_loss_weight,
+            sobolev_lambda=sobolev_lambda
         )
 
         # shape (batch, n_canonical_waveforms, n_samples), real-valued float

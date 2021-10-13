@@ -68,7 +68,8 @@ def _batch_assemble_coefficients_and_solve(batched_amplitudes_real: np.ndarray,
                                            batch_valid_mat: np.ndarray,
                                            n_true_frequencies: int,
                                            device: torch.device,
-                                           observation_loss_weight: Optional[np.ndarray] = None):
+                                           observation_loss_weight: Optional[np.ndarray] = None,
+                                           sobolev_lambda: Optional[float] = None):
     '''
     Can be used to solve reduced rank basis waveform matrices as well; i.e. n_basis_waveforms for the inputs
         of this function can be less than n_basis_waveforms overall in the case that a particular cell is
@@ -174,6 +175,24 @@ def _batch_assemble_coefficients_and_solve(batched_amplitudes_real: np.ndarray,
     # shape (batch, n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
     joint_coeff = joint_coeff_permute.permute(0, 3, 1, 2)
 
+    if sobolev_lambda is not None:
+        frequencies = np.fft.rfftfreq(n_true_frequencies)  # shape (n_rfft_frequencies, )
+
+        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
+        canonical_waveforms_identity = np.eye(2 * n_canonical_waveforms) * 2 * np.pi
+
+        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+        canonical_waveform_freq_diag = canonical_waveforms_identity[:, :, None] * frequencies[None, None, :]
+
+        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
+        diagonal_regularize = 2 * sobolev_lambda * np.power(1 - np.cos(canonical_waveform_freq_diag), 2)
+
+        diagonal_regularize_torch_perm = torch.tensor(diagonal_regularize, dtype=torch.float32, device=device)
+        # shape (n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
+        diagonal_regularize_torch = diagonal_regularize_torch_perm.permute(2, 0, 1)
+
+        joint_coeff = joint_coeff + diagonal_regularize_torch[None, :, :, :]
+
     # shape (batch, 2 * n_canonical_waveforms, n_rfft_frequencies)
     joint_rhs_permute = torch.cat([eq1_rhs, eq2_rhs], dim=1)
 
@@ -201,7 +220,8 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
                                                  n_true_frequencies: int,
                                                  device: torch.device,
                                                  norm_cutoff: float=1e-2,
-                                                 observation_loss_weight: Optional[np.ndarray] = None) \
+                                                 observation_loss_weight: Optional[np.ndarray] = None,
+                                                 sobolev_lambda: Optional[float] = None) \
         -> np.ndarray:
     '''
     Computes the Fourier-domain waveform optimization in batch, for cases where we have multiple sets of
@@ -293,6 +313,7 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
             n_true_frequencies,
             device,
             observation_loss_weight=None if observation_loss_weight is None else observation_loss_weight[of_this_rank, :],
+            sobolev_lambda=sobolev_lambda
         )
 
         # now we have to reassemble the solutions

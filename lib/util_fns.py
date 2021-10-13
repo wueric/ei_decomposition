@@ -468,6 +468,37 @@ def auto_prebatch_pack_significant_electrodes(eis_by_cell_id: Dict[int, np.ndarr
     return autobatched_list
 
 
+def _auto_unbatch_unpack_ei(batched_packed_ei : List[np.ndarray],
+                            batched_raw_data: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]):
+
+    if len(batched_packed_ei) != len(batched_raw_data):
+        raise ValueError('Batched decomposition list must have same length as batched raw data')
+
+    unpacked_ei_dict = {} # type: Dict[int, np.ndarray]
+
+    for packed_ei, data_tuple in zip(batched_packed_ei, batched_raw_data):
+
+        # batch_valid_els: shape (batch, n_max_els), boolean-valued
+        # batch_recovery_indices: shape (batch, n_tot_els), boolean-valued
+        # batch_cell_ids: shape (batch, ), integer-valued cell IDs in order
+        _, batch_valid_els, batch_recovery_indices, batch_cell_ids = data_tuple
+
+        batch_size, n_tot_els = batch_recovery_indices.shape
+        _, max_n_els, n_timepoints = packed_ei.shape
+
+        for idx in range(batch_size):
+
+            reinflated_ei = np.zeros((n_tot_els, n_timepoints), dtype=np.float32)
+            put_back = batch_recovery_indices[idx, :] # shape (n_electrodes, )
+            read_valid = batch_valid_els[idx, :]
+
+            reinflated_ei[put_back, :] = packed_ei[read_valid, :]
+
+            unpacked_ei_dict[batch_cell_ids[idx]] = reinflated_ei
+
+    return unpacked_ei_dict
+
+
 def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
                                                batched_raw_data: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]) \
         -> Dict[int, UnsharedBasisEIDecomposition]:
@@ -483,8 +514,6 @@ def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : Li
 
     decomp_dict = {} # type: Dict[int, UnsharedBasisEIDecomposition]
 
-    decomp_tuple, data_tuple = batched_amplitude_phase_list[0], batched_raw_data[0]
- 
     for decomp_tuple, data_tuple in zip(batched_amplitude_phase_list, batched_raw_data):
 
         # batched_amplitudes: shape (batch, n_max_els, n_basis), real floating point valued
@@ -493,7 +522,7 @@ def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : Li
         batched_amplitudes, batched_phases, batched_basis = decomp_tuple
 
         # batch_valid_els: shape (batch, n_max_els), boolean-valued
-        # batch_recovery_indices: shape (batch, n_tot_els), integer-valued
+        # batch_recovery_indices: shape (batch, n_tot_els), boolean-valued
         # batch_cell_ids: shape (batch, ), integer-valued cell IDs in order
         _, batch_valid_els, batch_recovery_indices, batch_cell_ids = data_tuple
 
