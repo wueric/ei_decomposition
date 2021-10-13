@@ -293,6 +293,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
         grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
         use_basis_weighted_l1_norm: bool = False,
         basis_weights_for_l1: Optional[np.ndarray] = None,
+        sobolev_reg: Optional[float] = None,
         output_debug_dict: bool = False) \
         -> Union[
             Tuple[Dict[int, UnsharedBasisEIDecomposition], Dict[str, float]], Dict[int, UnsharedBasisEIDecomposition]]:
@@ -375,7 +376,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
             use_grouped_l1l2_norm=use_grouped_l1l2_norm,
             grouped_l1l2_groups=grouped_l1l2_groups,
             use_basis_weighted_l1_norm=use_basis_weighted_l1_norm,
-            basis_weights_for_l1=basis_weights_for_l1
+            basis_weights_for_l1=basis_weights_for_l1,
+            sobolev_reg=sobolev_reg
         )
 
         wip_decomp_list.append((amplitudes, delays, waveforms))

@@ -16,6 +16,8 @@ if __name__ == '__main__':
     parser.add_argument('--maxiter', '-m', type=int, default=10, help='maximum number of iterations to run')
     parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
                         help='L1 regularization lambda for amplitudes')
+    parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
+                        help='L2 regularization for waveform second derivatives')
     parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
     parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
     parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
@@ -87,7 +89,8 @@ if __name__ == '__main__':
         use_basis_weighted_l1_norm=args.l1_comp_weights,
         basis_weights_for_l1=componentwise_weights,
         converge_epsilon=args.eps_cutoff,
-        converge_step_cutoff=args.eps_cutoff if not args.eps_eigen else None
+        converge_step_cutoff=args.eps_cutoff if not args.eps_eigen else None,
+        sobolev_reg=args.sobolev_reg
     )
 
     with open(args.output_pickle, 'wb') as joint_fit_file:
@@ -102,7 +105,8 @@ if __name__ == '__main__':
             'use_grouped_l1l2_norm': args.group,
             'group_assignments': group_assignments,
             'use_basis_weighted_l1': args.l1_comp_weights,
-            'basis_weights_for_l1': componentwise_weights
+            'basis_weights_for_l1': componentwise_weights,
+            'sobolev_reg': args.sobolev_reg
         }
 
         pickle_dict = {
