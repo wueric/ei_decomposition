@@ -423,7 +423,7 @@ def auto_prebatch_pack_significant_electrodes(eis_by_cell_id: Dict[int, np.ndarr
 
     initial_order = np.array(initial_order, dtype=np.int32) # shape (n_cells, )
     ei_stacked_mat = np.stack(acc_by_ei, axis=0) # shape (n_cells, n_electrodes, n_timepoints)
-    exceeds_thresh = np.max(ei_stacked_mat, axis=2) > snr_abs_threshold # shape (n_cells, n_electrodes)
+    exceeds_thresh = np.max(np.abs(ei_stacked_mat), axis=2) > snr_abs_threshold # shape (n_cells, n_electrodes)
     n_exceeds_thresholds_cell = np.sum(exceeds_thresh, axis=1) # shape (n_cells, ), integer valued
 
     sorted_by_elcount = np.argsort(n_exceeds_thresholds_cell) # shape (n_cells, )
