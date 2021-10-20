@@ -172,11 +172,11 @@ def select_l1_regularizer_callable(l1_regularization_lambda: Optional[float],
 
     # Check correctness of inputs
     if use_scaled_regularization_terms and per_problem_weights is None:
-        assert False, "must specify problem weights if using scaled regularization terms"
+        raise ValueError("must specify problem weights if using scaled regularization terms")
     if use_grouped_l1l2_norm and grouped_l1l2_groups is None:
-        assert False, "must specify L1L2 groups if using L1L2 regularization"
+        raise ValueError("must specify L1L2 groups if using L1L2 regularization")
     if use_basis_weighted_l1_norm and basis_weights is None:
-        assert False, "must specify basis weights if using component-wise weighted L1 regularization"
+        raise ValueError("must specify basis weights if using component-wise weighted L1 regularization")
 
     if use_scaled_regularization_terms:
 

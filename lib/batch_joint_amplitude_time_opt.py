@@ -1,0 +1,1031 @@
+from typing import Optional, Tuple, Callable, List
+
+import numpy as np
+import torch
+import tqdm
+
+
+def make_batched_component_l1_unweighted_regularizer(lambda_overall: float,
+                                                     basis_weights: np.ndarray,
+                                                     device: torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+
+    :param lambda_overall:
+    :param basis_weights: shape (batch, n_basis_vectors)
+    :param device:
+    :return:
+    '''
+
+    # shape (batch, n_basis_vectors)
+    basis_weights_torch = torch.tensor(basis_weights, dtype=torch.float32, device=device)
+
+    def grad_component_l1(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (batch, n_different_problems, n_shifted_problems, n_basis_vectors)
+        :return:  (batch, n_different_problems, n_shifted_problems, n_basis_vectors)
+        '''
+        return lambda_overall * basis_weights_torch[:, None, None, :]
+
+    def loss_component_l1(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (batch, n_different_problems, n_shifted_problems, n_basis_vectors)
+        :return: shape (batch, n_different_problems, n_shifted_problems)
+        '''
+        return lambda_overall * torch.sum(basis_weights_torch[:, None, None, :] * coeff, dim=3)
+
+    return grad_component_l1, loss_component_l1
+
+
+def make_batched_component_l1_weighted_regularizer(problem_weights: np.ndarray,
+                                                   lambda_overall: float,
+                                                   basis_weights: np.ndarray,
+                                                   device: torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+
+    :param problem_weights: shape (batch, n_different_problems)
+    :param lambda_overall:
+    :param basis_weights: shape (batch, n_basis_vectors)
+    :param device:
+    :return:
+    '''
+
+    # shape (batch, n_basis_vectors)
+    basis_weights_torch = torch.tensor(basis_weights, dtype=torch.float32, device=device)
+
+    # shape (batch, n_different_problems)
+    problem_weights_torch = torch.tensor(problem_weights, dtype=torch.float32, device=device)
+
+    def grad_component_l1(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (batch, n_different_problems, n_shifted_problems, n_basis_vectors)
+        :return:  (batch, n_different_problems, n_shifted_problems, n_basis_vectors)
+        '''
+        return lambda_overall * basis_weights_torch[:, None, None, :] * problem_weights_torch[:, :, None, None]
+
+    def loss_component_l1(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (batch, n_different_problems, n_shifted_problems, n_basis_vectors)
+        :return: shape (batch, n_different_problems, n_shifted_problems)
+        '''
+
+        return lambda_overall * torch.sum(
+            problem_weights_torch[:, :, None, None] * basis_weights_torch[:, None, None, :] * coeff, dim=3)
+
+    return grad_component_l1, loss_component_l1
+
+
+def make_batched_group_l2_l1_unweighted_regularizer(lambda_overall: float,
+                                                    n_basis_vectors: int,
+                                                    group_assignments: List[np.ndarray],
+                                                    device: torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    Suppose that we have variable groups g \in G, each of which contains some variables.
+        Each variable is in exactly 1 group
+
+    This regularization function is of the form
+
+    \lambda ( \sum_{g \in G} |w_g|_2)
+
+    Assumptions that we make to accomodate batching:
+        1. The group assignments over the batch dimension are the same (i.e. for cell 1, if we have groups
+            {0, 1}, and {2}, we assume that cells 2 through n all have those same groups)
+        2. The number of basis vectors along the batch dimension is the same (i.e. if cell 1 has 3 basis vectors,
+            all of the other cells must also have 3 basis vectors)
+
+    :param lambda_overall: Overall lambda for the penalty
+    :param n_basis_vectors: number of basis vectors
+    :param group_assignments: assignments of the groups. Does not check that each variable is in
+        exactly one group. List of 1D nonnegative integer arrays, each array corresponds to a single
+        group
+
+    :return:
+    '''
+
+    EPS = 1e-5
+
+    # shape (n_groups, n_basis_vectors)
+    gather_index = np.zeros((len(group_assignments), n_basis_vectors), dtype=np.float32)
+    for idx, group_indices in enumerate(group_assignments):
+        gather_index[idx, group_indices] = 1.0
+
+    # shape (n_groups, n_basis_vectors)
+    gather_index = torch.tensor(gather_index, device=device, dtype=torch.float32)
+
+    def gradient_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (batch, n_different_problems, n_shifted_problems, n_canonical_waveforms)
+        :return: gradient, shape (batch, n_different_problems, n_shifted_problems, n_canonical_waveforms)
+        '''
+
+        # (batch, n_different_problems, n_shifted_problems, 1, n_basis_vectors) * (1, 1, 1, n_groups, n_basis_vectors)
+        # -> shape (batch, n_problems, n_shifted_problems, n_groups, n_basis_vectors)
+        coefficients_by_group = coeff[:, :, :, None, :] * gather_index[None, None, None, :, :]
+
+        # shape (batch, n_problems, n_shifted_problems, n_groups, 1)
+        l2_norm = torch.norm(coefficients_by_group, dim=4, p=2, keepdim=True)
+
+        # shape (batch, n_problems, batch_size, n_groups, n_basis_vectors)
+        division = coefficients_by_group / (l2_norm + EPS)
+
+        # shape (batch, n_problems, batch_size, n_basis_vectors)
+        return lambda_overall * torch.sum(division, dim=3)
+
+    def loss_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (batch, n_different_problems, n_shifted_problems, n_canonical_waveforms)
+        :return: loss val, shape (batch, n_different_problems, n_shifted_problems)
+        '''
+
+        # shape (batch, n_problems, n_shifted_problems, n_groups, n_basis_vectors)
+        coefficients_by_group = coeff[:, :, :, None, :] * gather_index[None, None, None, :, :]
+
+        # shape (batch, n_problems, n_shifted_problems, n_groups)
+        l2_norm = torch.norm(coefficients_by_group, dim=4, p=2)
+
+        # shape (batch, n_problems, n_shifted_problems)
+        return lambda_overall * torch.sum(l2_norm, dim=3)
+
+    return gradient_group_l2_l1_regularizer, loss_group_l2_l1_regularizer
+
+
+def make_batched_group_l2_l1_weighted_regularizer(problem_weights: np.ndarray,
+                                                  lambda_overall: float,
+                                                  n_basis_vectors: int,
+                                                  group_assignments: List[np.ndarray],
+                                                  device: torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    Suppose that we have variable groups g \in G, each of which contains some variables.
+        Each variable is in exactly 1 group
+
+    This regularization function is of the form
+
+    \lambda ( \sum_{g \in G} |w_g|_2)
+
+    Here \lambda may differ for each specific problem, depending on the pre-specified problem weight
+
+    :param problem_weights: L1 weights that we should have for each optimization problem.
+        Shape (batch, n_different_problems)
+    :param lambda_overall: float, L1 regularizer weight
+    :param n_basis_vectors: number of basis vectors. Assumed to be the same for everything along the
+        batch dimension
+    :param group_assignments: assignments of the groups. Does not check that each variable is in
+        exactly one group. Assumed to be the same for everything along the batch dimension
+    :param device: torch computational device
+    :return:
+    '''
+    gather_index = np.zeros((len(group_assignments), n_basis_vectors), dtype=np.int32)
+    for idx, group_indices in enumerate(group_assignments):
+        gather_index[idx, group_indices] = 1
+
+    # shape (n_groups, n_basis_vectors)
+    gather_index = torch.tensor(gather_index, device=device)
+
+    # shape (batch, n_different_problems)
+    problem_weights_torch = torch.tensor(problem_weights, device=device, dtype=torch.float32)
+
+    EPS = 1e-5
+
+    def gradient_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (n_different_problems, n_shifted_problems, n_canonical_waveforms)
+        :return: gradient, shape (batch, n_different_problems, n_shifted_problems, n_canonical_waveforms)
+        '''
+
+        # shape (batch, n_problems, n_shifted_problems, n_groups, n_basis_vectors)
+        coefficients_by_group = coeff[:, :, :, None, :] * gather_index[None, None, None, :, :]
+
+        # shape (batch, n_problems, n_shifted_problems, n_groups, 1)
+        l2_norm = torch.norm(coefficients_by_group, dim=4, p=2, keepdim=True)
+
+        # shape (batch, n_problems, n_shifted_problems, n_groups, n_basis_vectors)
+        division = coefficients_by_group / (l2_norm + EPS)
+
+        return lambda_overall * torch.sum(division, dim=3) * problem_weights_torch[:, :, None, None]
+
+    def loss_group_l2_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param coeff: shape (batch, n_different_problems, n_shifted_problems, n_canonical_waveforms)
+        :return: gradient, shape (batch, n_different_problems, n_shifted_problems)
+        '''
+
+        # shape (batch, n_problems, n_shifted_problems, n_groups, n_basis_vectors)
+        coefficients_by_group = coeff[:, :, :, None, :] * gather_index[None, None, None, :, :]
+
+        # shape (batch, n_problems, n_shifted_problems, n_groups)
+        l2_norm = torch.norm(coefficients_by_group, dim=4, p=2)
+
+        # shape (batch, n_problems, n_shifted_problems)
+        return lambda_overall * torch.sum(l2_norm, dim=3) * problem_weights_torch[:, :, None]
+
+    return gradient_group_l2_l1_regularizer, loss_group_l2_l1_regularizer
+
+
+def make_batched_unweighted_l1_regularizer(lambda_l1: float) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+
+    :param lambda_l1:
+    :return:
+    '''
+
+    def gradient_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        return lambda_l1
+
+    def loss_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+
+        :param batched_amplitudes: shape (batch, n_different_problems, n_shifted_problems, n_canonical_waveforms)
+        :return:
+        '''
+
+        # shape (batch, n_different_problems, n_shifted_problems)
+        return lambda_l1 * torch.sum(coeff, dim=3)
+
+    return gradient_l1_regularizer, loss_l1_regularizer
+
+
+def make_batched_by_cell_weighted_l1_regularizer(problem_weights: np.ndarray,
+                                                 lambda_l1: float,
+                                                 device: torch.device) \
+        -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    '''
+    Makes lambda function for weighted L1 regularization
+
+    :param problem_weights: L1 weights that we should have for each optimization problem.
+        Shape (batch, n_different_problems)
+    :param lambda_l1:  L1 regularization lambda
+    :param device: torch.device
+    :return:
+    '''
+
+    # shape (batch, n_different_problems)
+    l1_problem_weights = torch.tensor(problem_weights, dtype=torch.float32, device=device)
+
+    def gradient_weighted_l1_regularizer(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+        Calculates the gradient of the weighted L1 loss term in the nonnegative orthant
+
+        :return: shape (batch, n_different_problems, 1, 1)
+        '''
+        return l1_problem_weights[:, :, None, None] * lambda_l1
+
+    def weighted_l1_loss(coeff: torch.Tensor) -> torch.Tensor:
+        '''
+        Calculates the value of the weighted L1 loss term in the nonnegative orthant
+
+        :param batched_amplitudes: shape (batch, n_different_problems, n_shifted_problems, n_canonical_waveforms)
+        :return: shape (batch, n_different_problems, batch_size)
+        '''
+
+        # shape (batch, n_different_problems, n_shifted_problems)
+        return torch.sum(coeff * l1_problem_weights[:, :, None, None] * lambda_l1, dim=3)
+
+    return gradient_weighted_l1_regularizer, weighted_l1_loss
+
+
+def batched_build_at_a_matrix(ft_canonical: np.ndarray,
+                              valid_phase_shifts: np.ndarray,
+                              n_true_frequencies: int) -> np.ndarray:
+    '''
+    Computes the matrix A^T A for all desired time shifts of the basis waveforms in A, assuming that
+        the time shifts are shared among the observed data waveforms, and so there is no need to calculate
+        separate values for A^T A for each observed data waveform
+
+    Assumes that the basis waveforms are not shared along the batch dimension, and so there are batch
+        distinct sets of basis waveforms
+
+    :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
+            shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    :param valid_phase_shifts: integer array, shape (batch, n_canonical_waveforms, n_valid_phase_shifts)
+        Note that dim0 could be 1 in this case, corresponding to shared shifts
+    :param n_true_frequencies: int
+    :return: batched A^T A matrix, shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    '''
+
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies) ->
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_timepoints)
+    circular_corr_td = np.fft.irfft(ft_canonical[:, :, None, :] * np.conjugate(ft_canonical[:, None, :, :]),
+                                    n=n_true_frequencies,
+                                    axis=3)
+
+    # shape (n_canonical_waveforms, n_canonical_waveforms, n_timepoints), axis 2 corresponds to the shifted waveforms
+    # relative to axis 1 fixed waveforms
+    # (..., i,j,t)^{th} entry corresponds to cross correlation of i^{th} canonical waveform with j^{th} canonical waveform
+    #   that has been delayed by t samples
+    # This means that circular_conv_td is not symmetric for dims (1, 2)
+
+    # now we have to build the batched at_a matrix by grabbing the relevant pieces
+    # not so straightforward, since we care about relative timing instead of absolute timing
+
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_valid_phase_shifts)
+    # or shape (1, n_canonical_waveforms, n_canonical_waveforms, n_valid_phase_shifts)
+    relative_shifts = valid_phase_shifts[:, None, :, :] - valid_phase_shifts[:, :, None, :]
+
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_valid_phase_shifts)
+    taken_piece = np.take_along_axis(circular_corr_td, relative_shifts, axis=3)
+
+    # shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    at_a_matrix_np = taken_piece.transpose((0, 3, 1, 2))
+
+    return at_a_matrix_np
+
+
+def batched_build_at_b_vector(observed_ft: np.ndarray,
+                              ft_canonical: np.ndarray,
+                              valid_phase_shifts: np.ndarray,
+                              n_true_frequencies: int) -> np.ndarray:
+    '''
+    Computes the vector A^T b for all desired time shifts of the basis waveforms in A, assuming that
+        the time shifts are shared among the observed data waveforms, and so there is no need to calculate
+        separate values for A^T A for each observed data waveform
+
+    Assumes that the basis waveforms are not shared along the batch dimension, and so there are
+        batch sets of basis waveforms
+
+    :param observed_ft: shape (batch, n_observations, n_rfft_frequencies), complex-valued, RFFT coefficients
+        of the observations
+    :param ft_canonical: shape (batch, n_basis_waveforms, n_rfft_frequencies), complex-valued, RFFT coefficients
+        of the basis waveforms
+    :param valid_phase_shifts: integer array, shape (batch, n_basis_waveforms, n_valid_phase_shifts) corresponding
+        to the time shifts of the basis waveforms in A
+    :param n_true_frequencies: Number of real frequencies = number of timepoints, so that we can
+        compute the iRFFT without losing or gaining coefficients
+    :return:
+    '''
+    # shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies) ->
+    # shape (batch, n_observations, n_canonical_waveforms, n_timepoints)
+    data_circ_conv_td = np.fft.irfft(observed_ft[:, :, None, :] * np.conjugate(ft_canonical[:, None, :, :]),
+                                     n=n_true_frequencies,
+                                     axis=3)
+    # The (..., i,j,t)^{th} entry corresponds to cross correlation of the i^{th} data waveform with the j^{th} canonical
+    #   waveform that has been delayed by t samples
+
+    # we have to build A^T b from this matrix
+    # shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
+    at_b_perm = np.take_along_axis(data_circ_conv_td, valid_phase_shifts[:, None, :, :], axis=3)
+
+    # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    at_b_np = at_b_perm.transpose((0, 1, 3, 2))
+
+    return at_b_np
+
+
+def batched_build_unshared_at_a_matrix(ft_canonical: np.ndarray,
+                                       unshared_phase_shifts: np.ndarray,
+                                       n_true_frequencies: int) -> np.ndarray:
+    '''
+    Computes the matrix A^T A for all desired time shifts of the basis waveforms in A, assuming that
+        the time shifts are not shared among observed waveforms
+
+    Assumes that the basis waveforms are not shared along the batch dimension, and so there are batch
+        distinct sets of basis waveforms
+
+    :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
+            shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    :param unshared_phase_shifts: integer, shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
+    :param n_true_frequencies: integer, number of FFT frequencies = number of timepoints, so that we can compute
+        the iRFFT without adding or losing coefficients
+    :return: np.ndarray, shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+        last two dimensions are A^T A matrices
+    '''
+
+    batch, n_observations, n_canonical_waveforms, n_phase_shifts = unshared_phase_shifts.shape
+
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_rfft_freqs) ->
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_timepoints)
+    circular_corr_td = np.fft.irfft(ft_canonical[:, :, None, :] * np.conjugate(ft_canonical[:, None, :, :]),
+                                    n=n_true_frequencies,
+                                    axis=3)
+
+    # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    at_a_matrix_np = np.zeros((batch, n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms),
+                              dtype=np.float32)
+
+    for j in range(n_canonical_waveforms):
+        # shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
+        unshared_relative_shift = unshared_phase_shifts - unshared_phase_shifts[:, :, j, :][:, :, None, :]
+
+        # shape (batch, n_canonical_waveforms, n_phase_shifts, n_observations)
+        # -> shape (batch, n_canonical_waveforms, n_observations * n_phase_shifts)
+        unshared_relative_shift_flat = unshared_relative_shift.transpose(0, 2, 3, 1).reshape(
+            (batch, n_canonical_waveforms, -1))
+
+        # shape (batch, n_canonical_waveforms, n_observations * n_phase_shifts)
+        taken_piece_flat = np.take_along_axis(circular_corr_td[:, j, :, :], unshared_relative_shift_flat, axis=2)
+
+        # shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
+        taken_piece = taken_piece_flat.reshape(batch, n_canonical_waveforms, n_phase_shifts, n_observations).transpose(
+            0, 3, 1, 2)
+
+        # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+        at_a_matrix_np[:, :, :, :, j] = taken_piece.transpose((0, 1, 3, 2))
+
+    return at_a_matrix_np
+
+
+def batched_build_unshared_at_b_vector(observed_ft: np.ndarray,
+                                       ft_canonical: np.ndarray,
+                                       unshared_phase_shifts: np.ndarray,
+                                       n_true_frequencies: int) -> np.ndarray:
+    '''
+    Computes the matrix A^T b for all desired time shifts of the basis waveforms in A, assuming that
+        the time shifts are not shared among observed waveforms
+
+    Assumes that the basis waveforms are not shared along the batch dimension, and so there are batch
+        distinct sets of basis waveforms
+
+    :param observed_ft: observed waveforms in Fourier domain, complex valued,
+            shape (batch, n_observations, n_rfft_frequencies)
+    :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
+            shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    :param unshared_phase_shifts: integer,
+            shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
+    :param n_true_frequencies:
+    :return: np.ndarray, shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+    '''
+
+    # shape (batch, n_observations, n_canonical_waveforms, n_timepoints)
+    data_circ_conv_td = np.fft.irfft(observed_ft[:, :, None, :] * np.conjugate(ft_canonical[:, None, :, :]),
+                                     n=n_true_frequencies,
+                                     axis=3)
+
+    # The (i,j,t)^{th} entry corresponds to cross correlation of the i^{th} data waveform with the j^{th} canonical
+    #   waveform that has been delayed by t samples
+
+    # we have to build A^T b from this matrix
+    # shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
+    at_b_perm = np.take_along_axis(data_circ_conv_td, unshared_phase_shifts, axis=3)
+
+    # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+    at_b_np = at_b_perm.transpose((0, 1, 3, 2))
+
+    return at_b_np
+
+
+def batched_fast_time_shifts_and_amplitudes_unshared_shifts(
+        observed_ft: np.ndarray,
+        ft_canonical: np.ndarray,
+        unshared_phase_shifts: np.ndarray,
+        amplitude_matrix_real_np: np.ndarray,
+        n_true_frequencies: int,
+        max_iter: int,
+        device: torch.device,
+        converge_epsilon: float = 1e-2,  # FIXME
+        converge_step_cutoff: Optional[float] = None,
+        kill_problems: Optional[np.ndarray] = None,
+        l1_regularization_callable: Optional[
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
+        spatial_continuity_regularizer: Optional[
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    '''
+    Parallel implementation of the second step fine search, where for a collection of different optimization problems,
+        we consider a separate set of shifts for each problem (i.e. for problems A and B, the basis vectors may be
+        shifted different amounts for problem A and for problem B)
+
+    Termination logic (how do we know whether we are done?):
+
+        (1) If converge_step_cutoff is not specified, then we use the m strong-convexity / L-Lipschitz contininuous
+            property that we proved for least squares as the termination condition (this breaks down completely
+            and refuses to declare convergence when regularization is strong. In this case, if L is the largest
+            eigenvalue of A^T A and m is the smallest eigenvalue of A^T A, the upper bound on suboptimality of the
+            current solution is (L-m)/ 2m^2 |G_t|^2 , and we compare this value to converge_epsilon to determine whether
+            or not the problem has converged
+        (2) if converge_step_cutoff is specified, we compare the value of converge_step_cutoff to 1/2 |G_t|^2
+            and declare the problem solved if 1/2 |G_t|^2 < converge_step_cutoff
+
+    :param observed_ft: observed waveforms in Fourier domain, complex valued,
+            shape (batch, n_observations, n_rfft_frequencies)
+    :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
+            shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    :param unshared_phase_shifts: integer,
+            shape (batch, n_observations, n_canonical_waveforms, n_phase_shifts)
+    :param amplitude_matrix_real_np:
+            shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+    :param n_true_frequencies: int, number of full FFT frequencies (not rFFT frequencies)
+    :param max_iter: int, maximum number of iterations to run projected gradient descent
+    :param device:
+    :param l1_regularization_lambda: float, L1 regularization lambda
+    :param converge_epsilon: convergence criterion for projected gradient descent
+    :param kill_problems: Optional boolean np.ndarray, shape (batch, n_observations). If None or unused, don't use
+        this feature. Marks specified problems as irrelevant when checking for convergence. Useful if we're
+        using this function for a parallel solver where some of the problems are zero-padded nonsense
+    :return:
+    '''
+
+    batch, n_observations, n_rfft_frequencies = observed_ft.shape
+
+    # shape (batch, n_observations)
+    kill_problems_torch = torch.tensor(kill_problems, dtype=torch.bool,
+                                       device=device) if kill_problems is not None else None
+
+    ##### Generate the appropriate A^T A matrices and A^T b vectors ###########################################
+
+    # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    unshared_at_a_matrix_np = batched_build_unshared_at_a_matrix(ft_canonical, unshared_phase_shifts,
+                                                                 n_true_frequencies)
+    unshared_at_a_matrix = torch.tensor(unshared_at_a_matrix_np, dtype=torch.float32, device=device)
+
+    # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+    unshared_at_b_vector_np = batched_build_unshared_at_b_vector(observed_ft, ft_canonical,
+                                                                 unshared_phase_shifts, n_true_frequencies)
+    unshared_at_b_vector = torch.tensor(unshared_at_b_vector_np, dtype=torch.float32, device=device)
+
+    ##### Set up nonnegative orthant minimization problem ####################################################
+    # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+    eigenvalues_np, _ = np.linalg.eigh(unshared_at_a_matrix_np)
+
+    # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+    eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device) # FIXME check scaling
+
+    max_eigenvalue, _ = torch.max(eigenvalues, dim=-1)  # shape (batch, n_observations, n_phase_shifts)
+    min_eigenvalue, _ = torch.min(eigenvalues, dim=-1)  # shape (batch, n_observations, n_phase_shifts)
+
+    convergence_factor = 0.5 * (max_eigenvalue - min_eigenvalue)  # (batch, n_observations, n_phase_shifts)
+
+    # boundaries for the step size
+    # we have to have 0 < step_size <= 1/L where L is the largest eigenvalue
+    # we make step_size smaller to be safe
+    # the assumption here is that any additional regularization terms are not going to make
+    # the objective function more than 2L-strong convex
+    # This is a reasonable assumption because we don't expect the regularization to be that strong
+    # a component of the objective function, otherwise we would mostly be minimizing the regularizer
+    step_size = 1.0 / (2 * max_eigenvalue)  # has shape (batch, n_observations, n_phase_shifts)
+
+    ##### Step 4: do the projected gradient descent (no batching) ################################
+    ##### This function assumes that the batching is taken care of by the caller #################
+
+    # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+    amplitudes = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
+
+    # at_a_x has shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+
+    # shape (batch, n_observations, n_phase_shifts, n_canonical_waveforms, n_canonical_waveforms) @
+    #       (batch, n_observations, n_phase_shifts, n_canonical_waveforms, 1)
+    # -> (batch, n_observations, n_phase_shifts, n_canonical_waveforms, 1)
+    # -> (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+    at_a_x = (unshared_at_a_matrix @ amplitudes[:, :, :, :, None]).squeeze(-1)
+
+    # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    gradient = at_a_x - unshared_at_b_vector
+    if l1_regularization_callable is not None:
+        l1_regularize_grad_callable, _ = l1_regularization_callable
+        gradient += l1_regularize_grad_callable(amplitudes)
+
+    if spatial_continuity_regularizer is not None:
+        spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
+        gradient += spatial_continuity_grad_fn(amplitudes)
+
+    for step_num in range(max_iter):
+
+        # shape (batch, n_observations, n_canonical_waveforms)
+        next_amplitudes = torch.clamp(amplitudes - step_size[:, :, :, None] * gradient,
+                                      min=0.0)
+
+        # (batch, n_observations, n_phase_shifts, n_canonical_waveforms)
+        at_a_x = (unshared_at_a_matrix @ next_amplitudes[:, :, :, :, None]).squeeze(-1)
+
+        # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        gradient = at_a_x - unshared_at_b_vector
+        if l1_regularization_callable is not None:
+            l1_regularize_grad_callable, _ = l1_regularization_callable
+            gradient += l1_regularize_grad_callable(amplitudes)
+
+        if spatial_continuity_regularizer is not None:
+            spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
+            gradient += spatial_continuity_grad_fn(amplitudes)
+
+        step_distance = next_amplitudes - amplitudes
+        # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        # -> (batch, n_observations, n_valid_phase_shifts)
+        step_distance = torch.sum(step_distance * step_distance, dim=-1)
+        amplitudes = next_amplitudes
+
+        if converge_step_cutoff is None:
+            convergence_bound = convergence_factor * step_distance  # shape (batch, n_observations, n_valid_phase_shifts)
+        else:
+            convergence_bound = 0.5 * step_distance / (step_size * step_size)
+
+        if kill_problems_torch is not None:
+            # some of the problems are invalid, and we don't care if some
+            # of the invalid problems haven't yet converged
+            worst_bound_by_problem, _ = torch.max(convergence_bound, dim=-1)  # shape (batch, n_observations)
+            if converge_step_cutoff is None:
+                all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            else:
+                all_valid_converged = torch.all(((worst_bound_by_problem < converge_step_cutoff) | kill_problems_torch))
+
+            if all_valid_converged.item():
+                break
+        else:
+            # All of the subproblems are valid, so use the original
+            # termination condition where we stop when the last problem
+            # has converged reasonably
+            worst_bound = torch.max(convergence_bound).item()
+
+            if converge_step_cutoff is None:
+                if worst_bound < converge_epsilon:
+                    break
+            else:
+                if worst_bound < converge_step_cutoff:
+                    break
+
+    # now we have to calculate the objective values
+    xt_at_a_x = (amplitudes[:, :, :, None, :] @ at_a_x[:, :, :, :, None]).squeeze()
+    xt_at_b = (amplitudes[:, :, :, None, :] @ unshared_at_b_vector[:, :, :, :, None]).squeeze()
+
+    _, l1_loss_callable = l1_regularization_callable
+
+    # shape (n_observations, n_valid_phase_shifts)
+    l1_obj_penalties = l1_loss_callable(amplitudes)
+    partial_objective = 0.5 * xt_at_a_x - xt_at_b + l1_obj_penalties
+
+    if spatial_continuity_regularizer is not None:
+        _, spatial_continuity_penalty_fn = spatial_continuity_regularizer
+        partial_objective = partial_objective + spatial_continuity_penalty_fn(amplitudes)
+
+    return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
+
+
+def batched_fast_time_shifts_and_amplitudes_shared_shifts(
+        observed_ft: np.ndarray,
+        ft_canonical: np.ndarray,
+        valid_phase_shifts: np.ndarray,
+        amplitude_matrix_real_np: np.ndarray,
+        n_true_frequencies: int,
+        max_iter: int,
+        device: torch.device,
+        converge_epsilon: float = 1e-2,  # FIXME
+        converge_step_cutoff: Optional[float] = None,
+        kill_problems: Optional[np.ndarray] = None,
+        l1_regularization_callable: Optional[
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
+        spatial_continuity_regularizer: Optional[
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    '''
+    Iterative coarse-to-fine search helper function, for the case where each individual cell has
+        its own set of basis waveforms
+
+    For fixed phase shifts, as defined by valid_phase_shifts, solves the nonnegative orthant least squares
+        minimization problem with optional L1 regularization, and returns all solutions and objective fn values
+
+    Notation for the below function
+
+        objective fn is 1/2 |Ax-b|^2 = 1/2 (Ax-b)^T (Ax-b) = 1/2 x^T A^T A x - x^T A^T b - 1/2 b^T b
+        gradient is A^T A x - A^T b
+
+    Implementation notes:
+
+    (A^T A)_{i,j}^{(z)} corresponds to the cross-correlation of the i^{th} canonical waveform, delayed by
+        valid_phase_shifts[i,z] number of samples, with the j^{th} canonical waveform, delayed by
+        valid_phase_shifts[j,z] number of samples
+
+    Termination logic (how do we know whether we are done?):
+
+        (1) If converge_step_cutoff is not specified, then we use the m strong-convexity / L-Lipschitz contininuous
+            property that we proved for least squares as the termination condition (this breaks down completely
+            and refuses to declare convergence when regularization is strong. In this case, if L is the largest
+            eigenvalue of A^T A and m is the smallest eigenvalue of A^T A, the upper bound on suboptimality of the
+            current solution is (L-m)/ 2m^2 |G_t|^2 , and we compare this value to converge_epsilon to determine whether
+            or not the problem has converged
+        (2) if converge_step_cutoff is specified, we compare the value of converge_step_cutoff to 1/2 |G_t|^2
+            and declare the problem solved if 1/2 |G_t|^2 < converge_step_cutoff
+
+
+    :param observed_ft: observed waveforms in Fourier domain, complex valued,
+        shape (batch, n_observations, n_rfft_frequencies)
+
+        Note that some of the entries here correspond to padding and are therefore invalid
+    :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
+            shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    :param amplitude_matrix_real_np: shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+
+        Note that some of the entries here correspond to padding and are therefore invalid
+    :param valid_phase_shifts: integer array, shape (batch, n_canonical_waveforms, n_valid_phase_shifts)
+
+        Phase shifts can be shared between cells by broadcasting over dim0
+    :param n_true_frequencies: int
+    :param l1_regularization_lambda: float, L1 regularization lambda
+    :param normalization_scale_factor: Scale factor that was applied to the data waveforms, shape (n_observations, ).
+    :param kill_problems: Optional boolean np.ndarray, shape (batch, n_observations, ). If None or unused, don't use
+        this feature. Marks specified problems as irrelevant when checking for convergence. Useful if we're
+        using this function for a parallel solver where some of the problems are zero-padded nonsense
+    :return:
+    '''
+
+    batch, n_observations, n_rfft_frequencies = observed_ft.shape
+    _, n_canonical_waveforms, n_valid_phase_shifts = valid_phase_shifts.shape  # dim0 may be batch, or it may be 1
+
+    # shape (batch, n_observations), True if the underlying optimization problem is garbage, False if it is real
+    kill_problems_torch = torch.tensor(kill_problems, dtype=torch.bool,
+                                       device=device) if kill_problems is not None else None
+
+    #### Step 1: build A^T A from circular cross correlation #####################################
+
+    # shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    at_a_matrix_np = batched_build_at_a_matrix(ft_canonical, valid_phase_shifts, n_true_frequencies)
+
+    # shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    at_a_matrix = torch.tensor(at_a_matrix_np, dtype=torch.float32, device=device)
+
+    ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
+    # this one depends on absolute timing so it is much easier to pack
+    # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    at_b_np = batched_build_at_b_vector(observed_ft, ft_canonical, valid_phase_shifts, n_true_frequencies)
+
+    # shape (n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    at_b_torch = torch.tensor(at_b_np, dtype=torch.float32, device=device)
+
+    #### Step 3: set up projected gradient descent problem #######################################
+    # shape (batch, n_valid_phase_shifts, n_canonical_waveforms)
+    eigenvalues_np, _ = np.linalg.eigh(at_a_matrix_np)  # FIXME check scaling
+    # if it checks out
+    eigenvalues = torch.tensor(eigenvalues_np, dtype=torch.float32, device=device)
+
+    # eigenvalues has shape (batch, n_valid_phase_shifts, n_waveforms)
+    max_eigenvalue, _ = torch.max(eigenvalues, dim=2)  # shape (batch, n_valid_phase_shifts)
+    min_eigenvalue, _ = torch.min(eigenvalues, dim=2)  # shape (batch, n_valid_phase_shifts)
+
+    convergence_factor = 0.5 * (max_eigenvalue - min_eigenvalue)  # shape (batch, n_valid_phase_shifts)
+
+    # boundaries for the step size
+    # we have to have 0 < step_size <= 1/L where L is the largest eigenvalue
+    # we make step_size smaller to be safe
+    # the assumption here is that any additional regularization terms are not going to make
+    # the objective function more than 2L-strong convex
+    # This is a reasonable assumption because we don't expect the regularization to be that strong
+    # a component of the objective function, otherwise we would mostly be minimizing the regularizer
+    step_size = 1.0 / (2 * max_eigenvalue)  # has shape (batch, n_valid_phase_shifts)
+
+    ##### Step 4: do the projected gradient descent (no batching) ################################
+    ##### This function assumes that the batching is taken care of by the caller #################
+
+    # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    amplitudes = torch.tensor(amplitude_matrix_real_np, dtype=torch.float32, device=device)
+
+    # (batch, 1, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms) @ \
+    #       (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms, 1)
+    # -> (batch, n_observations, n_valid_phase_shfits, n_canonical_waveforms, 1)
+    # -> (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    at_a_x = (at_a_matrix[:, None, :, :, :] @ amplitudes[:, :, :, :, None]).squeeze(4)
+
+    # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    gradient = at_a_x - at_b_torch
+    if l1_regularization_callable is not None:
+        l1_regularize_grad_callable, _ = l1_regularization_callable
+        gradient += l1_regularize_grad_callable(amplitudes)
+
+    if spatial_continuity_regularizer is not None:
+        spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
+        gradient += spatial_continuity_grad_fn(amplitudes)
+
+    for step_num in range(max_iter):
+
+        # shape (batch, n_observations, n_canonical_waveforms)
+        next_amplitudes = torch.clamp(amplitudes - step_size[:, None, :, None] * gradient, min=0.0)
+
+        # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        at_a_x = (at_a_matrix[:, None, :, :, :] @ next_amplitudes[:, :, :, :, None]).squeeze(4)
+
+        # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        gradient = at_a_x - at_b_torch
+        if l1_regularization_callable is not None:
+            l1_regularize_grad_callable, _ = l1_regularization_callable
+            gradient += l1_regularize_grad_callable(amplitudes)
+
+        if spatial_continuity_regularizer is not None:
+            spatial_continuity_grad_fn, _ = spatial_continuity_regularizer
+            gradient += spatial_continuity_grad_fn(amplitudes)
+
+        step_distance = next_amplitudes - amplitudes
+        # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        step_distance = torch.sum(step_distance * step_distance, dim=3)  # shape (batch, n_observations, n_valid_phase_shifts)
+        amplitudes = next_amplitudes
+
+        if converge_step_cutoff is None:
+            convergence_bound = convergence_factor * step_distance  # shape (batch, n_observations, n_valid_phase_shifts)
+        else:
+            convergence_bound = 0.5 * step_distance
+
+        if kill_problems_torch is not None:
+            # some of the problems are invalid, and we don't care if some
+            # of the invalid problems haven't yet converged
+            worst_bound_by_problem, _ = torch.max(convergence_bound, dim=2)  # shape (batch, n_observations)
+            if converge_step_cutoff is None:
+                all_valid_converged = torch.all(((worst_bound_by_problem < converge_epsilon) | kill_problems_torch))
+            else:
+                all_valid_converged = torch.all(((worst_bound_by_problem < converge_step_cutoff) | kill_problems_torch))
+
+            if all_valid_converged.item():
+                break
+        else:
+            # All of the subproblems are valid, so use the original
+            # termination condition where we stop when the last problem
+            # has converged reasonably
+            worst_bound = torch.max(convergence_bound).item()
+            if converge_step_cutoff is None:
+                if worst_bound < converge_epsilon:
+                    break
+            else:
+                if worst_bound < converge_step_cutoff:
+                    break
+
+    # now we have to calculate the objective values
+    xt_at_a_x = (amplitudes[:, :, :, None, :] @ at_a_x[:, :, :, :, None]).squeeze()
+    xt_at_b = (amplitudes[:, :, :, None, :] @ at_b_torch[:, :, :, :, None]).squeeze()
+
+    partial_objective = 0.5 * xt_at_a_x - xt_at_b
+
+    _, l1_loss_callable = l1_regularization_callable
+
+    # shape (n_observations, n_valid_phase_shifts)
+    l1_obj_penalties = l1_loss_callable(amplitudes)
+    partial_objective = partial_objective + l1_obj_penalties
+
+    if spatial_continuity_regularizer is not None:
+        _, spatial_continuity_penalty_fn = spatial_continuity_regularizer
+        partial_objective = partial_objective + spatial_continuity_penalty_fn(amplitudes)
+
+    return amplitudes.cpu().numpy(), partial_objective.cpu().numpy()
+
+
+def batched_coarse_to_fine_time_shifts_and_amplitudes(
+        observed_ft: np.ndarray,
+        ft_canonical: np.ndarray,
+        n_true_frequencies,
+        valid_phase_shift_range: Tuple[int, int],
+        first_pass_step_size: int,
+        second_pass_best_n: int,
+        second_pass_width: int,
+        device: torch.device,
+        converge_epsilon: float = 1e-2,
+        converge_step_cutoff: Optional[float] = None,
+        kill_problems: Optional[np.ndarray] = None,
+        amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
+        max_batch_size: int = 1024,
+        cell_batch_size: int = 32,
+        l1_regularization_callable: Optional[
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
+        spatial_continuity_regularizer: Optional[
+            Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None) -> \
+        Tuple[np.ndarray, np.ndarray]:
+    '''
+    Coarse-to-fine joint fitting of amplitudes and time shifts. Algorithm has two distinct phases:
+
+    Phase (1): Perform a coarse grid search over all possible time shifts for each waveform, solving the nonnegative
+        least squares problem for each point on the grid, and taking the second_pass_best_n best grid points
+    Phase (2): For each of the second_pass_best_n best grid points, perform a fine search with width second_pass_width
+        centered on those best grid points
+
+    Returns the best amplitude, shift
+
+    :param observed_ft: observed waveforms in Fourier domain, complex valued,
+        shape (batch, n_observations, n_rfft_frequencies)
+        Potentially scaled
+    :param ft_canonical: canonical waveforms in Fourier domain, unshifted, complex valued,
+            shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    :param n_true_frequencies: int, number of actual (not rFFT) FFT frequencies
+    :param valid_phase_shift_range: range of sample shifts to consider
+    :param first_pass_step_size: int, step size for the first pass grid search
+    :param second_pass_best_n: int, algorithm expands upon the second_pass_best_n best results from the first pass grid
+        search to do the second pass grid search
+    :param second_pass_width: int, one-sided width around the second_pass_best_n best results from the first pass grid
+        search that the algorithm searches for the second pass
+    :param device: torch.device
+    :param converge_epsilon:
+    :param kill_problems: Optional boolean np.ndarray, shape (n_observations, ). If None or unused, don't use
+        this feature. Marks specified problems as irrelevant when checking for convergence. Useful if we're
+        using this function for a parallel solver where some of the problems are zero-padded nonsense
+    :param amplitude_initialize_range: range from which we uniformly at random initialize the amplitudes. Should have
+        no bearing on the result, but may affect convergence speed
+    :param max_batch_size: int, maximum batch size to solve at once
+    :return: amplitudes, shifts, each with shape (batch, n_observations, n_canonical_waveforms)
+    '''
+
+    batch, n_observations, _ = observed_ft.shape
+    _, n_canonical_waveforms, n_rfft_frequencies = ft_canonical.shape
+
+    ######### Step 1: first pass, perform nonnegative least squares minimization on a coarse ###############
+    ######## grid of phase shifts, then pick the N best ####################################################
+    low_shift, high_shift = valid_phase_shift_range
+    shift_steps = np.r_[low_shift:high_shift:first_pass_step_size]
+    mg = np.stack(np.meshgrid(*[shift_steps for _ in range(n_canonical_waveforms)]), axis=0)
+
+    # shape (n_canonical_waveforms, (high_shift - low_shift)^n_canonical_waveforms)
+    valid_phase_shifts_matrix = mg.reshape((n_canonical_waveforms, -1))
+
+    _, n_valid_phase_shifts = valid_phase_shifts_matrix.shape
+
+    amplitude_results = np.zeros((batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms),
+                                 dtype=np.float32)
+    objective_results = np.zeros((batch, n_observations, n_valid_phase_shifts), dtype=np.float32)
+
+    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False, desc='First pass grid search')
+    for low in range(0, n_valid_phase_shifts, max_batch_size):
+        high = min(n_valid_phase_shifts, low + max_batch_size)
+
+        amplitudes_random_init = np.random.uniform(amplitude_initialize_range[0],
+                                                   amplitude_initialize_range[1],
+                                                   size=(batch, n_observations, high - low, n_canonical_waveforms))
+
+        amplitude_batch, objective_batch = batched_fast_time_shifts_and_amplitudes_shared_shifts(
+            observed_ft,
+            ft_canonical,
+            valid_phase_shifts_matrix[None, :, low:high],
+            amplitudes_random_init,
+            n_true_frequencies,
+            10000,
+            device,
+            converge_epsilon=converge_epsilon,
+            converge_step_cutoff=converge_step_cutoff,
+            kill_problems=kill_problems,
+            l1_regularization_callable=l1_regularization_callable,
+            spatial_continuity_regularizer=spatial_continuity_regularizer
+        )
+        amplitude_results[:, :, low:high, :] = amplitude_batch
+        objective_results[:, :, low:high] = objective_batch
+        pbar.update(1)
+    pbar.close()
+
+    # pick the N best nodes to expand in detail
+    # shape (batch, n_observations, second_pass_best_n)
+    partition_idx = np.argpartition(objective_results, second_pass_best_n, axis=2)[:, :, :second_pass_best_n]
+
+    # shape (batch * n_observations * second_pass_best_n)
+    partition_idx_flat = partition_idx.reshape((-1))
+
+    # shape (n_canonical_waveforms, batch * n_observations * second_pass_best)
+    best_phases_flat = valid_phase_shifts_matrix[:, partition_idx_flat]
+
+    # shape (batch, n_observations, n_canonical_waveforms, second_pass_best_n)
+    best_phases = best_phases_flat.reshape(n_canonical_waveforms, batch, n_observations, second_pass_best_n).transpose(1, 2, 0, 3)
+
+    #### Do the fine search ###################################################
+
+    second_pass_fine_steps = np.r_[-second_pass_width:second_pass_width + 1]
+
+    # define n_fine_phases = (1 + 2 * second_pass_width)^n_canonical_waveforms
+    # shape (n_canonical_waveforms, n_fine_phases)
+    second_pass_mg = np.stack(np.meshgrid(*[second_pass_fine_steps for _ in range(n_canonical_waveforms)]), axis=0)
+    second_pass_mg_flat = second_pass_mg.reshape((second_pass_mg.shape[0], -1))
+
+    # shape (batch, n_observations, n_canonical_waveforms, 1, second_pass_best_n)
+    # + shape (1, 1, n_canonical_waveforms, n_fine_phases, 1)
+    # -> (batch, n_observations, n_canonical_waveforms, n_fine_phases, second_pass_best_n)
+    next_iter_phases = best_phases[:, :, :, None, :] + second_pass_mg_flat[None, None, :, :, None]
+
+    # shape (batch, n_observations, n_canonical_waveforms, second_pass_best_n * n_fine_phases)
+    next_iter_phases_flat = next_iter_phases.reshape((batch, n_observations, n_canonical_waveforms, -1))
+    n_second_pass_shifts = next_iter_phases_flat.shape[3]
+
+    amplitude_results = np.zeros((batch, n_observations, n_second_pass_shifts, n_canonical_waveforms),
+                                 dtype=np.float32)
+    objective_results = np.zeros((batch, n_observations, n_second_pass_shifts), dtype=np.float32)
+
+    pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)), leave=False, desc='Second pass fine search')
+    for low in range(0, n_second_pass_shifts, max_batch_size):
+        high = min(n_second_pass_shifts, low + max_batch_size)
+
+        amplitudes_random_init = np.random.uniform(amplitude_initialize_range[0],
+                                                   amplitude_initialize_range[1],
+                                                   size=(batch, n_observations, high - low, n_canonical_waveforms))
+
+        amplitude_batch, objective_batch = batched_fast_time_shifts_and_amplitudes_unshared_shifts(
+            observed_ft,
+            ft_canonical,
+            next_iter_phases_flat[:, :, :, low:high],
+            amplitudes_random_init,
+            n_true_frequencies,
+            10000,
+            device,
+            converge_epsilon=converge_epsilon,
+            converge_step_cutoff=converge_step_cutoff,
+            kill_problems=kill_problems,
+            l1_regularization_callable=l1_regularization_callable,
+            spatial_continuity_regularizer=spatial_continuity_regularizer
+        )
+        amplitude_results[:, :, low:high, :] = amplitude_batch
+        objective_results[:, :, low:high] = objective_batch
+        pbar.update(1)
+    pbar.close()
+
+    #### Now pick the best objective value for each observed waveform ########################
+    best_objective = np.argmin(objective_results, axis=2)  # shape (batch, n_observations)
+
+    best_amplitudes = np.take_along_axis(amplitude_results, best_objective[:, :, None, None], axis=2).squeeze(2)
+    best_shifts = np.take_along_axis(next_iter_phases_flat, best_objective[:, :, None, None], axis=3).squeeze(3)
+
+    return best_amplitudes, best_shifts

@@ -46,14 +46,16 @@ if __name__ == '__main__':
                                                   [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                                   mode='constant')
 
+    if padded_channels_sufficient_magnitude.shape[0] > 5000:
+        padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude[::5,:]
+
     padded_magnitude = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
     padded_channels_normed = padded_channels_sufficient_magnitude / padded_magnitude[:, None]
 
     aligned_data = shift_align_abs_peak(padded_channels_normed, args.alignment_sample)
-
     n_waveforms, n_timepoints = aligned_data.shape
 
-    u, s, vh = np.linalg.svd(aligned_data)
+    u, s, vh = np.linalg.svd(aligned_data, full_matrices=False)
     v = vh.T
 
     v_section = v[:, :n_pca_components]
@@ -80,8 +82,4 @@ if __name__ == '__main__':
             'thresh' : args.thresh
         }
         pickle.dump(pickle_dict, pfile)
-
-
-
-
 
