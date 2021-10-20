@@ -45,8 +45,9 @@ if __name__ == '__main__':
     padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
                                                   [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                                   mode='constant')
-    #padded_channels_sufficient_magnitude = ei_data_mat
-    padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude[::5,:]
+
+    if padded_channels_sufficient_magnitude.shape[0] > 5000:
+        padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude[::5,:]
 
     padded_magnitude = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
     padded_channels_normed = padded_channels_sufficient_magnitude / padded_magnitude[:, None]
@@ -81,8 +82,4 @@ if __name__ == '__main__':
             'thresh' : args.thresh
         }
         pickle.dump(pickle_dict, pfile)
-
-
-
-
 
