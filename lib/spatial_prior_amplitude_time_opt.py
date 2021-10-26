@@ -1,17 +1,14 @@
 import torch
-import torch.nn as nn
 
 import numpy as np
 
 import tqdm
 
-import electrode_map as el_map
-
 from typing import Dict, Tuple, List, Optional, Union, Callable, Any
 
-from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_cell, \
+from lib.util_fns import bspline_upsample_waveforms_padded_by_cell, \
     make_electrode_padded_ei_data_matrix, make_spatial_neighbors_mean_matrix, \
-    pack_by_cell_into_flat, unpack_flat_into_by_cell, \
+    pack_by_cell_into_flat, \
     pack_by_cell_amplitudes_and_phases_into_ei_shape, one_pad_disused_by_cell, \
     grab_above_threshold_electrodes_and_order, pack_full_by_cell_into_matrix_by_cell, \
     get_neighborhood_indices_from_adj_mat_dfs
@@ -19,8 +16,7 @@ from lib.util_fns import EIDecomposition, bspline_upsample_waveforms_padded_by_c
 from lib.ei_decomposition import select_l1_regularizer_callable
 
 from lib.losseval import by_cell_evaluate_loss, evaluate_mse_by_cell
-from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes, \
-    make_by_cell_weighted_l1_regularizer, make_unweighted_l1_regularizer
+from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and_amplitudes
 from lib.frequency_domain_optimization import fourier_complex_least_squares_optimize_waveforms3
 
 
@@ -598,8 +594,10 @@ def spatial_cont_time_optimization(eis_by_cell_id: Dict[int, np.ndarray],
                                    use_basis_weighted_l1_norm: bool = False,
                                    basis_weights_for_l1: Optional[np.ndarray] = None,
                                    output_debug_dict: bool = False) \
-        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float]],
-                 Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
+        -> Union[
+            Tuple[Dict[int, Dict[str, np.ndarray]], np.ndarray, Dict[str, float]],
+            Tuple[Dict[int, Dict[str, np.ndarray]], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]
+        ]:
     '''
     Main optimization loop for the two-step optimization process, with spatial continuity regularization.
         Optimization steps are

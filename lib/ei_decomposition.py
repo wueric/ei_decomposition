@@ -13,7 +13,7 @@ from lib.joint_amplitude_time_optimization import coarse_to_fine_time_shifts_and
     make_component_l1_weighted_regularizer
 from lib.template_matching import greedy_template_match_time_shift, torch_fit_integer_shifts_all_but_one_template_match
 from lib.util_fns import bspline_upsample_waveforms, generate_fourier_phase_shift_matrices, \
-    EIDecomposition, pack_significant_electrodes_into_matrix, unpack_amplitudes_and_phases_into_ei_shape
+    pack_significant_electrodes_into_matrix, unpack_amplitudes_and_phases_into_ei_shape
 from lib.losseval import evaluate_mse_flat, flat_pack_evaluate_loss
 
 
@@ -654,8 +654,10 @@ def two_step_decompose_cells_by_fitted_compartments(eis_by_cell_id: Dict[int, np
                                                     use_basis_weighted_l1_norm: bool = False,
                                                     basis_weights_for_l1: Optional[np.ndarray] = None,
                                                     output_debug_dict: bool = False) \
-        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float]],
-                 Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
+        -> Union[
+            Tuple[Dict[int, Dict[str, np.ndarray]], np.ndarray, Dict[str, float]],
+            Tuple[Dict[int, Dict[str, np.ndarray]], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]
+        ]:
     # check the inputs for correctness
     # must either specify the number of basis waveforms, or specify initial basis waveforms outright
     if n_basis_vectors is None and initialized_basis_vectors is None:
@@ -743,8 +745,10 @@ def decompose_cells_by_fitted_compartment(eis_by_cell_id: Dict[int, np.ndarray],
                                           l1_regularize_lambda: Optional[float] = None,
                                           sobolev_regularize_lambda: Optional[float] = None,
                                           output_debug_dict: bool = False) \
-        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, float],
-                 Tuple[Dict[int, EIDecomposition], np.ndarray, float, Dict[str, np.ndarray]]]:
+        -> Union[
+            Tuple[Dict[int, Dict[str, np.ndarray]], np.ndarray, float],
+            Tuple[Dict[int, Dict[str, np.ndarray]], np.ndarray, float, Dict[str, np.ndarray]]
+        ]:
     '''
 
     :param eis_by_cell_id:
@@ -852,8 +856,10 @@ def decompose_cells_amplitudes_only(eis_by_cell_id: Dict[int, np.ndarray],
                                     use_basis_weighted_l1_norm: bool = False,
                                     basis_weights_for_l1: Optional[np.ndarray] = None,
                                     output_debug_dict: bool = False) \
-        -> Union[Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float]],
-                 Tuple[Dict[int, EIDecomposition], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]]:
+        -> Union[
+            Tuple[Dict[int, Dict[str, np.ndarray]], np.ndarray, Dict[str, float]],
+            Tuple[Dict[int, Dict[str, np.ndarray]], np.ndarray, Dict[str, float], Dict[str, np.ndarray]]
+        ]:
     temp_cell_order = list(eis_by_cell_id.keys())
 
     ei_data_mat, matrix_indices_by_cell_id = pack_significant_electrodes_into_matrix(eis_by_cell_id,

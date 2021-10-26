@@ -5,8 +5,8 @@ from typing import List, Dict, Tuple, Optional, Union, Callable
 
 import tqdm
 
-from lib.util_fns import bspline_upsample_waveforms, \
-    UnsharedBasisEIDecomposition, auto_prebatch_pack_significant_electrodes, auto_unbatch_unpack_significant_electrodes
+from lib.util_fns import bspline_upsample_waveforms, auto_prebatch_pack_significant_electrodes, \
+    auto_unbatch_unpack_significant_electrodes
 from lib.batch_joint_amplitude_time_opt import batched_coarse_to_fine_time_shifts_and_amplitudes, \
     make_batched_group_l2_l1_weighted_regularizer, make_batched_component_l1_unweighted_regularizer, \
     make_batched_component_l1_weighted_regularizer, make_batched_group_l2_l1_unweighted_regularizer, \
@@ -102,7 +102,7 @@ def batched_shifted_fourier_nmf_iterative_optimization3(raw_waveform_data_matrix
                                                         use_basis_weighted_l1_norm: bool = False,
                                                         basis_weights_for_l1: Optional[np.ndarray] = None,
                                                         l1_regularization_lambda: Optional[float] = None,
-                                                        sobolev_lambda : Optional[float] = None) \
+                                                        sobolev_lambda: Optional[float] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     '''
     Batched version of the main iteration loop for the two-step (as opposed to three-step) optimization process.
@@ -293,10 +293,11 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
         grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
         use_basis_weighted_l1_norm: bool = False,
         basis_weights_for_l1: Optional[np.ndarray] = None,
-        sobolev_reg: Optional[float] = None,
-        output_debug_dict: bool = False) \
+        sobolev_reg: Optional[float] = None) \
         -> Union[
-            Tuple[Dict[int, UnsharedBasisEIDecomposition], Dict[str, float]], Dict[int, UnsharedBasisEIDecomposition]]:
+            Tuple[Dict[int, Dict[str, np.ndarray]], Dict[str, float]],
+            Dict[int, Dict[str, np.ndarray]]
+        ]:
     '''
 
     :param eis_by_cell_id: Dict mapping cell id to raw EIs. Each EI must have shape (n_electrodes, n_timepoints)
@@ -381,7 +382,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments(
         )
 
         wip_decomp_list.append((amplitudes, delays, waveforms))
-        batch_pbar.update(1) 
+        batch_pbar.update(1)
 
     batch_pbar.close()
 
