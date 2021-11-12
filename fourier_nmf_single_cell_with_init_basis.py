@@ -74,7 +74,6 @@ if __name__ == '__main__':
         compute_device,
         maxiter_decomp=args.maxiter,
         l1_regularize_lambda=args.weight_reg,
-        output_debug_dict=False,
         shifts=shift_tuple,
         supersample_factor=upsample_factor,
         snr_abs_threshold=snr_thresh,
