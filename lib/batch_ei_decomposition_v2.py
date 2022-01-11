@@ -14,8 +14,8 @@ import tqdm
 
 
 class RegularizationType(Enum):
-    L1_SPARSE_REG = 0
-    L12_GROUP_SPARSE_REG = 1
+    L1_SPARSE_REG = 1
+    L12_GROUP_SPARSE_REG = 2
 
 
 class SharedShiftSolver(Protocol):
@@ -395,7 +395,7 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
         return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
 
 
-class UnsharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver):
+class UnsharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -553,7 +553,7 @@ class UnsharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShift
         return amplitudes_copy.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
 
 
-class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver):
+class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
