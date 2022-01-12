@@ -3,7 +3,8 @@ import torch.nn as nn
 
 import numpy as np
 
-from lib.optim.proxgrad_optim import BatchedMultiProxProblem
+from lib.optim.proxgrad_optim import BatchedMultiProxProblem, AutogradBatchMultiProxProblem, \
+    ManualGradBatchMultiProxProblem
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector
 
@@ -37,7 +38,7 @@ class BatchedShiftSolver:
         raise NotImplementedError
 
 
-class SharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
+class SharedShiftsNonNegL1ProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -106,7 +107,7 @@ class SharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShiftSo
                     dtype=torch.float32),
                 requires_grad=True
             )
-            
+
     def compute_fixed_step_size(self) -> torch.Tensor:
 
         with torch.no_grad():
@@ -152,7 +153,7 @@ class SharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShiftSo
 
     def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         return self.compute_mse_loss(*args, **kwargs)
-    
+
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
         '''
 
@@ -937,7 +938,6 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
                                       init_high=init_high).to(
         device)  # type: Union[BatchedMultiProxProblem, SharedShiftSolver, BatchedShiftSolver]
 
-
     #### Step 3: set up projected gradient descent problem #######################################
     step_size_torch = solver.compute_fixed_step_size()
     _ = solver.fixed_step_size_prox_solve(step_size_torch,
@@ -946,7 +946,7 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
 
     del step_size_torch
 
-    #_ = solver.fista_prox_solve(1.0, max_iter, converge_epsilon,
+    # _ = solver.fista_prox_solve(1.0, max_iter, converge_epsilon,
     #                            0.5)  # FIXME get the solver parameters from somewhere
 
     # shape (batch, n_electrodes, n_phase_shifts, n_basis)
@@ -1156,7 +1156,8 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
                                  dtype=np.float32)
     objective_results = np.zeros((batch, n_electrodes, n_valid_phase_shifts), dtype=np.float32)
 
-    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False, desc='First pass grid search')
+    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False,
+                     desc='First pass grid search')
     for low in range(0, n_valid_phase_shifts, max_batch_size):
         high = min(n_valid_phase_shifts, low + max_batch_size)
 
@@ -1220,7 +1221,8 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
                                  dtype=np.float32)
     objective_results = np.zeros((batch, n_electrodes, n_second_pass_shifts), dtype=np.float32)
 
-    pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)), leave=False, desc='Second pass fine search')
+    pbar = tqdm.tqdm(total=int(np.ceil(n_second_pass_shifts / max_batch_size)), leave=False,
+                     desc='Second pass fine search')
     for low in range(0, n_second_pass_shifts, max_batch_size):
         high = min(n_second_pass_shifts, low + max_batch_size)
 

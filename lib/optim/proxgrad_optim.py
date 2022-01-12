@@ -1,3 +1,5 @@
+from abc import ABC
+
 import numpy as np
 
 import torch
@@ -322,36 +324,7 @@ class MultiProxProblem(nn.Module):
             return self._smooth_loss(*stepped_variables, **kwargs)
 
 
-def _batched_multiproblem_flatten_variables(variable_list: Iterable[torch.Tensor],
-                                            batch_size: int,
-                                            n_problems: int) -> torch.Tensor:
-    '''
-    Assumes that every variable has the same size for dim0, where dim0 corresponds to
-        the number of convex problems
-
-    This is so that we can flatten and then concatenate along the resulting dim1
-
-    :param variable_list:
-    :return:
-    '''
-
-    acc_list = [x.reshape(batch_size, n_problems, -1) for x in variable_list]
-    return torch.cat(acc_list, dim=1)
-
-
-def _batched_multiproblem_unflatten_variables(flat_variables: torch.Tensor,
-                                              shape_sequence: Iterable[Tuple[int, ...]]) -> List[torch.Tensor]:
-    return_sequence = []
-    offset = 0
-    for tup_seq in shape_sequence:
-        sizeof = functools.reduce(lambda x, y: x * y, tup_seq)
-        return_sequence.append(flat_variables[offset:offset + sizeof].reshape(tup_seq))
-        offset += sizeof
-
-    return return_sequence
-
-
-class BatchedMultiProxProblem(nn.Module):
+class BatchedMultiProxProblem(nn.Module, ABC):
 
     def __init__(self,
                  batch_size: int,
@@ -381,22 +354,40 @@ class BatchedMultiProxProblem(nn.Module):
             assert x.shape[0] == self.batch_size and x.shape[1] == self.n_problems, \
                 f"dim0 of each variable must be {self.batch_size}, dim1 of each variable must be {self.n_problems}"
 
+    def _batched_multiproblem_flatten_variables(self,
+                                                variable_list: Iterable[torch.Tensor]) \
+            -> torch.Tensor:
+        '''
+
+        :param variable_list:
+        :return:
+        '''
+        return torch.cat([x.reshape(self.batch_size, self.n_problems, -1)
+                          for x in variable_list], dim=1)
+
+    def _batched_multiproblem_unflatten_variables(self,
+                                                  flat_variables: torch.Tensor) \
+            -> List[torch.Tensor]:
+
+        return_sequence = []
+        offset = 0
+        shape_sequence = [x.shape for x in self.parameters(recurse=False)]
+        for tup_seq in shape_sequence:
+            sizeof = functools.reduce(lambda x, y: x * y, tup_seq)
+            return_sequence.append(flat_variables[offset:offset + sizeof].reshape(tup_seq))
+            offset += sizeof
+
+        return return_sequence
+
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
         raise NotImplementedError
 
     def _packed_prox_proj(self, packed_variables: torch.Tensor, **kwargs) -> torch.Tensor:
 
         with torch.no_grad():
-            unpacked_variables = _batched_multiproblem_unflatten_variables(
-                packed_variables,
-                [x.shape for x in self.parameters(recurse=False)]
-            )
-
+            unpacked_variables = self._batched_multiproblem_unflatten_variables(packed_variables)
             prox_projected_unpacked = self._prox_proj(*unpacked_variables, **kwargs)
-
-            return _batched_multiproblem_flatten_variables(prox_projected_unpacked,
-                                                           self.batch_size,
-                                                           self.n_problems)
+            return self._batched_multiproblem_flatten_variables(prox_projected_unpacked)
 
     def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError
@@ -409,64 +400,17 @@ class BatchedMultiProxProblem(nn.Module):
         :return: shape (batch, n_problems)
         '''
 
-        unpacked_variables = _batched_multiproblem_unflatten_variables(
-            packed_variables,
-            [x.shape for x in self.parameters(recurse=False)]
-        )
-
+        unpacked_variables = self._batched_multiproblem_unflatten_variables(packed_variables)
         return self._smooth_loss(*unpacked_variables, **kwargs)
     
     def _packed_gradients_only(self, packed_variables: torch.Tensor, **kwargs) \
             -> torch.Tensor:
-        '''
-        Computes the gradient only. Useful for fixed step size projected gradient
-            descent, since in that case we never need the objective function until
-            the end
-            
-        Default implementation using autograd; if actually using fixed step size projected
-            gradient descent, override this method for better performance
-            
-        :param packed_variables: 
-        :param kwargs: 
-        :return: 
-        '''
-
-        packed_variables.requires_grad_(True)
-        if packed_variables.grad is not None:
-            packed_variables.grad.zero_()
-
-        # shape (batch, n_problems)
-        loss_tensor = self._packed_eval_smooth_loss(packed_variables, **kwargs)
-
-        gradients_output, = autograd.grad(torch.sum(loss_tensor),
-                                          packed_variables)
-
-        return gradients_output
+        raise NotImplementedError
 
     def _packed_loss_and_gradients(self, packed_variables: torch.Tensor, **kwargs) \
             -> Tuple[torch.Tensor, torch.Tensor]:
-        '''
-        Default implementation using autograd
 
-        Obviously subclasses can implement this method outright without
-            using autograd, which may be faster
-
-        :param packed_variables: shape (batch, n_problems, ?)
-        :param kwargs:
-        :return: shape (batch, n_problems) and (batch, n_problems, ?)
-        '''
-
-        packed_variables.requires_grad_(True)
-        if packed_variables.grad is not None:
-            packed_variables.grad.zero_()
-
-        # shape (batch, n_problems)
-        loss_tensor = self._packed_eval_smooth_loss(packed_variables, **kwargs)
-
-        gradients_output, = autograd.grad(torch.sum(loss_tensor),
-                                          packed_variables)
-
-        return loss_tensor, gradients_output
+        raise NotImplementedError
 
     def assign_optimization_vars(self, *cloned_parameters) -> None:
         for param, assign_val in zip(self.parameters(recurse=False),
@@ -490,9 +434,7 @@ class BatchedMultiProxProblem(nn.Module):
         :return:
         '''
 
-        vars_iter = _batched_multiproblem_flatten_variables(self.parameters(recurse=False),
-                                                            self.batch_size,
-                                                            self.n_problems).detach().clone()
+        vars_iter = self._batched_multiproblem_flatten_variables(self.parameters(recurse=False)).detach().clone()
 
         for iter in range(max_iter):
 
@@ -515,11 +457,7 @@ class BatchedMultiProxProblem(nn.Module):
                     break
 
         with torch.no_grad():
-            stepped_variables = _batched_multiproblem_unflatten_variables(
-                vars_iter,
-                [x.shape for x in self.parameters(recurse=False)]
-            )
-
+            stepped_variables = self._batched_multiproblem_unflatten_variables(vars_iter)
             return self._smooth_loss(*stepped_variables, **kwargs)
 
     def _projected_backtracking_search(self,
@@ -587,12 +525,13 @@ class BatchedMultiProxProblem(nn.Module):
 
             # we only care about the above for the valid problems
             if self.has_invalid_problems:
-                approx_smaller_loss = (approx_smaller_loss & (~self.valid_problems))
+                approx_smaller_loss = (approx_smaller_loss & self.valid_problems)
 
             while torch.any(approx_smaller_loss):
 
                 # shape (batch, n_problems)
-                step_size = step_size * (backtracking_beta * approx_smaller_loss.float())
+                update_multiplier = approx_smaller_loss.float() * backtracking_beta + (~approx_smaller_loss).float() * 1.0
+                step_size = step_size * update_multiplier
 
                 # shape (batch, n_problems, ?)
                 stepped_vars_vectorized = s_vars_vectorized - gradients_vectorized * step_size[:, :, None]
@@ -608,7 +547,7 @@ class BatchedMultiProxProblem(nn.Module):
 
                 approx_smaller_loss = quad_approx_val < stepped_loss
                 if self.has_invalid_problems:
-                    approx_smaller_loss = (approx_smaller_loss & (~self.valid_problems))
+                    approx_smaller_loss = (approx_smaller_loss & self.valid_problems)
 
             return projected_stepped_vars, step_size
 
@@ -636,9 +575,7 @@ class BatchedMultiProxProblem(nn.Module):
         '''
 
         # shape (batch, n_problems, ?)
-        vars_iter = _batched_multiproblem_flatten_variables(self.parameters(recurse=False),
-                                                            self.batch_size,
-                                                            self.n_problems).detach().clone()
+        vars_iter = self._batched_multiproblem_flatten_variables(self.parameters(recurse=False)).detach().clone()
         vars_iter_min1 = vars_iter.detach().clone()
 
         # shape (batch, n_problems)
@@ -686,9 +623,132 @@ class BatchedMultiProxProblem(nn.Module):
                 break
 
         with torch.no_grad():
-            stepped_variables = _batched_multiproblem_unflatten_variables(vars_iter,
-                                                                          [x.shape for x in
-                                                                           self.parameters(recurse=False)])
+            stepped_variables = self._batched_multiproblem_unflatten_variables(vars_iter)
             self.assign_optimization_vars(*stepped_variables)
-
             return self._smooth_loss(*stepped_variables, **kwargs)
+
+
+class AutogradBatchMultiProxProblem(BatchedMultiProxProblem, ABC):
+
+    def __init__(self,
+                 batch_size: int,
+                 n_problems: int,
+                 valid_problems: Optional[Union[np.ndarray, torch.Tensor]] = None,
+                 verbose: bool = True):
+
+        super().__init__(batch_size,
+                         n_problems,
+                         valid_problems=valid_problems,
+                         verbose=verbose)
+
+    def _packed_gradients_only(self, packed_variables: torch.Tensor, **kwargs) \
+            -> torch.Tensor:
+        '''
+        Computes the gradient only. Used for fixed step size projected gradient
+            descent, since in that case we never need the objective function until
+            the end
+
+        Automatic implementation using autograd
+
+        Useful for more complicated objective functions where manually computing
+            the gradient is annoying
+
+        :param packed_variables:
+        :param kwargs:
+        :return:
+        '''
+
+        packed_variables.requires_grad_(True)
+        if packed_variables.grad is not None:
+            packed_variables.grad.zero_()
+
+        # shape (batch, n_problems)
+        loss_tensor = self._packed_eval_smooth_loss(packed_variables, **kwargs)
+
+        gradients_output, = autograd.grad(torch.sum(loss_tensor),
+                                          packed_variables)
+
+        return gradients_output
+
+    def _packed_loss_and_gradients(self, packed_variables: torch.Tensor, **kwargs) \
+            -> Tuple[torch.Tensor, torch.Tensor]:
+        '''
+        Default implementation using autograd
+
+        Obviously subclasses can implement this method outright without
+            using autograd, which may be faster
+
+        :param packed_variables: shape (batch, n_problems, ?)
+        :param kwargs:
+        :return: shape (batch, n_problems) and (batch, n_problems, ?)
+        '''
+
+        packed_variables.requires_grad_(True)
+        if packed_variables.grad is not None:
+            packed_variables.grad.zero_()
+
+        # shape (batch, n_problems)
+        loss_tensor = self._packed_eval_smooth_loss(packed_variables, **kwargs)
+
+        gradients_output, = autograd.grad(torch.sum(loss_tensor),
+                                          packed_variables)
+
+        return loss_tensor, gradients_output
+
+
+class ManualGradBatchMultiProxProblem(BatchedMultiProxProblem, ABC):
+
+    def __init__(self,
+                 batch_size: int,
+                 n_problems: int,
+                 valid_problems: Optional[Union[np.ndarray, torch.Tensor]] = None,
+                 verbose: bool = True):
+
+        super().__init__(batch_size,
+                         n_problems,
+                         valid_problems=valid_problems,
+                         verbose=verbose)
+
+    def _manual_gradients(self, *args, **kwargs) \
+            -> Tuple[torch.Tensor, ...]:
+        '''
+        Manually computes the gradients, bypassing the autograd
+
+        This is really only useable for simple objective functions,
+            or for applications where the user is optimizing for
+            straight-line speed or GPU memory consumption
+
+        :param args:
+        :param kwargs:
+        :return:
+        '''
+        raise NotImplementedError
+
+    def _packed_gradients_only(self, packed_variables: torch.Tensor, **kwargs) \
+            -> torch.Tensor:
+        '''
+        Implementation does not require autograd
+
+        :param packed_variables:
+        :param kwargs:
+        :return:
+        '''
+
+        with torch.no_grad():
+            unpacked_variables = self._batched_multiproblem_unflatten_variables(packed_variables)
+            prox_projected_unpacked = self._manual_gradients(*unpacked_variables, **kwargs)
+            return self._batched_multiproblem_flatten_variables(prox_projected_unpacked)
+
+    def _packed_loss_and_gradients(self, packed_variables: torch.Tensor, **kwargs) \
+            -> Tuple[torch.Tensor, torch.Tensor]:
+        '''
+        Implementation does not require autograd
+        :param packed_variables:
+        :param kwargs:
+        :return:
+        '''
+
+        with torch.no_grad():
+            packed_gradients = self._packed_gradients_only(packed_variables, **kwargs)
+            packed_loss = self._packed_eval_smooth_loss(packed_variables, **kwargs)
+            return packed_loss, packed_gradients
