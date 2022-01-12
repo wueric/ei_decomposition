@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.autograd as autograd
 
 from typing import Tuple, Iterable, List, Union, Optional
-
 import functools
 
 
@@ -111,7 +110,7 @@ class MultiProxProblem(nn.Module):
     def assign_optimization_vars(self, *cloned_parameters) -> None:
         for param, assign_val in zip(self.parameters(recurse=False),
                                      cloned_parameters):
-            param.data[:] = assign_val
+            param.data[:] = assign_val.data[:]
 
     def fixed_step_size_prox_solve(self,
                                    step_size: torch.Tensor,
@@ -219,7 +218,7 @@ class MultiProxProblem(nn.Module):
             stepped_vars_vectorized = s_vars_vectorized - gradients_vectorized * step_size[:, None]
 
             # shape (n_problems, ?)
-            projected_stepped_vars = self._packed_prox_project_variables(stepped_vars_vectorized)
+            projected_stepped_vars = self._packed_prox_proj(stepped_vars_vectorized)
 
             # shape (n_problems, )
             quad_approx_val = eval_quadratic_approximation(projected_stepped_vars, s_vars_vectorized, step_size)
@@ -236,7 +235,7 @@ class MultiProxProblem(nn.Module):
                 stepped_vars_vectorized = s_vars_vectorized - gradients_vectorized * step_size[:, None]
 
                 # shape (n_problems, ?)
-                projected_stepped_vars = self._packed_prox_project_variables(stepped_vars_vectorized)
+                projected_stepped_vars = self._packed_prox_proj(stepped_vars_vectorized)
 
                 # shape (n_problems, )
                 quad_approx_val = eval_quadratic_approximation(projected_stepped_vars, s_vars_vectorized, step_size)
@@ -416,6 +415,33 @@ class BatchedMultiProxProblem(nn.Module):
         )
 
         return self._smooth_loss(*unpacked_variables, **kwargs)
+    
+    def _packed_gradients_only(self, packed_variables: torch.Tensor, **kwargs) \
+            -> torch.Tensor:
+        '''
+        Computes the gradient only. Useful for fixed step size projected gradient
+            descent, since in that case we never need the objective function until
+            the end
+            
+        Default implementation using autograd; if actually using fixed step size projected
+            gradient descent, override this method for better performance
+            
+        :param packed_variables: 
+        :param kwargs: 
+        :return: 
+        '''
+
+        packed_variables.requires_grad_(True)
+        if packed_variables.grad is not None:
+            packed_variables.grad.zero_()
+
+        # shape (batch, n_problems)
+        loss_tensor = self._packed_eval_smooth_loss(packed_variables, **kwargs)
+
+        gradients_output, = autograd.grad(torch.sum(loss_tensor),
+                                          packed_variables)
+
+        return gradients_output
 
     def _packed_loss_and_gradients(self, packed_variables: torch.Tensor, **kwargs) \
             -> Tuple[torch.Tensor, torch.Tensor]:
@@ -437,16 +463,7 @@ class BatchedMultiProxProblem(nn.Module):
         # shape (batch, n_problems)
         loss_tensor = self._packed_eval_smooth_loss(packed_variables, **kwargs)
 
-        # we have to do a bit of reshaping magic to deal compute the gradients
-        # with torch.split
-        # shape (batch * n_problems, )
-        flat_loss_tensor = loss_tensor.reshape(-1)
-
-        # (batch * n_problems)-tuple of 1x1 tensors, each tensor corresponds to the
-        # loss for a specific problem
-        split_loss_tup = torch.split(flat_loss_tensor, 1, dim=0)
-
-        gradients_output, = autograd.grad(split_loss_tup,
+        gradients_output, = autograd.grad(torch.sum(loss_tensor),
                                           packed_variables)
 
         return loss_tensor, gradients_output
@@ -454,7 +471,7 @@ class BatchedMultiProxProblem(nn.Module):
     def assign_optimization_vars(self, *cloned_parameters) -> None:
         for param, assign_val in zip(self.parameters(recurse=False),
                                      cloned_parameters):
-            param.data[:] = assign_val
+            param.data[:] = assign_val.data[:]
 
     def fixed_step_size_prox_solve(self,
                                    step_size: torch.Tensor,
@@ -480,7 +497,7 @@ class BatchedMultiProxProblem(nn.Module):
         for iter in range(max_iter):
 
             # shape (batch, n_problems) and (n_problems, ?)
-            loss, gradient = self._packed_loss_and_gradients(vars_iter, **kwargs)
+            gradient = self._packed_gradients_only(vars_iter, **kwargs)
 
             with torch.no_grad():
                 update_unproj = vars_iter - step_size[:, :, None] * gradient
@@ -581,7 +598,7 @@ class BatchedMultiProxProblem(nn.Module):
                 stepped_vars_vectorized = s_vars_vectorized - gradients_vectorized * step_size[:, :, None]
 
                 # shape (batch, n_problems, ?)
-                projected_stepped_vars = self._packed_prox_project_variables(stepped_vars_vectorized)
+                projected_stepped_vars = self._packed_prox_proj(stepped_vars_vectorized)
 
                 # shape (batch, n_problems, )
                 quad_approx_val = eval_quadratic_approximation(projected_stepped_vars, s_vars_vectorized, step_size)
