@@ -151,14 +151,21 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batche
         mse_loss_component = (0.5 * xt_at_a_x - xt_at_b).reshape(self.batch_size, -1)
         return mse_loss_component
 
-    def _packed_loss_and_gradients(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _packed_loss_and_gradients(self, packed_variables: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        '''
+
+        :param packed_variables: shape (batch, n_electrodes * n_phase_shifts, n_basis + n_groups)
+        :param kwargs:
+        :return:
+        '''
 
         with torch.no_grad():
             # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
             amplitudes = args[self.AMPLITUDES_IDX_ARGS]
 
             # shape (batch_size, n_electrodes, n_phase_shifts, n_basis)
-            amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
+            amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts,
+                                                   self.n_basis)
 
             # (batch, 1, n_valid_phase_shifts, n_basis, n_basis) @
             #       (batch, n_electrodes, n_phase_shifts, n_basis, 1)
@@ -188,7 +195,8 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batche
             amplitudes = args[self.AMPLITUDES_IDX_ARGS]
 
             # shape (batch_size, n_electrodes, n_phase_shifts, n_basis)
-            amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
+            amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts,
+                                                   self.n_basis)
 
             # (batch, 1, n_valid_phase_shifts, n_basis, n_basis) @
             #       (batch, n_electrodes, n_phase_shifts, n_basis, 1)
@@ -200,7 +208,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batche
 
             gradient_flat = gradient_unflat.reshape(self.batch_size, -1, self.n_basis)
 
-            return (gradient_flat, )
+            return (gradient_flat,)
 
     def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         return self.compute_mse_loss(*args, **kwargs)
@@ -236,7 +244,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batche
         return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
 
 
-class SharedShiftsGroupSparseProxGradSolver(ManualGradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
+class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -374,13 +382,7 @@ class SharedShiftsGroupSparseProxGradSolver(ManualGradBatchMultiProxProblem, Bat
         total_loss = mse_loss_component + self.l12_lambda * torch.sum(norms, dim=2)
 
         return total_loss
-    
-    def _manual_gradients(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
 
-        with torch.no_grad():
-            
-            pass
-        
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
         '''
 
@@ -614,7 +616,7 @@ class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batc
 
             gradient_flat = gradient_unflat.reshape(self.batch_size, -1, self.n_basis)
 
-            return (gradient_flat, )
+            return (gradient_flat,)
 
     def _packed_loss_and_gradients(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
 
@@ -680,7 +682,8 @@ class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batc
         return amplitudes_copy.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
 
 
-class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
+class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
+
     '''
     Variable order convention (in order of registration)
 
@@ -792,9 +795,6 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
         # shape (batch_size, n_electrodes * n_shifts, n_basis)
         amplitudes = args[self.AMPLITUDES_IDX_ARGS]
 
-        # shape (batch, n_electrodes * n_shifts, n_groups)
-        norms = args[self.NORMS_IDX_ARGS]
-
         # shape (batch, n_electrodes, n_shifts, n_basis)
         amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
 
@@ -899,7 +899,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
 
     def compute_loss_for_argmin(self, **kwargs) -> torch.Tensor:
 
-        mse_loss_unshape = self.compute_mse_loss(self.parameters(recurse=False), **kwargs)
+        mse_loss_unshape = self.compute_mse_loss(*self.parameters(recurse=False), **kwargs)
 
         mse_loss = mse_loss_unshape.reshape(self.batch_size, self.n_electrodes, self.n_shifts)
 
@@ -912,7 +912,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
         # shape (batch_size, n_electrodes * phase_shifts)
         group_sparse_norm = torch.sum(torch.norm(grouped_components, p=2, dim=3), 2)
 
-        group_sparse_penalty = group_sparse_norm.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts)
+        group_sparse_penalty = group_sparse_norm.reshape(self.batch_size, self.n_electrodes, self.n_shifts)
 
         return mse_loss + self.l12_lambda * group_sparse_penalty
 
@@ -1206,7 +1206,7 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
         group_sel_matrix: Optional[np.ndarray] = None,
         converge_epsilon: float = 1e-2,
         valid_problems: Optional[np.ndarray] = None,
-        amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
+        amplitude_initialize_range: Tuple[float, float] = (0.0, 1.0),
         max_batch_size: int = 1024,
         verbose_solver: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     '''
