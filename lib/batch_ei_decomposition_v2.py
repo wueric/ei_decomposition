@@ -16,7 +16,8 @@ import tqdm
 
 class RegularizationType(Enum):
     L1_SPARSE_REG = 1
-    L12_GROUP_SPARSE_REG = 2
+    L12_GROUP_SPARSE_REG_CONSTRAINED = 2
+    L12_GROUP_SPARSE_REG_SMOOTH = 3
 
 
 class SharedShiftSolver:
@@ -38,7 +39,9 @@ class BatchedShiftSolver:
         raise NotImplementedError
 
 
-class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
+class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem,
+                                         BatchedShiftSolver,
+                                         SharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -161,7 +164,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batche
 
         with torch.no_grad():
             # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
-            amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+            amplitudes = packed_variables # there's only 1 variable
 
             # shape (batch_size, n_electrodes, n_phase_shifts, n_basis)
             amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts,
@@ -238,6 +241,179 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batche
                                                                                        self.n_phase_shifts)
 
             return mse_component + self.l1_lambda * regularization_term
+
+    def return_amplitudes(self) -> torch.Tensor:
+        amplitudes_clone = self.amplitudes.detach().clone()
+        return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
+
+
+class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxProblem,
+                                                         BatchedShiftSolver,
+                                                         SharedShiftSolver):
+    '''
+    Variable order convention (in order of registration)
+
+    0. amplitudes, shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
+    1. norms, shape (batch, n_electrodes * n_phase_shifts, n_basis)
+    '''
+
+    AMPLITUDES_IDX_ARGS = 0
+
+    def __init__(self,
+                 batched_shared_at_a_matrix: np.ndarray,
+                 at_b_vector: np.ndarray,
+                 valid_problem_mask: np.ndarray,
+                 l12_lambda: float,
+                 l12_group_sel_matrix: np.ndarray,
+                 amplitudes_matrix_init: Optional[np.ndarray] = None,
+                 verbose: bool = True,
+                 init_low: float = -1e-1,
+                 init_high: float = 1e-1):
+        '''
+        Conventions for the variables in this subclass
+
+        (1) dim 0 batch dimension - different cells
+        (2) dim 1 problem dimension - we combine the electrodes and phase shifts
+            (this requires some reshapes to compute the loss function)
+
+        :param batched_shared_at_a_matrix: np.ndarray, A^T A matrix for each problem
+            shape (batch, n_valid_phase_shifts, n_basis_waveforms, n_basis_waveforms)
+        :param at_b_vector: np.ndarray, A^T b vector for each problem
+            shape (batch, n_electrodes, n_valid_phaseshifts, n_basis_waveforms)
+
+            n_electrodes aka n_observations in the naming convention
+        :param valid_problem_mask: np.ndarray, shape (batch, n_electrodes)
+        :param l12_lambda:
+        :param l12_group_sel_matrix: np.ndarray group assignments for the problem
+            every problem is assumed to have the same groups
+
+            value is 1 for membership in group, 0 for no membership in group
+
+            shape (n_groups, n_basis_waveforms)
+
+        :param amplitudes_matrix_init: np.ndarray, initial guesses for the amplitudes if available
+            shape (batch, n_electrodes, n_phase_shifts, n_basis)
+        :param verbose:
+        '''
+
+        temp_batch, n_electrodes, n_phase_shifts, n_basis = at_b_vector.shape
+        valid_problem_total = np.zeros((temp_batch, n_electrodes, n_phase_shifts), dtype=bool)
+        valid_problem_total[valid_problem_mask, :] = True
+
+        super().__init__(temp_batch,
+                         n_electrodes * n_phase_shifts,
+                         valid_problems=valid_problem_total.reshape((temp_batch, -1)),
+                         verbose=verbose)
+
+        self.n_electrodes, self.n_phase_shifts, self.n_basis = n_electrodes, n_phase_shifts, n_basis
+        self.n_groups = l12_group_sel_matrix.shape[0]
+
+        self.l12_lambda = l12_lambda
+
+        # shape (batch, n_valid_phase_shifts, n_basis, n_basis)
+        self.register_buffer('at_a_matrix', torch.tensor(batched_shared_at_a_matrix, dtype=torch.float32))
+
+        # shape (batch, n_electrodes, n_valid_phase_shifts, n_basis)
+        self.register_buffer('at_b_vector', torch.tensor(at_b_vector, dtype=torch.float32))
+
+        # shape (n_groups, n_basis)
+        self.register_buffer('group_sel', torch.tensor(l12_group_sel_matrix, dtype=torch.float32))
+
+        # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
+        if amplitudes_matrix_init is None:
+            self.amplitudes = nn.Parameter(
+                torch.empty((temp_batch, self.n_electrodes * self.n_phase_shifts, self.n_basis)))
+            nn.init.uniform_(self.amplitudes, a=init_low, b=init_high)
+        else:
+            self.amplitudes = nn.Parameter(
+                torch.tensor(
+                    amplitudes_matrix_init.reshape(temp_batch, self.n_electrodes * self.n_phase_shifts, self.n_basis),
+                    dtype=torch.float32),
+                requires_grad=True
+            )
+
+        self.check_variables()
+
+    def compute_mse_loss(self, *args, **kwargs) -> torch.Tensor:
+
+        # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
+        amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+
+        # shape (batch_size, n_electrodes, n_phase_shifts, n_basis)
+        amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
+
+        # (batch, 1, n_valid_phase_shifts, n_basis, n_basis) @
+        #       (batch, n_electrodes, n_phase_shifts, n_basis, 1)
+        # -> (batch, n_electrodes, n_phase_shifts, n_basis, 1)
+        # -> (batch, n_electrodes, n_phase_shifts, n_basis)
+        at_a_x = (self.at_a_matrix[:, None, :, :, :] @ amplitudes_unflat[:, :, :, :, None]).squeeze(-1)
+
+        # shape (batch, n_electrodes, n_phase_shifts)
+        xt_at_a_x = torch.sum(amplitudes_unflat * at_a_x, dim=3)
+
+        # shape (batch, n_electrodes, n_phase_shifts)
+        xt_at_b = torch.sum(self.at_b_vector * amplitudes_unflat, dim=3)
+
+        # shape (batch, n_electrodes, n_phase_shifts)
+        # -> (batch, n_electrodes * n_phase_shifts)
+        mse_loss_component = (0.5 * xt_at_a_x - xt_at_b).reshape(self.batch_size, -1)
+
+        return mse_loss_component
+
+    def compute_group_sparse_term(self, *args, **kwargs) -> torch.Tensor:
+
+        # (batch_size, n_electrodes * n_phase_shifts, n_basis)
+        amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+
+        # (batch_size, n_electrodes * n_phase_shifts, 1, n_basis) *
+        #   (1, 1, n_groups, n_basis)
+        # -> (batch_size, n_electrodes * n_phase_shifts, n_groups, n_basis)
+        grouped_components = amplitudes[:, :, None, :] * self.group_sel[None, None, :, :]
+
+        # shape (batch_size, n_electrodes * phase_shifts)
+        group_sparse_norm = torch.sum(torch.norm(grouped_components, p=2, dim=3), 2)
+
+        # shape (batch_size, n_electrodes * phase_shifts)
+        return self.l12_lambda * group_sparse_norm
+
+    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+        '''
+
+        :param args:
+        :param kwargs:
+        :return: shape (batch, n_electrodes * n_phase_shifts), one value for each problem,
+            doesn't matter if the problem is valid or not
+        '''
+
+        # -> (batch, n_electrodes * n_phase_shifts)
+        mse_loss_component = self.compute_mse_loss(*args, **kwargs)
+
+        # -> (batch, n_electrodes * n_phase_shifts)
+        group_sparse_component = self.compute_group_sparse_term(*args, **kwargs)
+
+        # -> (batch, n_electrodes * n_phase_shifts)
+        return group_sparse_component + mse_loss_component
+
+    def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
+        '''
+
+        :param args:
+        :param kwargs:
+        :return:
+        '''
+
+        with torch.no_grad():
+            # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
+            amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+            return (torch.clamp_min_(amplitudes, 0.0),)
+
+    def compute_loss_for_argmin(self, **kwargs) -> torch.Tensor:
+        with torch.no_grad():
+            loss_unshape = self._smooth_loss(*self.parameters(recurse=False), **kwargs)
+
+            total_loss = loss_unshape.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts)
+
+            return total_loss
 
     def return_amplitudes(self) -> torch.Tensor:
         amplitudes_clone = self.amplitudes.detach().clone()
@@ -682,6 +858,192 @@ class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batc
         return amplitudes_copy.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
 
 
+class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxProblem,
+                                                           BatchedShiftSolver,
+                                                           UnsharedShiftSolver):
+
+    AMPLITUDES_IDX_ARGS = 0
+
+    def __init__(self,
+                 batched_unshared_at_a_matrix: np.ndarray,
+                 batched_unshared_at_b_vector: np.ndarray,
+                 valid_problem_mask: np.ndarray,
+                 l12_lambda: float,
+                 l12_group_sel_matrix: np.ndarray,
+                 amplitudes_matrix_init: Optional[np.ndarray] = None,
+                 verbose: bool = True,
+                 init_low: float = -1e-1,
+                 init_high: float = 1e-1):
+
+        '''
+        Conventions for the variables in this subclass
+
+            (1) dim 0 batch dimension - different cells
+            (2) dim 1 problem dimension - we combine the electrodes and phase shifts
+                (this requires some reshapes to compute the loss function)
+
+        :param batched_unshared_at_a_matrix: A^T A matrix for each problem, where each
+                electrode may have different shifts for the basis vectors
+
+            shape (batch, n_electrodes, n_phase_shifts, n_basis, n_basis)
+
+        :param batched_unshared_at_b_vector: A^T b vector for each problem, where each
+                electrode may have different shifts for the basis vectors
+
+            shape (batch, n_electrodes, n_phase_shifts, n_basis)
+
+        :param valid_problem_mask: shape (batch, n_electrodes)
+            1-valued if the corresponding problem is valid, 0 if the corresponding problem
+                is not valid and should be ignored
+        :param l12_lambda:
+        :param l12_group_sel_matrix: np.ndarray group assignments for the problem
+            every problem is assumed to have the same groups
+
+            value is 1 for membership in group, 0 for no membership in group
+
+            shape (n_groups, n_basis_waveforms)
+        :param amplitudes_matrix_init: np.ndarray, initial guesses for the amplitudes if available
+            shape (batch, n_electrodes, n_phase_shifts, n_basis)
+        :param verbose:
+        :param init_low:
+        :param init_high:
+        '''
+
+        batch, n_electrodes, n_shifts, n_basis = batched_unshared_at_b_vector.shape
+        valid_problem_total = np.zeros((batch, n_electrodes, n_shifts), dtype=bool)
+        valid_problem_total[valid_problem_mask, :] = True
+
+        super().__init__(batch, n_electrodes * n_shifts,
+                         valid_problems=valid_problem_total.reshape(batch, -1),
+                         verbose=verbose)
+
+        self.n_electrodes, self.n_shifts, self.n_basis = n_electrodes, n_shifts, n_basis
+        self.n_groups = l12_group_sel_matrix.shape[0]
+
+        self.l12_lambda = l12_lambda
+
+        # shape (batch, n_electrodes, n_phase_shifts, n_basis, n_basis)
+        self.register_buffer('at_a_matrix', torch.tensor(batched_unshared_at_a_matrix, dtype=torch.float32))
+
+        # shape (batch, n_electrodes, n_phase_shifts, n_basis)
+        self.register_buffer('at_b_matrix', torch.tensor(batched_unshared_at_b_vector, dtype=torch.float32))
+
+        # shape (n_groups, n_basis)
+        self.register_buffer('group_sel', torch.tensor(l12_group_sel_matrix, dtype=torch.float32))
+
+        if amplitudes_matrix_init is None:
+            self.amplitudes = nn.Parameter(
+                torch.empty((batch, self.n_electrodes * self.n_shifts, self.n_basis)),
+                requires_grad=True
+            )
+            nn.init.uniform_(self.amplitudes, a=init_low, b=init_high)
+
+        else:
+            self.amplitudes = nn.Parameter(
+                torch.tensor(
+                    amplitudes_matrix_init.reshape(batch, self.n_electrodes * self.n_shifts, n_basis),
+                    dtype=torch.float32),
+                requires_grad=True
+            )
+
+    def compute_mse_loss(self, *args, **kwargs) -> torch.Tensor:
+        '''
+
+        :param args:
+        :param kwargs:
+        :return: shape (batch, n_electrodes * n_shifts)
+        '''
+
+        # shape (batch_size, n_electrodes * n_shifts, n_basis)
+        amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+
+        # shape (batch, n_electrodes, n_shifts, n_basis)
+        amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
+
+        # (batch, n_electrodes, n_shifts, n_basis, n_basis) @
+        #   (batch, n_electrodes, n_shifts, n_basis, 1)
+        # -> (batch, n_electrodes, n_shifts, n_basis, 1)
+        # -> (batch, n_electrodes, n_shifts, n_basis)
+        at_a_x_unshared = (self.at_a_matrix @ amplitudes_unflat[:, :, :, :, None]).squeeze(4)
+
+        # shape (batch, n_electrodes, n_shifts)
+        xt_at_a_x = torch.sum(amplitudes_unflat * at_a_x_unshared, dim=3)
+
+        # shape (batch, n_electrodes, n_shifts)
+        xt_at_b = torch.sum(amplitudes_unflat * self.at_b_matrix, dim=3)
+
+        # shape (batch, n_electrodes, n_shifts)
+        mse_loss_contrib = 0.5 * xt_at_a_x - xt_at_b
+
+        # shape (batch, n_electrodes * n_shifts)
+        return mse_loss_contrib.reshape(self.batch_size, -1)
+
+    def compute_group_sparse_term(self, *args, **kwargs) -> torch.Tensor:
+
+        # now we need to compute the group norms
+        # (batch_size, n_electrodes * n_phase_shifts, 1, n_basis) *
+        #   (1, 1, n_groups, n_basis)
+        # -> (batch_size, n_electrodes * n_phase_shifts, n_groups, n_basis)
+        amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+        grouped_components = amplitudes[:, :, None, :] * self.group_sel[None, None, :, :]
+
+        # shape (batch_size, n_electrodes * phase_shifts)
+        group_sparse_norm = torch.sum(torch.norm(grouped_components, p=2, dim=3), 2)
+
+        # shape (batch_size, n_electrodes * phase_shifts)
+        return self.l12_lambda * group_sparse_norm
+
+    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+        '''
+
+        :param args:
+        :param kwargs:
+        :return:
+        '''
+
+        # shape (batch, n_electrodes * n_shifts, n_groups)
+        norms = args[self.NORMS_IDX_ARGS]
+
+        # shape (batch, n_electrodes * n_shifts)
+        mse_loss_contrib = self.compute_mse_loss(*args, **kwargs)
+
+        # shape (batch, n_electrodes * n_shifts)
+        group_sparse_term= self.compute_group_sparse_term(*args, **kwargs)
+
+        # shape (batch, n_electrodes * n_shifts)
+        total_loss = mse_loss_contrib + group_sparse_term
+
+        return total_loss
+
+    def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
+        '''
+
+        :param args:
+        :param kwargs:
+        :return:
+        '''
+
+        with torch.no_grad():
+            # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
+            amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+            return (torch.clamp_min_(amplitudes, 0.0),)
+
+    def compute_loss_for_argmin(self, **kwargs) -> torch.Tensor:
+
+        mse_loss_unshape = self.compute_mse_loss(*self.parameters(recurse=False), **kwargs)
+        group_sparse_unshape = self.compute_group_sparse_term(*self.parameters(recurse=False), **kwargs)
+
+        total_loss_unshape = mse_loss_unshape + group_sparse_unshape
+
+        total_loss = total_loss_unshape.reshape(self.batch_size, self.n_electrodes, self.n_shifts)
+
+        return total_loss
+
+    def return_amplitudes(self) -> torch.Tensor:
+        amplitudes_copy = self.amplitudes.detach().clone()
+        return amplitudes_copy.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
+
+
 class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
 
     '''
@@ -827,10 +1189,10 @@ class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Bat
         # shape (batch, n_electrodes * n_shifts, n_groups)
         norms = args[self.NORMS_IDX_ARGS]
 
-        # shape (batch, n_electrodes, n_shifts)
+        # shape (batch, n_electrodes * n_shifts)
         mse_loss_contrib = self.compute_mse_loss(*args, **kwargs)
 
-        # shape (batch, n_electrodes, n_shifts)
+        # shape (batch, n_electrodes * n_shifts)
         total_loss = mse_loss_contrib + self.l12_lambda * torch.sum(norms, dim=2)
 
         return total_loss
@@ -874,7 +1236,6 @@ class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Bat
 
             # now apply the clips
             # note that we need to project each group differently
-            # FIXME
             # (batch_size, n_electrodes * n_phase_shifts, n_groups, 1) *
             #   (batch_size, n_electrodes * n_phase_shifts, n_groups, n_basis)
             # -> (batch_size, n_electrodes * n_phase_shifts, n_groups, n_basis)
@@ -945,11 +1306,27 @@ def make_shared_shift_solver(regularization_type: RegularizationType,
             init_high=init_high
         )
 
-    elif regularization_type == RegularizationType.L12_GROUP_SPARSE_REG:
+    elif regularization_type == RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED:
         if group_sel_matrix is None:
             raise ValueError(f"group_sel_matrix cannot be none if specifying L12 group sparsity")
 
         return SharedShiftsGroupSparseProxGradSolver(
+            batch_shared_at_a_matrix,
+            batch_at_b_vector,
+            valid_problem_mask,
+            reg_lambda,
+            group_sel_matrix,
+            amplitudes_matrix_init=amplitudes_matrix_init,
+            verbose=verbose,
+            init_low=init_low,
+            init_high=init_high
+        )
+
+    elif regularization_type == RegularizationType.L12_GROUP_SPARSE_REG_SMOOTH:
+        if group_sel_matrix is None:
+            raise ValueError(f"group_sel_matrix cannot be none if specifying L12 group sparsity")
+
+        return SharedShiftsNonNegOrthantGroupSparseProxGradSolver(
             batch_shared_at_a_matrix,
             batch_at_b_vector,
             valid_problem_mask,
@@ -1090,11 +1467,27 @@ def make_unshared_shifts_solver(
             init_high=init_high
         )
 
-    elif regularization_type == RegularizationType.L12_GROUP_SPARSE_REG:
+    elif regularization_type == RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED:
         if group_sel_matrix is None:
             raise ValueError(f"group_sel_matrix cannot be None")
 
         return UnsharedShiftsGroupSparseProxGradSolver(
+            batch_unshared_at_a_matrix,
+            batch_at_b_vector,
+            valid_problem_mask,
+            reg_lambda,
+            group_sel_matrix,
+            amplitudes_matrix_init=amplitudes_matrix_init,
+            verbose=verbose,
+            init_low=init_low,
+            init_high=init_high
+        )
+
+    elif regularization_type == RegularizationType.L12_GROUP_SPARSE_REG_SMOOTH:
+        if group_sel_matrix is None:
+            raise ValueError(f"group_sel_matrix cannot be None")
+
+        return UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(
             batch_unshared_at_a_matrix,
             batch_at_b_vector,
             valid_problem_mask,
