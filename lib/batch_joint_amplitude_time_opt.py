@@ -816,7 +816,7 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts(
         amplitudes = next_amplitudes
 
         if converge_step_cutoff is None:
-            convergence_bound = convergence_factor * step_distance  # shape (batch, n_observations, n_valid_phase_shifts)
+            convergence_bound = convergence_factor[:, None, :] * step_distance  # shape (batch, n_observations, n_valid_phase_shifts)
         else:
             convergence_bound = 0.5 * step_distance
 

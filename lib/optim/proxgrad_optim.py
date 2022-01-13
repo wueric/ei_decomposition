@@ -363,7 +363,7 @@ class BatchedMultiProxProblem(nn.Module, ABC):
         :return:
         '''
         return torch.cat([x.reshape(self.batch_size, self.n_problems, -1)
-                          for x in variable_list], dim=1)
+                          for x in variable_list], dim=2)
 
     def _batched_multiproblem_unflatten_variables(self,
                                                   flat_variables: torch.Tensor) \
@@ -373,8 +373,8 @@ class BatchedMultiProxProblem(nn.Module, ABC):
         offset = 0
         shape_sequence = [x.shape for x in self.parameters(recurse=False)]
         for tup_seq in shape_sequence:
-            sizeof = functools.reduce(lambda x, y: x * y, tup_seq)
-            return_sequence.append(flat_variables[offset:offset + sizeof].reshape(tup_seq))
+            sizeof = tup_seq[-1]
+            return_sequence.append(flat_variables[:, :, offset:offset + sizeof].reshape(tup_seq))
             offset += sizeof
 
         return return_sequence
@@ -402,7 +402,7 @@ class BatchedMultiProxProblem(nn.Module, ABC):
 
         unpacked_variables = self._batched_multiproblem_unflatten_variables(packed_variables)
         return self._smooth_loss(*unpacked_variables, **kwargs)
-    
+
     def _packed_gradients_only(self, packed_variables: torch.Tensor, **kwargs) \
             -> torch.Tensor:
         raise NotImplementedError
@@ -451,7 +451,7 @@ class BatchedMultiProxProblem(nn.Module, ABC):
 
                 # but we don't necessarily care about all of the problems
                 if self.has_invalid_problems:
-                    has_converged = (self.valid_problems & has_converged)
+                    has_converged = (~self.valid_problems) | has_converged
 
                 if torch.all(has_converged):
                     break
@@ -524,10 +524,10 @@ class BatchedMultiProxProblem(nn.Module, ABC):
             approx_smaller_loss = quad_approx_val < stepped_loss
 
             # we only care about the above for the valid problems
-            if self.has_invalid_problems:
-                approx_smaller_loss = (approx_smaller_loss & self.valid_problems)
+            cannot_terminate = (approx_smaller_loss & self.valid_problems) \
+                if self.has_invalid_problems else approx_smaller_loss
 
-            while torch.any(approx_smaller_loss):
+            while torch.any(cannot_terminate):
 
                 # shape (batch, n_problems)
                 update_multiplier = approx_smaller_loss.float() * backtracking_beta + (~approx_smaller_loss).float() * 1.0
@@ -546,8 +546,9 @@ class BatchedMultiProxProblem(nn.Module, ABC):
                 stepped_loss = self._packed_eval_smooth_loss(projected_stepped_vars, **kwargs)
 
                 approx_smaller_loss = quad_approx_val < stepped_loss
-                if self.has_invalid_problems:
-                    approx_smaller_loss = (approx_smaller_loss & self.valid_problems)
+
+                cannot_terminate = (approx_smaller_loss & self.valid_problems) \
+                    if self.has_invalid_problems else approx_smaller_loss
 
             return projected_stepped_vars, step_size
 
@@ -611,11 +612,17 @@ class BatchedMultiProxProblem(nn.Module, ABC):
             )
 
             if self.verbose:
-                print(f"iter={iter}, mean loss={torch.mean(current_loss).item()}", end='')
+                with torch.no_grad():
+                    if self.has_invalid_problems:
+                        to_include_in_mean = torch.sum(current_loss * self.valid_problems)
+                        current_mean = to_include_in_mean / torch.sum(self.valid_problems)
+                    else:
+                        current_mean = torch.mean_current_loss
+                    print(f"iter={iter}, mean loss={current_mean.item()}")
 
             # quit early if all of the problems converged
             # make sure that we only judge the valid problems
-            has_converged = (torch.norm(vars_iter - vars_iter_min1)) < converge_epsilon
+            has_converged = torch.norm(gradient_flattened) < converge_epsilon
             if self.has_invalid_problems:
                 has_converged = has_converged | (~self.valid_problems)
 
@@ -742,6 +749,10 @@ class ManualGradBatchMultiProxProblem(BatchedMultiProxProblem, ABC):
     def _packed_loss_and_gradients(self, packed_variables: torch.Tensor, **kwargs) \
             -> Tuple[torch.Tensor, torch.Tensor]:
         '''
+        Default implementation; it may be more efficient to override this
+            if there is substantial overlap between the gradient calculation
+            and the loss calculation.
+
         Implementation does not require autograd
         :param packed_variables:
         :param kwargs:

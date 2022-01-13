@@ -38,7 +38,7 @@ class BatchedShiftSolver:
         raise NotImplementedError
 
 
-class SharedShiftsNonNegL1ProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
+class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -151,6 +151,57 @@ class SharedShiftsNonNegL1ProxGradSolver(AutogradBatchMultiProxProblem, BatchedS
         mse_loss_component = (0.5 * xt_at_a_x - xt_at_b).reshape(self.batch_size, -1)
         return mse_loss_component
 
+    def _packed_loss_and_gradients(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        with torch.no_grad():
+            # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
+            amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+
+            # shape (batch_size, n_electrodes, n_phase_shifts, n_basis)
+            amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
+
+            # (batch, 1, n_valid_phase_shifts, n_basis, n_basis) @
+            #       (batch, n_electrodes, n_phase_shifts, n_basis, 1)
+            # -> (batch, n_electrodes, n_phase_shifts, n_basis, 1)
+            # -> (batch, n_electrodes, n_phase_shifts, n_basis)
+            at_a_x = (self.at_a_matrix[:, None, :, :, :] @ amplitudes_unflat[:, :, :, :, None]).squeeze(-1)
+
+            gradient_unflat = at_a_x - self.at_b_vector
+            gradient_flat = gradient_unflat.reshape(self.batch_size, -1, self.n_basis)
+
+            # shape (batch, n_electrodes, n_phase_shifts)
+            xt_at_a_x = torch.sum(amplitudes_unflat * at_a_x, dim=3)
+
+            # shape (batch, n_electrodes, n_phase_shifts)
+            xt_at_b = torch.sum(self.at_b_vector * amplitudes_unflat, dim=3)
+
+            # shape (batch, n_electrodes, n_phase_shifts)
+            # -> (batch, n_electrodes * n_phase_shifts)
+            mse_loss_component = (0.5 * xt_at_a_x - xt_at_b).reshape(self.batch_size, -1)
+
+            return mse_loss_component, gradient_flat
+
+    def _manual_gradients(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
+
+        with torch.no_grad():
+            # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
+            amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+
+            # shape (batch_size, n_electrodes, n_phase_shifts, n_basis)
+            amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
+
+            # (batch, 1, n_valid_phase_shifts, n_basis, n_basis) @
+            #       (batch, n_electrodes, n_phase_shifts, n_basis, 1)
+            # -> (batch, n_electrodes, n_phase_shifts, n_basis, 1)
+            # -> (batch, n_electrodes, n_phase_shifts, n_basis)
+            at_a_x = (self.at_a_matrix[:, None, :, :, :] @ amplitudes_unflat[:, :, :, :, None]).squeeze(-1)
+
+            gradient_unflat = at_a_x - self.at_b_vector
+
+            gradient_flat = gradient_unflat.reshape(self.batch_size, -1, self.n_basis)
+
+            return (gradient_flat, )
+
     def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         return self.compute_mse_loss(*args, **kwargs)
 
@@ -185,7 +236,7 @@ class SharedShiftsNonNegL1ProxGradSolver(AutogradBatchMultiProxProblem, BatchedS
         return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
 
 
-class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
+class SharedShiftsGroupSparseProxGradSolver(ManualGradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -254,7 +305,7 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
         self.register_buffer('at_b_vector', torch.tensor(at_b_vector, dtype=torch.float32))
 
         # shape (n_groups, n_basis)
-        self.register_buffer('group_sel', torch.tensor(l12_group_sel_matrix), dtype=torch.float32)
+        self.register_buffer('group_sel', torch.tensor(l12_group_sel_matrix, dtype=torch.float32))
 
         # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
         if amplitudes_matrix_init is None:
@@ -276,6 +327,8 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
             requires_grad=True
         )
         nn.init.uniform_(self.norms, a=init_low, b=init_high)
+
+        self.check_variables()
 
     def compute_mse_loss(self, *args, **kwargs) -> torch.Tensor:
 
@@ -321,7 +374,13 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
         total_loss = mse_loss_component + self.l12_lambda * torch.sum(norms, dim=2)
 
         return total_loss
+    
+    def _manual_gradients(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
 
+        with torch.no_grad():
+            
+            pass
+        
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
         '''
 
@@ -407,7 +466,7 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
         return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
 
 
-class UnsharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
+class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -521,7 +580,7 @@ class UnsharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShift
         xt_at_b = torch.sum(amplitudes_unflat * self.at_b_matrix, dim=3)
 
         # shape (batch, n_electrodes, n_shifts)
-        mse_loss_contrib = 0.5 * xt_at_b - xt_at_a_x
+        mse_loss_contrib = 0.5 * xt_at_a_x - xt_at_b
 
         # shape (batch, n_electrodes * n_shifts)
         return mse_loss_contrib.reshape(self.batch_size, -1)
@@ -534,6 +593,62 @@ class UnsharedShiftsNonNegL1ProxGradSolver(BatchedMultiProxProblem, BatchedShift
         :return: shape (batch, n_electrodes * n_shifts)
         '''
         return self.compute_mse_loss(*args, **kwargs)
+
+    def _manual_gradients(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
+
+        with torch.no_grad():
+            # shape (batch_size, n_electrodes * n_shifts, n_basis)
+            amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+
+            # shape (batch, n_electrodes, n_shifts, n_basis)
+            amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
+
+            # (batch, n_electrodes, n_shifts, n_basis, n_basis) @
+            #   (batch, n_electrodes, n_shifts, n_basis, 1)
+            # -> (batch, n_electrodes, n_shifts, n_basis, 1)
+            # -> (batch, n_electrodes, n_shifts, n_basis)
+            at_a_x_unshared = (self.at_a_matrix @ amplitudes_unflat[:, :, :, :, None]).squeeze(4)
+
+            # -> (batch, n_electrodes, n_shifts, n_basis)
+            gradient_unflat = at_a_x_unshared - self.at_b_matrix
+
+            gradient_flat = gradient_unflat.reshape(self.batch_size, -1, self.n_basis)
+
+            return (gradient_flat, )
+
+    def _packed_loss_and_gradients(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        with torch.no_grad():
+            # shape (batch_size, n_electrodes * n_shifts, n_basis)
+            amplitudes = args[self.AMPLITUDES_IDX_ARGS]
+
+            # shape (batch, n_electrodes, n_shifts, n_basis)
+            amplitudes_unflat = amplitudes.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
+
+            # (batch, n_electrodes, n_shifts, n_basis, n_basis) @
+            #   (batch, n_electrodes, n_shifts, n_basis, 1)
+            # -> (batch, n_electrodes, n_shifts, n_basis, 1)
+            # -> (batch, n_electrodes, n_shifts, n_basis)
+            at_a_x_unshared = (self.at_a_matrix @ amplitudes_unflat[:, :, :, :, None]).squeeze(4)
+
+            # -> (batch, n_electrodes, n_shifts, n_basis)
+            gradient_unflat = at_a_x_unshared - self.at_b_matrix
+
+            gradient_flat = gradient_unflat.reshape(self.batch_size, -1, self.n_basis)
+
+            # shape (batch, n_electrodes, n_shifts)
+            xt_at_a_x = torch.sum(amplitudes_unflat * at_a_x_unshared, dim=3)
+
+            # shape (batch, n_electrodes, n_shifts)
+            xt_at_b = torch.sum(amplitudes_unflat * self.at_b_matrix, dim=3)
+
+            # shape (batch, n_electrodes, n_shifts)
+            mse_loss_contrib = 0.5 * xt_at_a_x - xt_at_b
+
+            # shape (batch, n_electrodes * n_shifts)
+            mse_loss_flat = mse_loss_contrib.reshape(self.batch_size, -1)
+
+            return mse_loss_flat, gradient_flat
 
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
         '''
@@ -696,7 +811,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
         xt_at_b = torch.sum(amplitudes_unflat * self.at_b_matrix, dim=3)
 
         # shape (batch, n_electrodes, n_shifts)
-        mse_loss_contrib = 0.5 * xt_at_b - xt_at_a_x
+        mse_loss_contrib = 0.5 * xt_at_a_x - xt_at_b
 
         # shape (batch, n_electrodes * n_shifts)
         return mse_loss_contrib.reshape(self.batch_size, -1)
@@ -939,15 +1054,8 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
         device)  # type: Union[BatchedMultiProxProblem, SharedShiftSolver, BatchedShiftSolver]
 
     #### Step 3: set up projected gradient descent problem #######################################
-    step_size_torch = solver.compute_fixed_step_size()
-    _ = solver.fixed_step_size_prox_solve(step_size_torch,
-                                          max_iter,
-                                          converge_epsilon)
-
-    del step_size_torch
-
-    # _ = solver.fista_prox_solve(1.0, max_iter, converge_epsilon,
-    #                            0.5)  # FIXME get the solver parameters from somewhere
+    _ = solver.fista_prox_solve(1.0, max_iter, converge_epsilon,
+                                0.5)  # FIXME get the solver parameters from somewhere
 
     # shape (batch, n_electrodes, n_phase_shifts, n_basis)
     amplitudes_solved = solver.return_amplitudes()
@@ -1087,7 +1195,7 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts2(
 def batched_coarse_to_fine_time_shifts_and_amplitudes2(
         observed_ft: np.ndarray,
         ft_basis: np.ndarray,
-        n_true_frequencies,
+        n_true_frequencies: int,
         regularization_type: RegularizationType,
         regularization_lambda: float,
         valid_phase_shift_range: Tuple[int, int],
@@ -1100,7 +1208,7 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
         valid_problems: Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
         max_batch_size: int = 1024,
-        cell_batch_size: int = 32) -> Tuple[np.ndarray, np.ndarray]:
+        verbose_solver: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     '''
     Coarse-to-fine joint fitting of amplitudes and time shifts. Algorithm has two distinct phases:
 
@@ -1172,13 +1280,13 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
             regularization_lambda,
             regularization_type,
             n_true_frequencies,
-            10000,
+            25,
             device,
             group_sel_matrix=group_sel_matrix,
             converge_epsilon=converge_epsilon,
             valid_problems=valid_problems,
             amplitude_matrix_real_np=amplitudes_random_init,
-            solver_verbose=False,
+            solver_verbose=verbose_solver,
         )
 
         amplitude_results[:, :, low:high, :] = amplitude_batch
@@ -1237,13 +1345,13 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
             regularization_lambda,
             regularization_type,
             n_true_frequencies,
-            10000,
+            25,
             device,
             group_sel_matrix=group_sel_matrix,
             amplitude_matrix_real_np=amplitudes_random_init,
             converge_epsilon=converge_epsilon,
             valid_problems=valid_problems,
-            solver_verbose=False
+            solver_verbose=verbose_solver
         )
 
         amplitude_results[:, :, low:high, :] = amplitude_batch
