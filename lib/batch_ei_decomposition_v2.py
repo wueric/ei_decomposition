@@ -1001,9 +1001,6 @@ class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiPro
         :return:
         '''
 
-        # shape (batch, n_electrodes * n_shifts, n_groups)
-        norms = args[self.NORMS_IDX_ARGS]
-
         # shape (batch, n_electrodes * n_shifts)
         mse_loss_contrib = self.compute_mse_loss(*args, **kwargs)
 
