@@ -270,7 +270,11 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
     Variable order convention (in order of registration)
 
     0. amplitudes, shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
-    1. norms, shape (batch, n_electrodes * n_phase_shifts, n_basis)
+    
+    IMPORTANT: THERE IS A CONCEPTUAL PROBLEM FOR THIS IMPLEMENTATION OF THE L12 GROUP SPARSITY NORM!!!
+    The gradient of the norm penalty involves a root of a norm in the denominator; in the case that the
+    the components of the vector that goes into that norm are 0 (which is very possible since we want
+    sparsity), then the gradient contains a divide-by-0 and we have problems.
     '''
 
     AMPLITUDES_IDX_ARGS = 0
@@ -291,7 +295,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
         (1) dim 0 batch dimension - different cells
         (2) dim 1 problem dimension - we combine the electrodes and phase shifts
             (this requires some reshapes to compute the loss function)
-
+            
         :param batched_shared_at_a_matrix: np.ndarray, A^T A matrix for each problem
             shape (batch, n_valid_phase_shifts, n_basis_waveforms, n_basis_waveforms)
         :param at_b_vector: np.ndarray, A^T b vector for each problem
@@ -422,7 +426,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
         group_sparse_component = self.compute_group_sparse_term(*args, **kwargs)
 
         # -> (batch, n_electrodes * n_phase_shifts)
-        return group_sparse_component + mse_loss_component
+        return mse_loss_component + group_sparse_component
 
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
         '''
@@ -1677,6 +1681,7 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
         second_pass_width: int,
         device: torch.device,
         group_sel_matrix: Optional[np.ndarray] = None,
+        n_optimization_iters: int = 15,
         converge_epsilon: float = 1e-2,
         valid_problems: Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 1.0),
@@ -1753,7 +1758,7 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
             regularization_lambda,
             regularization_type,
             n_true_frequencies,
-            25,
+            n_optimization_iters,
             device,
             group_sel_matrix=group_sel_matrix,
             converge_epsilon=converge_epsilon,
@@ -1818,7 +1823,7 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
             regularization_lambda,
             regularization_type,
             n_true_frequencies,
-            25,
+            n_optimization_iters,
             device,
             group_sel_matrix=group_sel_matrix,
             amplitude_matrix_real_np=amplitudes_random_init,
@@ -1871,6 +1876,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
                                                       n_iter: int,
                                                       device: torch.device,
                                                       converge_epsilon: float = 1e-3,
+                                                      n_optimization_iters: int = 15,
                                                       max_batch_size=8192,
                                                       use_scaled_mse_penalty: bool = False,
                                                       use_scaled_regularization_terms: bool = False,
@@ -1970,6 +1976,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             fine_search_width,
             device,
             group_sel_matrix=group_sel_matrix,
+            n_optimization_iters=n_optimization_iters,
             converge_epsilon=converge_epsilon,
             valid_problems=is_valid_matrix,
             amplitude_initialize_range=amplitude_init_range,
