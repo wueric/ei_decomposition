@@ -18,9 +18,6 @@ if __name__ == '__main__':
                         help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
                         help='L2 regularization for waveform second derivatives')
-    parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
-    parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
-    parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
     parser.add_argument('--grid_step', type=int, default=5, help='step size for grid search')
     parser.add_argument('--grid_top_n', type=int, default=4, help='top n for grid search')
     parser.add_argument('--fine_search_width', type=int, default=2, help='width for fine search')
@@ -65,8 +62,6 @@ if __name__ == '__main__':
     componentwise_weights = None
     if args.l1_comp_weights:
         componentwise_weights = basis_dict['componentwise_weights']
-
-    shift_tuple = (-args.before, args.after)
 
     decomposition_dict = batch_ei_decomp.batch_two_step_decompose_cells_by_fitted_compartments(
         eis_by_cell_id,
