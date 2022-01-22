@@ -1950,7 +1950,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
         waveform_observation_loss_weight = raw_data_magnitude.copy().squeeze(2)
 
     if not use_scaled_regularization_terms:
-        regularization_lambda = 1.0  / raw_data_magnitude.squeeze(2)
+        regularization_lambda = 1.0 / raw_data_magnitude.squeeze(2)
 
     pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization', leave=False)
     for iter_count in range(n_iter):
@@ -1984,7 +1984,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             verbose_solver=False)
 
         # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
-        iter_canonical_waveform_ft = batch_fourier_complex_least_square_optimize3(
+        iter_basis_waveform_ft = batch_fourier_complex_least_square_optimize3(
             iter_real_amplitudes,
             iter_delays,
             observations_fourier_transform,
@@ -1997,12 +1997,12 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
         )
 
         # shape (batch, n_canonical_waveforms, n_samples), real-valued float
-        iter_basis_waveform_td = np.real(np.fft.irfft(iter_canonical_waveform_ft, n=n_samples, axis=2))
+        iter_basis_waveform_td = np.real(np.fft.irfft(iter_basis_waveform_ft, n=n_samples, axis=2))
 
         # real valued np.ndarray, shape (batch, n_canonical_waveforms, 1)
         raw_optimized_waveform_magnitude = np.linalg.norm(iter_basis_waveform_td, axis=2, keepdims=True)
         # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
-        iter_canonical_waveform_ft = iter_canonical_waveform_ft / raw_optimized_waveform_magnitude
+        iter_basis_waveform_ft = iter_basis_waveform_ft / raw_optimized_waveform_magnitude
         # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_samples)
         iter_basis_waveform_td = iter_basis_waveform_td / raw_optimized_waveform_magnitude
 
@@ -2012,7 +2012,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
 
         orig_MSE = batch_evaluate_mse_flat(observations_fourier_transform,
                                            iter_real_amplitudes,
-                                           iter_canonical_waveform_ft,
+                                           iter_basis_waveform_ft,
                                            iter_delays,
                                            is_valid_matrix,
                                            n_frequencies_not_rfft,
@@ -2022,7 +2022,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
 
         true_MSE = batch_evaluate_mse_flat(observations_fourier_transform,
                                            iter_real_amplitudes,
-                                           iter_canonical_waveform_ft,
+                                           iter_basis_waveform_ft,
                                            iter_delays,
                                            is_valid_matrix,
                                            n_frequencies_not_rfft,
@@ -2031,7 +2031,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
 
         mse_component = batch_evaluate_mse_flat(observations_fourier_transform,
                                                 iter_real_amplitudes,
-                                                iter_canonical_waveform_ft,
+                                                iter_basis_waveform_ft,
                                                 iter_delays,
                                                 is_valid_matrix,
                                                 n_frequencies_not_rfft,
@@ -2130,13 +2130,6 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
                                                       [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                                       mode='constant')
 
-        # shape (n_basis_waveforms, n_timeponts_upsampled)
-        # bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
-        # shape (n_basis_waveforms, n_timepoints)
-        # padded_basis_waveforms_init = np.pad(bspline_supersampled_basis,
-        #                                     [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
-        #                                     mode='constant')
-        # shape (batch, n_basis_waveforms, n_timepoints)
         batched_basis_waveforms = np.tile(initialized_basis_vectors, (batch, 1, 1))
 
         # amplitudes has shape (batch, n_observations, n_basis_waveforms))
@@ -2158,8 +2151,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
             max_batch_size=grid_search_batch_size,
             use_scaled_mse_penalty=use_scaled_mse_penalty,
             use_scaled_regularization_terms=use_scaled_regularization_terms,
-            group_sel_matrix=make_shared_shift_solver(grouped_l1l2_groups,
-                                                      initialized_basis_vectors.shape[0]),
+            group_sel_matrix=make_group_sparse_mat_from_group_list(grouped_l1l2_groups,
+                                                                   initialized_basis_vectors.shape[0]),
             sobolev_lambda=sobolev_reg
         )
 
