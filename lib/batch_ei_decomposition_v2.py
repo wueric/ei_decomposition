@@ -271,10 +271,12 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
 
     0. amplitudes, shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
     
-    IMPORTANT: THERE IS A CONCEPTUAL PROBLEM FOR THIS IMPLEMENTATION OF THE L12 GROUP SPARSITY NORM!!!
+    IMPORTANT: THERE IS A CONCEPTUAL PROBLEM FOR THE NAIVE IMPLEMENTATION OF THE SMOOTH L12 GROUP SPARSITY NORM!!!
     The gradient of the norm penalty involves a root of a norm in the denominator; in the case that the
     the components of the vector that goes into that norm are 0 (which is very possible since we want
     sparsity), then the gradient contains a divide-by-0 and we have problems.
+
+    To deal with this problem, we add a small epsilon value to each norm inside of the square root.
     '''
 
     AMPLITUDES_IDX_ARGS = 0
@@ -288,7 +290,8 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
                  init_low: float = -1e-1,
-                 init_high: float = 1e-1):
+                 init_high: float = 1e-1,
+                 epsilon_div_by_zero: float = 1e-6):
         '''
         Conventions for the variables in this subclass
 
@@ -338,6 +341,8 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
             self.register_buffer('l12_lambda', torch.tensor(l12_lambda.reshape(temp_batch, -1), dtype=torch.float32))
         else:
             self.l12_lambda = l12_lambda
+
+        self.epsilon_div_by_zero = epsilon_div_by_zero
 
         # shape (batch, n_valid_phase_shifts, n_basis, n_basis)
         self.register_buffer('at_a_matrix', torch.tensor(batched_shared_at_a_matrix, dtype=torch.float32))
@@ -405,7 +410,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
 
         # (batch_size, n_electrodes * n_phase_shifts, n_groups)
         # -> (batch_size, n_electrodes * n_phase_shifts)
-        group_sparse_norm = torch.sum(torch.sqrt(grouped_square_norms), dim=2)
+        group_sparse_norm = torch.sum(torch.sqrt(grouped_square_norms + self.epsilon_div_by_zero), dim=2)
 
         # shape (batch_size, n_electrodes * phase_shifts)
         return self.l12_lambda * group_sparse_norm
@@ -909,6 +914,15 @@ class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batc
 class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxProblem,
                                                            BatchedShiftSolver,
                                                            UnsharedShiftSolver):
+    '''
+    IMPORTANT: THERE IS A CONCEPTUAL PROBLEM FOR THE NAIVE IMPLEMENTATION OF THE SMOOTH L12 GROUP SPARSITY NORM!!!
+    The gradient of the norm penalty involves a root of a norm in the denominator; in the case that the
+    the components of the vector that goes into that norm are 0 (which is very possible since we want
+    sparsity), then the gradient contains a divide-by-0 and we have problems.
+
+    We add a small epsilon inside the square root of the penalty to deal with this problem
+
+    '''
     AMPLITUDES_IDX_ARGS = 0
 
     def __init__(self,
@@ -920,7 +934,8 @@ class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiPro
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
                  init_low: float = -1e-1,
-                 init_high: float = 1e-1):
+                 init_high: float = 1e-1,
+                 epsilon_avoid_div_by_zero: float = 1e-6):
 
         '''
         Conventions for the variables in this subclass
@@ -978,6 +993,8 @@ class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiPro
             self.register_buffer('l12_lambda', torch.tensor(l12_lambda.reshape(batch, -1), dtype=torch.float32))
         else:
             self.l12_lambda = l12_lambda
+
+        self.epsilon_avoid_div_by_zero = epsilon_avoid_div_by_zero
 
         # shape (batch, n_electrodes, n_phase_shifts, n_basis, n_basis)
         self.register_buffer('at_a_matrix', torch.tensor(batched_unshared_at_a_matrix, dtype=torch.float32))
@@ -1051,7 +1068,7 @@ class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiPro
 
         # (batch_size, n_electrodes * n_phase_shifts, n_groups)
         # -> (batch_size, n_electrodes * n_phase_shifts)
-        group_sparse_norm = torch.sum(torch.sqrt(grouped_square_norms), dim=2)
+        group_sparse_norm = torch.sum(torch.sqrt(grouped_square_norms + self.epsilon_avoid_div_by_zero), dim=2)
 
         # no special modifications needed to deal with the tensor case for l12_lambda
         # since the shapes match already
@@ -2078,10 +2095,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         use_scaled_regularization_terms: bool = False,
         grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
         sobolev_reg: Optional[float] = None) \
-        -> Union[
-            Tuple[Dict[int, Dict[str, np.ndarray]], Dict[str, float]],
-            Dict[int, Dict[str, np.ndarray]]
-        ]:
+        -> Union[Tuple[Dict[int, Dict[str, np.ndarray]], Dict[str, float]],
+                 Dict[int, Dict[str, np.ndarray]]]:
     '''
 
     :param eis_by_cell_id: Dict mapping cell id to raw EIs. Each EI must have shape (n_electrodes, n_timepoints)
