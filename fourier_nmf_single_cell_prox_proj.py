@@ -84,7 +84,7 @@ if __name__ == '__main__':
             'l1_reg': args.weight_reg,
             'maxiter': args.maxiter,
             'padding': shift_tuple,
-            'upsample': args.upsample,
+            'upsample': upsample_factor,
             'thresh': snr_thresh,
             'scale_mse_for_waveforms': args.renormalize_loss,
             'scale_regularization_terms': args.renormalize_penalty,

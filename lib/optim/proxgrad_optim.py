@@ -38,6 +38,52 @@ def _multiproblem_unflatten_variables(flat_variables: torch.Tensor,
     return return_sequence
 
 
+class SolverParams(ABC):
+    pass
+
+
+class ProxSolverParams(SolverParams):
+    pass
+
+
+class ProxFixedStepSizeSolverParams(ProxSolverParams):
+    def __init__(self,
+                 initial_learning_rate: Union[float, torch.Tensor, None],
+                 max_iter : int = 250,
+                 converge_epsilon: float = 1e-6):
+
+        self.initial_learning_rate = initial_learning_rate
+        self.max_iter = max_iter
+        self.converge_epsilon=converge_epsilon
+
+
+class ProxFISTASolverParams(ProxSolverParams):
+    def __init__(self,
+                 initial_learning_rate: float = 1.0,
+                 max_iter: int = 250,
+                 converge_epsilon: float = 1e-6,
+                 backtracking_beta: float = 0.5):
+
+        self.initial_learning_rate = initial_learning_rate
+        self.max_iter = max_iter
+        self.converge_epsilon = converge_epsilon
+        self.backtracking_beta = backtracking_beta
+
+
+class ProxGradSolverParams(ProxSolverParams):
+
+    def __init__(self,
+                 initial_learning_rate: float = 1.0,
+                 max_iter: int = 1000,
+                 converge_epsilon: float = 1e-6,
+                 backtracking_beta: float = 0.5):
+
+        self.initial_learning_rate = initial_learning_rate
+        self.max_iter = max_iter
+        self.converge_epsilon = converge_epsilon
+        self.backtracking_beta = backtracking_beta
+
+
 class MultiProxProblem(nn.Module):
 
     def __init__(self, n_problems: int, verbose: bool = False):
@@ -633,6 +679,36 @@ class BatchedMultiProxProblem(nn.Module, ABC):
             stepped_variables = self._batched_multiproblem_unflatten_variables(vars_iter)
             self.assign_optimization_vars(*stepped_variables)
             return self._smooth_loss(*stepped_variables, **kwargs)
+
+    def solve(self,
+              solver_params: ProxSolverParams,
+              **kwargs) -> torch.Tensor:
+        if isinstance(solver_params, ProxFixedStepSizeSolverParams):
+            return self.fixed_step_size_prox_solve(
+                solver_params.initial_learning_rate,
+                solver_params.max_iter,
+                solver_params.converge_epsilon
+            )
+
+        elif isinstance(solver_params, ProxGradSolverParams):
+            return self.prox_grad_solve(
+                solver_params.initial_learning_rate,
+                solver_params.max_iter,
+                solver_params.converge_epsilon,
+                solver_params.backtracking_beta,
+                **kwargs
+            )
+
+        elif isinstance(solver_params, ProxFISTASolverParams):
+            return self.fista_prox_solve(
+                solver_params.initial_learning_rate,
+                solver_params.max_iter,
+                solver_params.converge_epsilon,
+                solver_params.backtracking_beta,
+                **kwargs
+            )
+
+        raise TypeError("solver_params must be instance of ProxSolverParams")
 
 
 class AutogradBatchMultiProxProblem(BatchedMultiProxProblem, ABC):
