@@ -6,7 +6,7 @@ import numpy as np
 from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3
 from lib.losseval import batch_evaluate_mse_flat
 from lib.optim.proxgrad_optim import BatchedMultiProxProblem, AutogradBatchMultiProxProblem, \
-    ManualGradBatchMultiProxProblem
+    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, ProxGradSolverParams
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector
 
@@ -559,6 +559,16 @@ class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Batch
         nn.init.uniform_(self.norms, a=init_low, b=init_high)
 
         self.check_variables()
+
+    def compute_fixed_step_size(self) -> torch.Tensor:
+        with torch.no_grad():
+            eigenvalues, _ = torch.linalg.eigh(self.at_a_matrix)
+            max_eigenvalues = eigenvalues[:, :, -1]
+
+            step_size = 1.0 / (2 * max_eigenvalues)
+
+            step_size_repeated = step_size.repeat(1, self.n_electrodes)
+            return step_size_repeated
 
     def compute_mse_loss(self, *args, **kwargs) -> torch.Tensor:
 
@@ -1435,10 +1445,9 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
         regularization_lambda: Union[float, np.ndarray],
         regularization_type: RegularizationType,
         n_true_frequencies: int,
-        max_iter: int,
+        solver_params: ProxSolverParams,
         device: torch.device,
         amplitude_matrix_real_np: Optional[np.ndarray] = None,
-        converge_epsilon: float = 1e-2,
         group_sel_matrix: Optional[np.ndarray] = None,
         valid_problems: Optional[np.ndarray] = None,
         solver_verbose: bool = True,
@@ -1518,8 +1527,7 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
         device)  # type: Union[BatchedMultiProxProblem, SharedShiftSolver, BatchedShiftSolver]
 
     #### Step 3: set up projected gradient descent problem #######################################
-    _ = solver.fista_prox_solve(1.0, max_iter, converge_epsilon,
-                                0.5)  # FIXME get the solver parameters from somewhere
+    _ = solver.solve(solver_params)
 
     # shape (batch, n_electrodes, n_phase_shifts, n_basis)
     amplitudes_solved = solver.return_amplitudes()
@@ -1539,7 +1547,7 @@ def make_unshared_shifts_solver(
         group_sel_matrix: Optional[np.ndarray] = None,
         amplitudes_matrix_init: Optional[np.ndarray] = None,
         verbose: bool = True,
-        init_low: float = -1e-2,
+        init_low: float = 0.0,
         init_high: float = 1e-2) \
         -> Union[UnsharedShiftSolver, BatchedMultiProxProblem]:
     '''
@@ -1611,14 +1619,13 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts2(
         regularization_lambda: Union[float, np.ndarray],
         regularization_type: RegularizationType,
         n_true_frequencies: int,
-        max_iter: int,
+        solver_params: ProxSolverParams,
         device: torch.device,
-        converge_epsilon: float = 1e-2,  # FIXME
         amplitude_matrix_real_np: Optional[np.ndarray] = None,
         group_sel_matrix: Optional[np.ndarray] = None,
         valid_problems: Optional[np.ndarray] = None,
         solver_verbose: bool = True,
-        init_low: float = 1e-2,
+        init_low: float = 0.0,
         init_high: float = 1e-2) \
         -> Tuple[np.ndarray, np.ndarray]:
     '''
@@ -1674,8 +1681,7 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts2(
                                          init_high=init_high).to(
         device)  # type: Union[BatchedMultiProxProblem, UnsharedShiftSolver, BatchedShiftSolver]
 
-    _ = solver.fista_prox_solve(1.0, max_iter, converge_epsilon,
-                                0.5)  # FIXME get the solver parameters from somewhere
+    _ = solver.solve(solver_params)
 
     # shape (batch, n_electrodes, n_phase_shifts, n_basis)
     amplitudes_solved = solver.return_amplitudes()
@@ -1696,10 +1702,9 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
         first_pass_step_size: int,
         second_pass_best_n: int,
         second_pass_width: int,
+        solver_params: ProxSolverParams,
         device: torch.device,
         group_sel_matrix: Optional[np.ndarray] = None,
-        n_optimization_iters: int = 15,
-        converge_epsilon: float = 1e-2,
         valid_problems: Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 1.0),
         max_batch_size: int = 1024,
@@ -1775,10 +1780,9 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
             regularization_lambda,
             regularization_type,
             n_true_frequencies,
-            n_optimization_iters,
+            solver_params,
             device,
             group_sel_matrix=group_sel_matrix,
-            converge_epsilon=converge_epsilon,
             valid_problems=valid_problems,
             amplitude_matrix_real_np=amplitudes_random_init,
             solver_verbose=verbose_solver,
@@ -1840,11 +1844,10 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
             regularization_lambda,
             regularization_type,
             n_true_frequencies,
-            n_optimization_iters,
+            solver_params,
             device,
             group_sel_matrix=group_sel_matrix,
             amplitude_matrix_real_np=amplitudes_random_init,
-            converge_epsilon=converge_epsilon,
             valid_problems=valid_problems,
             solver_verbose=verbose_solver
         )
@@ -1891,9 +1894,8 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
                                                       fine_search_width: int,
                                                       amplitude_init_range: Tuple[float, float],
                                                       n_iter: int,
+                                                      solver_params: ProxSolverParams,
                                                       device: torch.device,
-                                                      converge_epsilon: float = 1e-3,
-                                                      n_optimization_iters: int = 15,
                                                       max_batch_size=8192,
                                                       use_scaled_mse_penalty: bool = False,
                                                       use_scaled_regularization_terms: bool = False,
@@ -1991,10 +1993,9 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             shift_grid_step,
             fine_search_top_n,
             fine_search_width,
+            solver_params,
             device,
             group_sel_matrix=group_sel_matrix,
-            n_optimization_iters=n_optimization_iters,
-            converge_epsilon=converge_epsilon,
             valid_problems=is_valid_matrix,
             amplitude_initialize_range=amplitude_init_range,
             max_batch_size=max_batch_size,
@@ -2079,8 +2080,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         eis_by_cell_id: Dict[int, np.ndarray],
         initialized_basis_vectors: np.ndarray,
         regularization_type: RegularizationType,
+        solver_params: ProxSolverParams,
         device: torch.device,
-        converge_epsilon: float = 1e-3,
         snr_abs_threshold: float = 5.0,
         amplitude_random_init_range: Tuple[float, float] = (0.0, 10.0),
         supersample_factor: int = 5,
@@ -2162,15 +2163,14 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
             fine_search_width,
             amplitude_random_init_range,
             maxiter_decomp,
+            solver_params,
             device,
-            converge_epsilon=converge_epsilon,
             max_batch_size=grid_search_batch_size,
             use_scaled_mse_penalty=use_scaled_mse_penalty,
             use_scaled_regularization_terms=use_scaled_regularization_terms,
             group_sel_matrix=make_group_sparse_mat_from_group_list(grouped_l1l2_groups,
                                                                    initialized_basis_vectors.shape[0]),
             sobolev_lambda=sobolev_reg,
-            n_optimization_iters=n_inner_optimization_iters
         )
 
         wip_decomp_list.append((amplitudes, delays, waveforms))

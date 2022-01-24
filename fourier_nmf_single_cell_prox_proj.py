@@ -4,6 +4,7 @@ import pickle
 import argparse
 
 from lib.batch_ei_decomposition_v2 import RegularizationType, batch_two_step_decompose_cells_by_fitted_compartments2
+from lib.optim.proxgrad_optim import ProxGradSolverParams, ProxFISTASolverParams
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -61,6 +62,7 @@ if __name__ == '__main__':
         eis_by_cell_id,
         initial_basis,
         regularization_type,
+        ProxFISTASolverParams(1.0, args.inneropt_iter, args.eps_cutoff, 0.5),
         compute_device,
         maxiter_decomp=args.maxiter,
         l1_regularize_lambda=args.weight_reg,
@@ -74,9 +76,7 @@ if __name__ == '__main__':
         use_scaled_mse_penalty=args.renormalize_loss,
         use_scaled_regularization_terms=args.renormalize_penalty,
         grouped_l1l2_groups=group_assignments,
-        converge_epsilon=args.eps_cutoff,
-        sobolev_reg=args.sobolev_reg,
-        n_inner_optimization_iters=args.inneropt_iter
+        sobolev_reg=args.sobolev_reg
     )
 
     with open(args.output_pickle, 'wb') as joint_fit_file:
