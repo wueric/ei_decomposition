@@ -2090,6 +2090,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         fine_search_width: int = 2,
         grid_search_batch_size: int = 1024,
         maxiter_decomp: int = 25,
+        n_inner_optimization_iters: int = 15,
         l1_regularize_lambda: Optional[float] = None,
         use_scaled_mse_penalty: bool = False,
         use_scaled_regularization_terms: bool = False,
@@ -2168,7 +2169,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
             use_scaled_regularization_terms=use_scaled_regularization_terms,
             group_sel_matrix=make_group_sparse_mat_from_group_list(grouped_l1l2_groups,
                                                                    initialized_basis_vectors.shape[0]),
-            sobolev_lambda=sobolev_reg
+            sobolev_lambda=sobolev_reg,
+            n_optimization_iters=n_inner_optimization_iters
         )
 
         wip_decomp_list.append((amplitudes, delays, waveforms))
