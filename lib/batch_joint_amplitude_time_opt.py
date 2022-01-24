@@ -816,7 +816,7 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts(
         amplitudes = next_amplitudes
 
         if converge_step_cutoff is None:
-            convergence_bound = convergence_factor * step_distance  # shape (batch, n_observations, n_valid_phase_shifts)
+            convergence_bound = convergence_factor[:, None, :] * step_distance  # shape (batch, n_observations, n_valid_phase_shifts)
         else:
             convergence_bound = 0.5 * step_distance
 
@@ -876,7 +876,6 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes(
         kill_problems: Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 10.0),
         max_batch_size: int = 1024,
-        cell_batch_size: int = 32,
         l1_regularization_callable: Optional[
             Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]] = None,
         spatial_continuity_regularizer: Optional[

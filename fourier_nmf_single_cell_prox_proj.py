@@ -3,7 +3,8 @@ import torch
 import pickle
 import argparse
 
-import lib.batch_ei_decomposition as batch_ei_decomp
+from lib.batch_ei_decomposition_v2 import RegularizationType, batch_two_step_decompose_cells_by_fitted_compartments2
+from lib.optim.proxgrad_optim import ProxGradSolverParams, ProxFISTASolverParams
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -14,6 +15,7 @@ if __name__ == '__main__':
     parser.add_argument('output_pickle', type=str, help='path to output pickle file')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--maxiter', '-m', type=int, default=10, help='maximum number of iterations to run')
+    parser.add_argument('--inneropt_iter', '-i', type=int, default=15, help='maximum number of FISTA iterations for inner solver steps')
     parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
                         help='L1 regularization lambda for amplitudes')
     parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
@@ -27,15 +29,10 @@ if __name__ == '__main__':
                         help='renormalize data waveforms')
     parser.add_argument('--renormalize_penalty', '-p', action='store_true', default=False,
                         help='renormalize data waveforms')
-    parser.add_argument('--initialize_basis', '-i', type=str, default=None, help='path to initialized basis')
     parser.add_argument('--group', '-g', action='store_true', default=False,
                         help='whether or not to use group L1L2 regularization')
-    parser.add_argument('--l1_comp_weights', '-l', action='store_true', default=False,
-                        help='whether or not to use componentwise weighted L1 regularization')
     parser.add_argument('--eps_cutoff', '-e', type=float, default=1e-3,
                         help='converge epsilon. Default uses comparison to t^2 |G_t|^2, which is robust but does not guarantee bounds on convergence')
-    parser.add_argument('--eps_eigen', '--f', action='store_true', default=False,
-                        help='use original eigenvalue based convergence, which provides a provable suboptimality for least squares but breaks with strong regularization')
 
     args = parser.parse_args()
 
@@ -56,16 +53,16 @@ if __name__ == '__main__':
     snr_thresh = basis_dict['thresh']
 
     group_assignments = None
+    regularization_type = RegularizationType.L1_SPARSE_REG
     if args.group:
         group_assignments = basis_dict['group_assignments']
+        regularization_type = RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED
 
-    componentwise_weights = None
-    if args.l1_comp_weights:
-        componentwise_weights = basis_dict['componentwise_weights']
-
-    decomposition_dict = batch_ei_decomp.batch_two_step_decompose_cells_by_fitted_compartments(
+    decomposition_dict = batch_two_step_decompose_cells_by_fitted_compartments2(
         eis_by_cell_id,
         initial_basis,
+        regularization_type,
+        ProxFISTASolverParams(1.0, args.inneropt_iter, args.eps_cutoff, 0.5),
         compute_device,
         maxiter_decomp=args.maxiter,
         l1_regularize_lambda=args.weight_reg,
@@ -78,12 +75,7 @@ if __name__ == '__main__':
         grid_search_batch_size=args.grid_batch_size,
         use_scaled_mse_penalty=args.renormalize_loss,
         use_scaled_regularization_terms=args.renormalize_penalty,
-        use_grouped_l1l2_norm=args.group,
         grouped_l1l2_groups=group_assignments,
-        use_basis_weighted_l1_norm=args.l1_comp_weights,
-        basis_weights_for_l1=componentwise_weights,
-        converge_epsilon=args.eps_cutoff,
-        converge_step_cutoff=args.eps_cutoff if not args.eps_eigen else None,
         sobolev_reg=args.sobolev_reg
     )
 
@@ -92,14 +84,12 @@ if __name__ == '__main__':
             'l1_reg': args.weight_reg,
             'maxiter': args.maxiter,
             'padding': shift_tuple,
-            'upsample': args.upsample,
+            'upsample': upsample_factor,
             'thresh': snr_thresh,
             'scale_mse_for_waveforms': args.renormalize_loss,
             'scale_regularization_terms': args.renormalize_penalty,
             'use_grouped_l1l2_norm': args.group,
             'group_assignments': group_assignments,
-            'use_basis_weighted_l1': args.l1_comp_weights,
-            'basis_weights_for_l1': componentwise_weights,
             'sobolev_reg': args.sobolev_reg
         }
 

@@ -5,9 +5,6 @@ from scipy import interpolate as interpolate
 
 from typing import List, Dict, Union, Tuple, Sequence, Optional
 
-EIDecomposition = namedtuple('EIDecomposition', ['amplitude', 'delay'])
-UnsharedBasisEIDecomposition = namedtuple('UnsharedBasisEIDecomposition', ['amplitude', 'delay', 'basis'])
-
 
 def bspline_upsample_waveforms(waveforms: np.ndarray,
                                upsample_factor: int) -> np.ndarray:
@@ -501,7 +498,7 @@ def _auto_unbatch_unpack_ei(batched_packed_ei : List[np.ndarray],
 
 def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
                                                batched_raw_data: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]) \
-        -> Dict[int, UnsharedBasisEIDecomposition]:
+        -> Dict[int, Dict[str, np.ndarray]]:
     '''
 
     :param batched_amplitude_phase_list:
@@ -512,7 +509,7 @@ def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : Li
     if len(batched_amplitude_phase_list) != len(batched_raw_data):
         raise ValueError('Batched decomposition list must have same length as batched raw data')
 
-    decomp_dict = {} # type: Dict[int, UnsharedBasisEIDecomposition]
+    decomp_dict = {} # type: Dict[int, Dict[str, np.ndarray]]
 
     for decomp_tuple, data_tuple in zip(batched_amplitude_phase_list, batched_raw_data):
 
@@ -541,8 +538,9 @@ def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : Li
 
             cell_id = batch_cell_ids[idx]
 
-            decomp_dict[cell_id] = UnsharedBasisEIDecomposition(reinflated_amplitudes, reinflated_shifts,
-                                                                reinflated_basis)
+            decomp_dict[cell_id] = {'amplitudes' : reinflated_amplitudes,
+                                    'shifts' : reinflated_shifts,
+                                    'basis' : reinflated_basis}
 
     return decomp_dict
 
@@ -607,46 +605,6 @@ def batched_pack_significant_electrodes(eis_by_cell_id: Dict[int, np.ndarray],
     return batched_data_matrix, is_valid_matrix, indices_selected
 
 
-def batched_unpack_significant_electrodes(batched_amplitudes_matrix : np.ndarray,
-                                          batched_phase_matrix: np.ndarray,
-                                          batched_basis_waveforms: np.ndarray,
-                                          is_valid_matrix: np.ndarray,
-                                          index_sel_matrix: np.ndarray,
-                                          cell_order : List[int]) -> Dict[int, UnsharedBasisEIDecomposition]:
-    '''
-
-    :param batched_amplitudes_matrix: fitted amplitudes, real-valued shape (n_cells, n_observations, n_basis_waveforms)
-    :param batched_phase_matrix: fitted phases, integer-valued shape (n_cells, n_observations, n_basis_waveforms)
-    :param batched_basis_waveforms: fitted basis waveforms, real-valued shape (n_cells, n_basis_waveforms, n_timepoints)
-    :param is_valid_matrix: shape (n_cells, n_observations), 0/1 integer-valued matrix, 1 if valid, 0 if padding
-    :param index_sel_matrix: shape (n_cells, n_electrodes_orig), integer-valued index matrix to use to reconstruct
-        the original EI matrix
-    :param cell_order: order of the cell ids
-    :return:
-    '''
-
-    n_cells, n_observations, n_basis_waveforms = batched_amplitudes_matrix.shape
-    n_orig_els = index_sel_matrix.shape[1]
-
-    output_dict = {} # type: Dict[int, UnsharedBasisEIDecomposition]
-
-    for i, cell_id in enumerate(cell_order):
-
-        put_back_matrix = index_sel_matrix[i,:]
-        valid_selector = is_valid_matrix[i,:].astype(bool)
-
-        amplitudes_reinflated = np.zeros((n_orig_els, n_basis_waveforms), dtype=np.float32)
-        phases_reinflated = np.zeros((n_orig_els, n_basis_waveforms), dtype=np.int32)
-
-        amplitudes_reinflated[put_back_matrix, :] = batched_amplitudes_matrix[i, valid_selector, :]
-        phases_reinflated[put_back_matrix, :] = batched_phase_matrix[i, valid_selector, :]
-
-        output_dict[cell_id] = UnsharedBasisEIDecomposition(amplitudes_reinflated, phases_reinflated,
-                                                            batched_basis_waveforms[i, :, :])
-
-    return output_dict
-
-
 def pack_significant_electrodes_into_matrix(eis_by_cell_id: Dict[int, np.ndarray],
                                             cell_order: List[int],
                                             snr_abs_threshold: Union[float, int]) \
@@ -705,10 +663,10 @@ def unpack_amplitudes_and_phases_into_ei_shape(packed_amplitude_matrix: np.ndarr
                                                orig_ei_by_cell_id: Dict[int, np.ndarray],
                                                cell_order: List[int],
                                                unpack_slice_dict: Dict[int, Tuple[slice, Sequence[int]]]) \
-        -> Dict[int, EIDecomposition]:
+        -> Dict[int, Dict[str, np.ndarray]]:
     n_observations, n_basis_vectors = packed_amplitude_matrix.shape
 
-    result_dict = {}  # type: Dict[int, EIDecomposition]
+    result_dict = {}  # type: Dict[int, Dict[str, np.ndarray]]
     for cell_id in cell_order:
         orig_ei_mat = orig_ei_by_cell_id[cell_id]
         n_channels = orig_ei_mat.shape[0]
@@ -721,7 +679,7 @@ def unpack_amplitudes_and_phases_into_ei_shape(packed_amplitude_matrix: np.ndarr
         delay_vector = np.zeros((n_channels, n_basis_vectors), dtype=np.int32)
         delay_vector[sufficient_snr, :] = packed_phase_matrix[slice_section, :]
 
-        result_dict[cell_id] = (amplitude_matrix, delay_vector)
+        result_dict[cell_id] = {'amplitudes': amplitude_matrix, 'shifts': delay_vector}
 
     return result_dict
 
@@ -731,7 +689,7 @@ def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: n
                                                      above_threshold_els_by_cell: Dict[int, np.ndarray],
                                                      cell_order: List[int],
                                                      orig_ei_n_electrodes: int) \
-        -> Dict[int, EIDecomposition]:
+        -> Dict[int, Dict[str, np.ndarray]]:
     '''
     Converts the by-cell matrix representation of an EI decomposition into EIDecomposition
 
@@ -741,12 +699,12 @@ def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: n
         Each of the np.ndarray may have a different length
     :param cell_order: ordering of cells, list of integers
     :param orig_ei_n_electrodes: number of electrodes included in the full-size EI
-    :return: Dict[int, EIDecomposition], EIDecomposition for each cell, keyed by cell_id
+    :return: Dict[int, Dict[str, np.ndarray], ei decomposition dict for each cell, keyed by cell_id
     '''
 
     n_cells, max_n_electrodes, n_basis_waveforms = by_cell_amplitude_matrix.shape
 
-    result_dict = {}  # type: Dict[int, EIDecomposition]
+    result_dict = {}  # type: Dict[int, Dict[str, np.ndarray]]
     for idx, cell_id in enumerate(cell_order):
         electrode_order_valid = above_threshold_els_by_cell[cell_id]
         n_valid_electrodes = electrode_order_valid.shape[0]
@@ -757,7 +715,7 @@ def pack_by_cell_amplitudes_and_phases_into_ei_shape(by_cell_amplitude_matrix: n
         delay_matrix = np.zeros((orig_ei_n_electrodes, n_basis_waveforms), dtype=np.int32)
         delay_matrix[electrode_order_valid, :] = by_cell_phase_matrix[idx, :n_valid_electrodes, :]
 
-        result_dict[cell_id] = (amplitude_matrix, delay_matrix)
+        result_dict[cell_id] = {'amplitudes': amplitude_matrix, 'shifts': delay_matrix}
 
     return result_dict
 
