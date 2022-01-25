@@ -1455,20 +1455,20 @@ def make_shared_shift_solver(regularization_type: RegularizationType,
     raise ValueError(f"Invalid regularization type {regularization_type}")
 
 
-def _np_prox_project_nonneg_orthant(batched_variables: np.ndarray) -> np.ndarray:
+def _torch_prox_project_nonneg_orthant(batched_variables: torch.Tensor) -> torch.Tensor:
     '''
 
     :param batched_variables:
     :return:
     '''
-    return np.clip(batched_variables, a_min=0.0, a_max=None)
+    return torch.clamp_min_(batched_variables, 0.0)
 
 
-def _l12_group_sparse_bounds(at_a_matrix: np.ndarray,
-                             at_b_matrix: np.ndarray,
-                             regularization_lambda: Union[float, np.ndarray],
-                             regularization_groups: np.ndarray) \
-        -> Tuple[np.ndarray, np.ndarray]:
+def _l12_group_sparse_bounds(at_a_matrix: torch.Tensor,
+                             at_b_matrix: torch.Tensor,
+                             regularization_lambda: Union[float, torch.Tensor],
+                             regularization_groups: torch.Tensor) \
+        -> Tuple[torch.Tensor, torch.Tensor]:
     '''
     Lower bound is computed by solving the unconstrained version of the objective function
         without the regularization term
@@ -1485,7 +1485,7 @@ def _l12_group_sparse_bounds(at_a_matrix: np.ndarray,
     :return:
     '''
 
-    def eval_objective(x_value: np.ndarray, include_regularization: bool) -> np.ndarray:
+    def eval_objective(x_value: torch.Tensor, include_regularization: bool) -> torch.Tensor:
         '''
 
         :param x_value: shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms)
@@ -1513,15 +1513,15 @@ def _l12_group_sparse_bounds(at_a_matrix: np.ndarray,
             # (batch, n_observations, n_valid_phase_shifts)
 
             # shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms)
-            x_square = np.square(x_value)
+            x_square = torch.square(x_value)
 
             # shape (1, 1, 1, n_groups, n_basis_waveforms) @
             #   (batch, n_observations, n_phase_shifts, n_basis, 1)
             # -> (batch, n_observations, n_phase_shifts, n_groups, 1)
             # -> (batch, n_observations, n_phase_shifts, n_groups)
-            regularization_square_norm = regularization_groups[None, None, None, :, :] @ x_square[:, :, :, :,
-                                                                                         1].squeeze(-1)
-            regularization_term = regularization_lambda * np.sum(np.sqrt(regularization_square_norm), axis=3)
+            regularization_square_norm = regularization_groups[None, None, None, :, :] @ x_square[:, :, :, :, None]
+            regularization_square_norm = regularization_square_norm.squeeze(-1)
+            regularization_term = regularization_lambda * torch.sum(torch.sqrt(regularization_square_norm), axis=3)
 
             return 0.5 * xt_at_a_x + xt_at_b + regularization_term
 
@@ -1531,10 +1531,10 @@ def _l12_group_sparse_bounds(at_a_matrix: np.ndarray,
 
     # shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms, 1)
     # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms)
-    x_solved = np.linalg.solve(at_a_matrix[:, None, :, :, :], at_b_minus_one[:, :, :, :, None]).squeeze(-1)
+    x_solved = torch.linalg.solve(at_a_matrix[:, None, :, :, :], at_b_minus_one[:, :, :, :, None]).squeeze(-1)
 
     # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms)
-    x_projected = _np_prox_project_nonneg_orthant(x_solved)
+    x_projected = _torch_prox_project_nonneg_orthant(x_solved)
 
     # -> (batch, n_observations, n_phase_shifts)
     lower_bound_objective = eval_objective(x_solved, False)
@@ -1545,10 +1545,10 @@ def _l12_group_sparse_bounds(at_a_matrix: np.ndarray,
     return lower_bound_objective, upper_bound_objective
 
 
-def _l1_sparse_bounds(at_a_matrix: np.ndarray,
-                      at_b_matrix: np.ndarray,
-                      regularization_lambda: Union[float, np.ndarray]) \
-        -> Tuple[np.ndarray, np.ndarray]:
+def _l1_sparse_bounds(at_a_matrix: torch.Tensor,
+                      at_b_matrix: torch.Tensor,
+                      regularization_lambda: Union[float, torch.Tensor]) \
+        -> Tuple[torch.Tensor, torch.Tensor]:
     '''
     Lower bound is computed by solving the unconstrained version of the objective function
         without the regularization term
@@ -1564,7 +1564,7 @@ def _l1_sparse_bounds(at_a_matrix: np.ndarray,
     :return:
     '''
 
-    def eval_objective(x_value: np.ndarray, include_regularization: bool) -> np.ndarray:
+    def eval_objective(x_value: torch.Tensor, include_regularization: bool) -> torch.Tensor:
         '''
 
         :param x_value: shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms)
@@ -1589,7 +1589,7 @@ def _l1_sparse_bounds(at_a_matrix: np.ndarray,
         xt_at_b = (x_value[:, :, :, None, :] @ at_b_matrix[:, :, :, :, None]).squeeze(-2).squeeze(-1)
 
         if include_regularization:
-            regularization_term = regularization_lambda * np.sum(x_value, axis=3)
+            regularization_term = regularization_lambda * torch.sum(x_value, dim=3)
             return 0.5 * xt_at_a_x + xt_at_b + regularization_term
         return 0.5 * xt_at_a_x + xt_at_b
 
@@ -1597,10 +1597,10 @@ def _l1_sparse_bounds(at_a_matrix: np.ndarray,
 
     # shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms, 1)
     # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms)
-    x_solved = np.linalg.solve(at_a_matrix[:, None, :, :, :], at_b_minus_one[:, :, :, :, None]).squeeze(-1)
+    x_solved = torch.linalg.solve(at_a_matrix[:, None, :, :, :], at_b_minus_one[:, :, :, :, None]).squeeze(-1)
 
     # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms)
-    x_projected = _np_prox_project_nonneg_orthant(x_solved)
+    x_projected = _torch_prox_project_nonneg_orthant(x_solved)
 
     # -> (batch, n_observations, n_phase_shifts)
     lower_bound_objective = eval_objective(x_solved, False)
@@ -1615,6 +1615,7 @@ def objective_bounds(at_a_matrix: np.ndarray,
                      at_b_matrix: np.ndarray,
                      regularization_lambda: Union[float, np.ndarray],
                      regularization_type: RegularizationType,
+                     device: torch.device,
                      regularization_groups: Optional[np.ndarray] = None) \
         -> Tuple[np.ndarray, np.ndarray]:
     '''
@@ -1631,16 +1632,34 @@ def objective_bounds(at_a_matrix: np.ndarray,
 
     if regularization_type == RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED:
 
-        return _l12_group_sparse_bounds(at_a_matrix,
-                                        at_b_matrix,
-                                        regularization_lambda,
-                                        regularization_groups)
+        with torch.no_grad():
+            at_a_torch = torch.tensor(at_a_matrix, dtype=torch.float32, device=device)
+            at_b_torch = torch.tensor(at_b_matrix, dtype=torch.float32, device=device)
+            regularization_lambda_torch = regularization_lambda if isinstance(regularization_lambda, float) \
+                else torch.tensor(regularization_lambda, dtype=torch.float32, device=device)
+            regularization_groups_torch = torch.tensor(regularization_groups, dtype=torch.float32, device=device)
+
+            lower_bound_torch, upper_bound_torch = _l12_group_sparse_bounds(at_a_torch,
+                                                                            at_b_torch,
+                                                                            regularization_lambda_torch,
+                                                                            regularization_groups_torch)
+
+            return lower_bound_torch.detach().cpu().numpy(), upper_bound_torch.detach().cpu().numpy()
 
     elif regularization_type == RegularizationType.L1_SPARSE_REG:
 
-        return _l1_sparse_bounds(at_a_matrix,
-                                 at_b_matrix,
-                                 regularization_lambda)
+        with torch.no_grad():
+
+            at_a_torch = torch.tensor(at_a_matrix, dtype=torch.float32, device=device)
+            at_b_torch = torch.tensor(at_b_matrix, dtype=torch.float32, device=device)
+            regularization_lambda_torch = regularization_lambda if isinstance(regularization_lambda, float) \
+                else torch.tensor(regularization_lambda, dtype=torch.float32, device=device)
+
+            lower_bound_torch, upper_bound_torch = _l1_sparse_bounds(at_a_torch,
+                                                                     at_b_torch,
+                                                                     regularization_lambda_torch)
+
+            return lower_bound_torch.detach().cpu().numpy(), upper_bound_torch.detach().cpu().numpy()
 
     elif regularization_type == RegularizationType.L12_GROUP_SPARSE_REG_SMOOTH:
 
@@ -1866,7 +1885,7 @@ def compactify_unshared_problems(at_a_matrix: np.ndarray,
             at_a_compactified[i, j, :n_valid_problems, :, :] = at_a_matrix[i, j, is_valid_sel, :, :]
             at_b_compactified[i, j, :n_valid_problems, :] = at_b_vector[i, j, is_valid_sel, :]
             phases_compactified[i, j, :n_valid_problems, :] = phases[i, j, is_valid_sel, :]
-            valid_problems_compacitified[i,j,:n_valid_problems] = True
+            valid_problems_compacitified[i, j, :n_valid_problems] = True
 
     return at_a_compactified, at_b_compactified, phases_compactified, valid_problems_compacitified
 
@@ -1916,27 +1935,41 @@ def branch_bound_solve_shared_shifts(
     valid_phase_shifts = make_shared_phase_grid_matrix(valid_phase_shift_range,
                                                        first_pass_step_size,
                                                        n_basis)
-    n_phase_shifts = valid_phase_shifts.shape[2]
+    n_phase_shifts = valid_phase_shifts.shape[1]
 
     #### Step 1: build A^T A from circular cross correlation #####################################
 
-    # shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
-    at_a_matrix = batched_build_at_a_matrix(ft_basis, valid_phase_shifts, n_true_frequencies)
+    lower_bounds = np.zeros((batch, n_electrodes, n_phase_shifts), dtype=np.float32)
+    upper_bounds = np.zeros((batch, n_electrodes, n_phase_shifts), dtype=np.float32)
+    pbar = tqdm.tqdm(total=int(np.ceil(n_phase_shifts / max_batch_size)), leave=False,
+                     desc='Computing bounds')
+    for low in range(0, n_phase_shifts, max_batch_size):
+        high = min(low + max_batch_size, n_phase_shifts)
 
-    ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
-    # this one depends on absolute timing so it is much easier to pack
-    # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
-    at_b_vector = batched_build_at_b_vector(observed_ft, ft_basis, valid_phase_shifts, n_true_frequencies)
+        # shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+        at_a_matrix = batched_build_at_a_matrix(ft_basis, valid_phase_shifts[None, :, low:high], n_true_frequencies)
 
-    ##### Compute upper and lower bounds for branch-and-bound
+        ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
+        # this one depends on absolute timing so it is much easier to pack
+        # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        at_b_vector = batched_build_at_b_vector(observed_ft, ft_basis, valid_phase_shifts[None, :, low:high],
+                                                n_true_frequencies)
 
-    # each has shape
-    # (batch, n_observations, n_phase_shifts)
-    lower_bounds, upper_bounds = objective_bounds(at_a_matrix,
-                                                  at_b_vector,
-                                                  regularization_lambda,
-                                                  regularization_type,
-                                                  regularization_groups=group_sel_matrix)
+        ##### Compute upper and lower bounds for branch-and-bound
+        # each has shape
+        # (batch, n_observations, n_phase_shifts)
+        lower_bounds_part, upper_bounds_part = objective_bounds(at_a_matrix,
+                                                                at_b_vector,
+                                                                regularization_lambda,
+                                                                regularization_type,
+                                                                device,
+                                                                regularization_groups=group_sel_matrix)
+
+        lower_bounds[:, :, low:high] = lower_bounds_part
+        upper_bounds[:, :, low:high] = upper_bounds_part
+
+        pbar.update(1)
+    pbar.close()
 
     ##### Basic batched branch-and-bound algorithm ########################
     # 0. Keep track of the top N candidates for each valid problem,
@@ -1959,6 +1992,8 @@ def branch_bound_solve_shared_shifts(
                      desc='First pass branch-bound search')
     solution_heap = BatchedMultielectrodeBestN(batch, n_electrodes, second_pass_best_n,
                                                n_basis, valid_problems)
+
+    max_batch_size = 32  # FIXME
     for low in range(0, n_phase_shifts, max_batch_size):
         high = min(n_phase_shifts, low + max_batch_size)
 
@@ -1966,24 +2001,18 @@ def branch_bound_solve_shared_shifts(
         solve_indices = argsort_upper_order[:, :, low:high]
 
         # valid_phase_shifts has shape (n_basis, n_phase_shifts)
-        # valid_phase_shifts.T has shape (n_phase_shifts, n_basis)
-        # -> (batch, n_electrodes, high - low, n_basis)
-        solve_phases = np.take_along_axis(valid_phase_shifts.T[None, None, :, :],
+        # -> (batch, n_electrodes, n_basis, high - low)
+        solve_phases = np.take_along_axis(valid_phase_shifts[None, None, :, :],
                                           solve_indices[:, :, None, :],
-                                          axis=2)
-        # at_a_matrix has shape
-        # (batch, n_valid_phase_shifts, n_basis, n_basis)
-        # -> (batch, n_electrodes, high-low, n_basis, n_basis)
-        solve_at_a = np.take_along_axis(at_a_matrix[:, None, :, :, :],
-                                        solve_indices[:, :, :, None, None],
-                                        axis=2)
+                                          axis=3)
+        # shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+        solve_at_a = batched_build_unshared_at_a_matrix(ft_basis, solve_phases, n_true_frequencies)
 
-        # at_b_vector has shape
-        # (batch, n_electrodes, n_valid_phase_shifts, n_basis)
-        # -> (batch, n_electrodes, high - low, n_basis)
-        solve_at_b = np.take_along_axis(at_b_vector[:, :, :, :],
-                                        solve_indices[:, :, :, None],
-                                        axis=2)
+        ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
+        # this one depends on absolute timing so it is much easier to pack
+        # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+        solve_at_b = batched_build_unshared_at_b_vector(observed_ft, ft_basis, solve_phases,
+                                                        n_true_frequencies)
 
         # shape (batch, n_electrodes)
         objective_cutoff = solution_heap.peek_max_all()
@@ -2005,10 +2034,11 @@ def branch_bound_solve_shared_shifts(
         if np.sum(is_valid_over_electrodes) == 0:  # nothing worth solving for in this chunk
             continue
 
+        print("compactifying")
         compact_at_a, compact_at_b, compact_phases, compact_valid = compactify_unshared_problems(solve_at_a,
-                                                                                  solve_at_b,
-                                                                                  solve_phases,
-                                                                                  is_valid_over_electrodes)
+                                                                                                 solve_at_b,
+                                                                                                 solve_phases,
+                                                                                                 is_valid_over_electrodes)
 
         print(compact_at_a.shape, high - low)
 
@@ -2469,22 +2499,22 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
     else:
         # shape (batch, n_electrodes, second_pass_best_n, n_basis)
         best_phases = grid_search_solve_shared_shifts(observed_ft,
-                                                       ft_basis,
-                                                       n_true_frequencies,
-                                                       regularization_type,
-                                                       regularization_lambda,
-                                                       valid_phase_shift_range,
-                                                       first_pass_step_size,
-                                                       second_pass_best_n,
-                                                       solver_params,
-                                                       device,
-                                                       group_sel_matrix=group_sel_matrix,
-                                                       valid_problems=valid_problems,
-                                                       amplitude_initialize_range=amplitude_initialize_range,
-                                                       max_batch_size=max_batch_size,
-                                                       verbose_solver=verbose_solver)
+                                                      ft_basis,
+                                                      n_true_frequencies,
+                                                      regularization_type,
+                                                      regularization_lambda,
+                                                      valid_phase_shift_range,
+                                                      first_pass_step_size,
+                                                      second_pass_best_n,
+                                                      solver_params,
+                                                      device,
+                                                      group_sel_matrix=group_sel_matrix,
+                                                      valid_problems=valid_problems,
+                                                      amplitude_initialize_range=amplitude_initialize_range,
+                                                      max_batch_size=max_batch_size,
+                                                      verbose_solver=verbose_solver)
 
-    best_phases = best_phases.permute(0, 1, 3, 2) # FIXME replace the bottom routine later
+    best_phases = best_phases.transpose(0, 1, 3, 2)  # FIXME replace the bottom routine later
     #### Do the fine search ###################################################
 
     second_pass_fine_steps = np.r_[-second_pass_width:second_pass_width + 1]
@@ -2579,7 +2609,8 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
                                                       use_scaled_mse_penalty: bool = False,
                                                       use_scaled_regularization_terms: bool = False,
                                                       group_sel_matrix: Optional[np.ndarray] = None,
-                                                      sobolev_lambda: Optional[float] = None) \
+                                                      sobolev_lambda: Optional[float] = None,
+                                                      use_branch_and_bound: bool = False) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     '''
     Batched version of the main iteration loop for the two-step alternating optimization process.
@@ -2678,6 +2709,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             valid_problems=is_valid_matrix,
             amplitude_initialize_range=amplitude_init_range,
             max_batch_size=max_batch_size,
+            use_branch_and_bound=use_branch_and_bound,
             verbose_solver=False)
 
         # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
@@ -2774,7 +2806,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         use_scaled_mse_penalty: bool = False,
         use_scaled_regularization_terms: bool = False,
         grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
-        sobolev_reg: Optional[float] = None) \
+        sobolev_reg: Optional[float] = None,
+        use_branch_and_bound: bool = False) \
         -> Union[Tuple[Dict[int, Dict[str, np.ndarray]], Dict[str, float]],
                  Dict[int, Dict[str, np.ndarray]]]:
     '''
@@ -2849,6 +2882,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
             group_sel_matrix=make_group_sparse_mat_from_group_list(grouped_l1l2_groups,
                                                                    initialized_basis_vectors.shape[0]),
             sobolev_lambda=sobolev_reg,
+            use_branch_and_bound=use_branch_and_bound
         )
 
         wip_decomp_list.append((amplitudes, delays, waveforms))
