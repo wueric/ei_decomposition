@@ -6,12 +6,16 @@ import numpy as np
 from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3
 from lib.losseval import batch_evaluate_mse_flat
 from lib.optim.proxgrad_optim import BatchedMultiProxProblem, AutogradBatchMultiProxProblem, \
-    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, ProxGradSolverParams
+    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, \
+    ProxGradSolverParams
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector
 
 from typing import Union, Optional, Tuple, Dict, List
 from enum import Enum
+
+import heapq
+from functools import total_ordering
 
 import tqdm
 
@@ -1191,8 +1195,21 @@ class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Bat
         '''
 
         batch, n_electrodes, n_shifts, n_basis = batched_unshared_at_b_vector.shape
-        valid_problem_total = np.zeros((batch, n_electrodes, n_shifts), dtype=bool)
-        valid_problem_total[valid_problem_mask, :] = True
+
+        if valid_problem_mask.ndim == 2:
+            if valid_problem_mask.shape != (batch, n_electrodes):
+                raise ValueError(
+                    f"if valid_problem_mask ndim=2, then valid_problem_mask must have shape ({batch}, {n_electrodes})")
+
+            valid_problem_total = np.zeros((batch, n_electrodes, n_shifts), dtype=bool)
+            valid_problem_total[valid_problem_mask, :] = True
+        elif valid_problem_mask.ndim == 3:
+            if valid_problem_mask.shape != (batch, n_electrodes, n_shifts):
+                raise ValueError(
+                    f"if valid_problem_mask ndim=3, then valid_problem_mask must have shape ({batch}, {n_electrodes}, {n_shifts})")
+            valid_problem_total = valid_problem_mask
+        else:
+            raise ValueError("valid_problem_mask must have either ndim=2 or ndim=3")
 
         super().__init__(batch, n_electrodes * n_shifts,
                          valid_problems=valid_problem_total.reshape(batch, -1),
@@ -1438,6 +1455,686 @@ def make_shared_shift_solver(regularization_type: RegularizationType,
     raise ValueError(f"Invalid regularization type {regularization_type}")
 
 
+def _np_prox_project_nonneg_orthant(batched_variables: np.ndarray) -> np.ndarray:
+    '''
+
+    :param batched_variables:
+    :return:
+    '''
+    return np.clip(batched_variables, a_min=0.0, a_max=None)
+
+
+def _l12_group_sparse_bounds(at_a_matrix: np.ndarray,
+                             at_b_matrix: np.ndarray,
+                             regularization_lambda: Union[float, np.ndarray],
+                             regularization_groups: np.ndarray) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    '''
+    Lower bound is computed by solving the unconstrained version of the objective function
+        without the regularization term
+
+    Upper bound is computed by applyg the proximal projection of the unconstrained solution into the
+        feasible region and then adding the regularization term
+
+    :param at_a_matrix: shape (batch, n_valid_phase_shifts, n_basis_waveforms, n_basis_waveforms)
+        A^T A matrix for each problem
+    :param at_b_matrix: shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms),
+        A^T b vector for each problem
+    :param regularization_lambda:
+    :param regularization_groups: shape (n_groups, n_basis_waveforms)
+    :return:
+    '''
+
+    def eval_objective(x_value: np.ndarray, include_regularization: bool) -> np.ndarray:
+        '''
+
+        :param x_value: shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms)
+        :return: shape (batch, n_observations, n_valid_phase_shifts)
+        '''
+
+        # (batch, n_valid_phase_shifts, n_basis_waveforms, n_basis_waveforms) @
+        #   (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms, 1)
+        # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms, 1)
+        at_a_x = at_a_matrix[:, None, :, :, :] @ x_value[:, :, :, :, None]
+
+        # (batch, n_observations, n_valid_phase_shifts, 1, n_basis_waveforms) @
+        #   (batch, n_observations, n_phase_shifts, n_basis_waveforms, 1)
+        # -> (batch, n_observations, n_phase_shifts, 1, 1)
+        # -> (batch, n_observations, n_phase_shifts)
+        xt_at_a_x = (x_value[:, :, :, None, :] @ at_a_x).squeeze(-2).squeeze(-1)
+
+        # (batch, n_observations, n_valid_phase_shifts, 1, n_basis_waveforms) @
+        #   (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms, 1)
+        # -> (batch, n_observations, n_phase_shifts, 1, 1)
+        # -> (batch, n_observations, n_phase_shifts)
+        xt_at_b = (x_value[:, :, :, None, :] @ at_b_matrix[:, :, :, :, None]).squeeze(-2).squeeze(-1)
+
+        if include_regularization:
+            # (batch, n_observations, n_valid_phase_shifts)
+
+            # shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms)
+            x_square = np.square(x_value)
+
+            # shape (1, 1, 1, n_groups, n_basis_waveforms) @
+            #   (batch, n_observations, n_phase_shifts, n_basis, 1)
+            # -> (batch, n_observations, n_phase_shifts, n_groups, 1)
+            # -> (batch, n_observations, n_phase_shifts, n_groups)
+            regularization_square_norm = regularization_groups[None, None, None, :, :] @ x_square[:, :, :, :,
+                                                                                         1].squeeze(-1)
+            regularization_term = regularization_lambda * np.sum(np.sqrt(regularization_square_norm), axis=3)
+
+            return 0.5 * xt_at_a_x + xt_at_b + regularization_term
+
+        return 0.5 * xt_at_a_x + xt_at_b
+
+    at_b_minus_one = at_b_matrix - 1.0
+
+    # shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms, 1)
+    # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms)
+    x_solved = np.linalg.solve(at_a_matrix[:, None, :, :, :], at_b_minus_one[:, :, :, :, None]).squeeze(-1)
+
+    # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms)
+    x_projected = _np_prox_project_nonneg_orthant(x_solved)
+
+    # -> (batch, n_observations, n_phase_shifts)
+    lower_bound_objective = eval_objective(x_solved, False)
+
+    # -> (batch, n_observations, n_phase_shifts)
+    upper_bound_objective = eval_objective(x_projected, True)
+
+    return lower_bound_objective, upper_bound_objective
+
+
+def _l1_sparse_bounds(at_a_matrix: np.ndarray,
+                      at_b_matrix: np.ndarray,
+                      regularization_lambda: Union[float, np.ndarray]) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    '''
+    Lower bound is computed by solving the unconstrained version of the objective function
+        without the regularization term
+
+    Upper bound is computed by applyg the proximal projection of the unconstrained solution into the
+        feasible region and then adding the regularization term
+
+    :param at_a_matrix: shape (batch, n_valid_phase_shifts, n_basis_waveforms, n_basis_waveforms)
+        A^T A matrix for each problem
+    :param at_b_matrix: shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms),
+        A^T b vector for each problem
+    :param regularization_lambda:
+    :return:
+    '''
+
+    def eval_objective(x_value: np.ndarray, include_regularization: bool) -> np.ndarray:
+        '''
+
+        :param x_value: shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms)
+        :return: shape (batch, n_observations, n_valid_phase_shifts)
+        '''
+
+        # (batch, n_valid_phase_shifts, n_basis_waveforms, n_basis_waveforms) @
+        #   (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms, 1)
+        # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms, 1)
+        at_a_x = at_a_matrix[:, None, :, :, :] @ x_value[:, :, :, :, None]
+
+        # (batch, n_observations, n_valid_phase_shifts, 1, n_basis_waveforms) @
+        #   (batch, n_observations, n_phase_shifts, n_basis_waveforms, 1)
+        # -> (batch, n_observations, n_phase_shifts, 1, 1)
+        # -> (batch, n_observations, n_phase_shifts)
+        xt_at_a_x = (x_value[:, :, :, None, :] @ at_a_x).squeeze(-2).squeeze(-1)
+
+        # (batch, n_observations, n_valid_phase_shifts, 1, n_basis_waveforms) @
+        #   (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms, 1)
+        # -> (batch, n_observations, n_phase_shifts, 1, 1)
+        # -> (batch, n_observations, n_phase_shifts)
+        xt_at_b = (x_value[:, :, :, None, :] @ at_b_matrix[:, :, :, :, None]).squeeze(-2).squeeze(-1)
+
+        if include_regularization:
+            regularization_term = regularization_lambda * np.sum(x_value, axis=3)
+            return 0.5 * xt_at_a_x + xt_at_b + regularization_term
+        return 0.5 * xt_at_a_x + xt_at_b
+
+    at_b_minus_one = at_b_matrix - 1.0
+
+    # shape (batch, n_observations, n_valid_phase_shifts, n_basis_waveforms, 1)
+    # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms)
+    x_solved = np.linalg.solve(at_a_matrix[:, None, :, :, :], at_b_minus_one[:, :, :, :, None]).squeeze(-1)
+
+    # -> (batch, n_observations, n_phase_shifts, n_basis_waveforms)
+    x_projected = _np_prox_project_nonneg_orthant(x_solved)
+
+    # -> (batch, n_observations, n_phase_shifts)
+    lower_bound_objective = eval_objective(x_solved, False)
+
+    # -> (batch, n_observations, n_phase_shifts)
+    upper_bound_objective = eval_objective(x_projected, True)
+
+    return lower_bound_objective, upper_bound_objective
+
+
+def objective_bounds(at_a_matrix: np.ndarray,
+                     at_b_matrix: np.ndarray,
+                     regularization_lambda: Union[float, np.ndarray],
+                     regularization_type: RegularizationType,
+                     regularization_groups: Optional[np.ndarray] = None) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    '''
+    Computes simple lower and upper bounds for the objective function
+        so that we can do a branch-and-bound type search over the possible
+        timeshifts, and drastically reduce the number of timeshifts that we
+        need to consider
+    :param at_a_matrix:
+    :param at_b_matrix:
+    :param regularization_lambda:
+    :param regularization_type:
+    :return:
+    '''
+
+    if regularization_type == RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED:
+
+        return _l12_group_sparse_bounds(at_a_matrix,
+                                        at_b_matrix,
+                                        regularization_lambda,
+                                        regularization_groups)
+
+    elif regularization_type == RegularizationType.L1_SPARSE_REG:
+
+        return _l1_sparse_bounds(at_a_matrix,
+                                 at_b_matrix,
+                                 regularization_lambda)
+
+    elif regularization_type == RegularizationType.L12_GROUP_SPARSE_REG_SMOOTH:
+
+        raise NotImplementedError("L12 group sparse smooth branch-and-bound not implemented")
+
+    raise ValueError(f"Invalid regularization type {regularization_type}")
+
+
+@total_ordering
+class NNode:
+
+    def __init__(self, objective: float, amplitudes: np.ndarray, phases: np.ndarray):
+        self.objective = objective  # type: float
+        self.amplitudes = amplitudes  # type: np.ndarray
+        self.phases = phases  # type: np.ndarray
+
+        self.key = -objective
+
+    def __lt__(self, other: 'NNode'):
+        return self.key < other.key
+
+    def __eq__(self, other: 'NNode'):
+        return self.key == other.key
+
+
+class BestNHeap:
+    '''
+    Data structure to keep track of the best N (lowest objective function) scores
+        and associated parameters for each batch of problems
+
+    N is going to be very small (something like 10 at most)
+
+    Underlying data structure is a max-heap where the key is the objective function
+        This allows us to easily keep track of and remove/replace the worst
+        of the best scores so far.
+
+    Since Python's heapq implements a min-heap, we will use the negative of the
+        objective function as the key
+    '''
+
+    def __init__(self, best_n: int):
+        self.best_n = best_n  # type: int
+        self.heap = []  # type: List[NNode]
+
+    def n_entries(self) -> int:
+        return len(self.heap)
+
+    def replace_max(self, next_max: NNode):
+        heapq.heappushpop(self.heap, next_max)
+
+    def insert(self, to_insert: NNode):
+        heapq.heappush(self.heap, to_insert)
+
+    def peek_max(self) -> float:
+        if self.n_entries() == 0:
+            return float('-inf')
+        return self.heap[0].objective
+
+    def update(self,
+               objective: float,
+               amplitudes: np.ndarray,
+               phases: np.ndarray) -> None:
+        '''
+
+        :param objective: float, loss function value
+        :param amplitudes: shape (n_basis, )
+        :param phases: shape (n_basis, )
+        :return:
+        '''
+        if self.n_entries() < self.best_n or objective < self.peek_max():
+            self.insert(NNode(objective, amplitudes, phases))
+
+    def bulk_update(self,
+                    objectives: np.ndarray,
+                    amplitudes: np.ndarray,
+                    phases: np.ndarray) -> None:
+        '''
+
+        :param objectives: shape (n_problems, )
+        :param amplitudes: shape (n_problems, n_basis)
+        :param phases: shape (n_problems, n_basis)
+        :return:
+        '''
+        for i in range(objectives.shape[0]):
+            self.update(objectives[i], amplitudes[i, :], phases[i, :])
+
+    def get_all_best(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+        objective_list = []  # type: List[float]
+        amplitudes_list = []  # type: List[np.ndarray]
+        phases_list = []  # type: List[np.ndarray]
+
+        for i in range(self.best_n):
+            heap_node = self.heap[i]
+            objective_list.append(heap_node.objective)
+            amplitudes_list.append(heap_node.amplitudes)
+            phases_list.append(heap_node.phases)
+
+        return np.array(objective_list, dtype=np.float32), np.stack(amplitudes_list, axis=0), np.stack(phases_list,
+                                                                                                       axis=0)
+
+
+class BatchedMultielectrodeBestN:
+
+    def __init__(self, batch: int, max_els: int, best_n: int,
+                 n_basis: int, valid_problems: Optional[np.ndarray] = None):
+
+        self.batch = batch  # type: int
+        self.max_els = max_els  # type: int
+        self.best_n = best_n  # type: int
+        self.n_basis = n_basis  # type: int
+
+        self.heaps = {(_batch, _el): BestNHeap(best_n)
+                      for _batch in range(batch) for _el in range(max_els)}  # type: Dict[Tuple[int, int], BestNHeap]
+
+        self.has_invalid_problems = valid_problems is not None
+        if self.has_invalid_problems:
+            if valid_problems.shape != (batch, max_els):
+                raise ValueError(f"valid_problems must have shape ({batch}, {max_els}")
+            self.valid_problems = valid_problems
+
+    def peek_max_all(self) -> np.ndarray:
+        max_all = np.ones((self.batch, self.max_els), dtype=np.float32) * np.inf
+        for i in range(self.batch):
+            for j in range(self.max_els):
+                max_all[i, j] = self.heaps[(i, j)].peek_max()
+        return max_all
+
+    def merge_next_best(self,
+                        next_batch_objective: np.ndarray,
+                        next_batch_amplitudes: np.ndarray,
+                        next_batch_phases: np.ndarray) -> None:
+        '''
+        Updates the heap data structures with the best of the next set of optimization
+            problem solutions
+
+        :param next_batch_objective: shape (batch, n_electrodes, n_phase_shifts)
+        :param next_batch_amplitudes: shape (batch, n_electrodes, n_phase_shifts, n_basis)
+        :param next_batch_phases: shape (batch, n_electrodes, n_phase_shifts, n_basis)
+        :return: None
+        '''
+
+        objective_argsorted = np.argpartition(next_batch_amplitudes, self.best_n, axis=2)[:self.best_n]
+
+        best_objectives = next_batch_objective[:, :, objective_argsorted]
+        best_amplitudes = next_batch_amplitudes[:, :, objective_argsorted, :]
+        best_phases = next_batch_phases[:, :, objective_argsorted, :]
+
+        for i in range(self.batch):
+            for j in range(self.max_els):
+                self.heaps[(i, j)].bulk_update(best_objectives[i, j, :],
+                                               best_amplitudes[i, j, :, :],
+                                               best_phases[i, j, :, :])
+
+    def return_best_n(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+        objectives = np.zeros((self.batch, self.max_els, self.best_n), dtype=np.float32)
+        amplitudes = np.zeros((self.batch, self.max_els, self.best_n, self.n_basis), dtype=np.float32)
+        phases = np.zeros((self.batch, self.max_els, self.best_n, self.n_basis), dtype=np.int64)
+
+        for i in range(self.batch):
+            for j in range(self.max_els):
+                curr_heap = self.heaps[(i, j)]
+                curr_obj, curr_amp, curr_phase = curr_heap.get_all_best()
+                objectives[i, j, :] = curr_obj
+                amplitudes[i, j, :, :] = curr_amp
+                phases[i, j, :, :] = curr_phase
+
+        return objectives, amplitudes, phases
+
+
+def make_shared_phase_grid_matrix(valid_phase_shift_range: Tuple[int, int],
+                                  first_pass_step_size: int,
+                                  n_basis: int):
+    '''
+
+    :param valid_phase_shift_range:
+    :param first_pass_step_size:
+    :param n_basis:
+    :return:
+    '''
+    low_shift, high_shift = valid_phase_shift_range
+    shift_steps = np.r_[low_shift:high_shift:first_pass_step_size]
+    mg = np.stack(np.meshgrid(*[shift_steps for _ in range(n_basis)]), axis=0)
+
+    # shape (n_basis, (high_shift - low_shift)^n_basis)
+    valid_phase_shifts_matrix = mg.reshape((n_basis, -1))
+
+    return valid_phase_shifts_matrix
+
+
+def compactify_unshared_problems(at_a_matrix: np.ndarray,
+                                 at_b_vector: np.ndarray,
+                                 phases: np.ndarray,
+                                 is_valid_problem: np.ndarray) \
+        -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    '''
+
+    :param at_a_matrix: (batch, n_electrodes, n_phases, n_basis, n_basis)
+    :param at_b_vector: (batch, n_electrodes, n_phase_shifts, n_basis)
+    :param phases: (batch, n_electrodes, n_phase_shifts, n_basis)
+    :param is_valid_problem: (batch, n_electrodes, n_phase_shifts)
+    :return:
+    '''
+    batch, n_electrodes, n_orig_shifts, n_basis, _ = at_a_matrix.shape
+
+    max_valid_problems = np.max(np.sum(is_valid_problem, axis=2))
+
+    at_a_compactified = np.zeros((batch, n_electrodes, max_valid_problems, n_basis, n_basis),
+                                 dtype=np.float32)
+    at_b_compactified = np.zeros((batch, n_electrodes, max_valid_problems, n_basis),
+                                 dtype=np.float32)
+    phases_compactified = np.zeros((batch, n_electrodes, max_valid_problems, n_basis),
+                                   dtype=np.int64)
+    valid_problems_compacitified = np.zeros((batch, n_electrodes, max_valid_problems),
+                                            dtype=bool)
+
+    for i in range(batch):
+        for j in range(n_electrodes):
+            is_valid_sel = is_valid_problem[i, j, :]
+            n_valid_problems = np.sum(is_valid_sel)
+
+            at_a_compactified[i, j, :n_valid_problems, :, :] = at_a_matrix[i, j, is_valid_sel, :, :]
+            at_b_compactified[i, j, :n_valid_problems, :] = at_b_vector[i, j, is_valid_sel, :]
+            phases_compactified[i, j, :n_valid_problems, :] = phases[i, j, is_valid_sel, :]
+            valid_problems_compacitified[i,j,:n_valid_problems] = True
+
+    return at_a_compactified, at_b_compactified, phases_compactified, valid_problems_compacitified
+
+
+def branch_bound_solve_shared_shifts(
+        observed_ft: np.ndarray,
+        ft_basis: np.ndarray,
+        n_true_frequencies: int,
+        regularization_type: RegularizationType,
+        regularization_lambda: Union[float, np.ndarray],
+        valid_phase_shift_range: Tuple[int, int],
+        first_pass_step_size: int,
+        second_pass_best_n: int,
+        solver_params: ProxSolverParams,
+        device: torch.device,
+        group_sel_matrix: Optional[np.ndarray] = None,
+        valid_problems: Optional[np.ndarray] = None,
+        amplitude_initialize_range: Tuple[float, float] = (0.0, 1.0),
+        max_batch_size: int = 1024,
+        verbose_solver: bool = False) -> np.ndarray:
+    '''
+    Basic branch-and-bound algorithm for solving for the amplitudes and time
+        shifts, while trying to solve the fewest possible minimization problems.
+
+    :param observed_ft:
+    :param ft_basis:
+    :param n_true_frequencies:
+    :param regularization_type:
+    :param regularization_lambda:
+    :param valid_phase_shift_range:
+    :param first_pass_step_size:
+    :param solver_params:
+    :param device:
+    :param group_sel_matrix:
+    :param valid_problems:
+    :param amplitude_initialize_range:
+    :param max_batch_size:
+    :param verbose_solver:
+    :return:
+    '''
+
+    batch, n_electrodes, n_rfft_frequencies = observed_ft.shape
+    n_basis = ft_basis.shape[1]
+
+    # shape (n_basis, (high_shift - low_shift)^n_basis)
+    # -> (n_basis, n_phase_shifts)
+    valid_phase_shifts = make_shared_phase_grid_matrix(valid_phase_shift_range,
+                                                       first_pass_step_size,
+                                                       n_basis)
+    n_phase_shifts = valid_phase_shifts.shape[2]
+
+    #### Step 1: build A^T A from circular cross correlation #####################################
+
+    # shape (batch, n_valid_phase_shifts, n_canonical_waveforms, n_canonical_waveforms)
+    at_a_matrix = batched_build_at_a_matrix(ft_basis, valid_phase_shifts, n_true_frequencies)
+
+    ##### Step 2: build A^T b from circular cross correlation with data matrix ##################
+    # this one depends on absolute timing so it is much easier to pack
+    # shape (batch, n_observations, n_valid_phase_shifts, n_canonical_waveforms)
+    at_b_vector = batched_build_at_b_vector(observed_ft, ft_basis, valid_phase_shifts, n_true_frequencies)
+
+    ##### Compute upper and lower bounds for branch-and-bound
+
+    # each has shape
+    # (batch, n_observations, n_phase_shifts)
+    lower_bounds, upper_bounds = objective_bounds(at_a_matrix,
+                                                  at_b_vector,
+                                                  regularization_lambda,
+                                                  regularization_type,
+                                                  regularization_groups=group_sel_matrix)
+
+    ##### Basic batched branch-and-bound algorithm ########################
+    # 0. Keep track of the top N candidates for each valid problem,
+    #       and their respective phase shifts
+    # 1. We order search the problem in order by the upper bound,
+    #      lowest upper bound first
+    # 2. After each batch, we update the top N candidates
+    # 3. If the lower bound of a problem is worse (strictly greater than
+    #       the top N candidates so far), we throw away that problem
+    #       and don't even bother solving it.
+
+    ## Implementation note: although this is the "shared shifts" solver
+    ## we have to use the UnsharedShifts solvers because each problem
+    ## will have the shifts in different order
+
+    # (batch, n_electrodes, n_phase_shifts), integer indices
+    argsort_upper_order = np.argsort(upper_bounds, axis=2)
+
+    pbar = tqdm.tqdm(total=int(np.ceil(n_phase_shifts / max_batch_size)), leave=False,
+                     desc='First pass branch-bound search')
+    solution_heap = BatchedMultielectrodeBestN(batch, n_electrodes, second_pass_best_n,
+                                               n_basis, valid_problems)
+    for low in range(0, n_phase_shifts, max_batch_size):
+        high = min(n_phase_shifts, low + max_batch_size)
+
+        # shape (batch, n_electrodes, high - low))
+        solve_indices = argsort_upper_order[:, :, low:high]
+
+        # valid_phase_shifts has shape (n_basis, n_phase_shifts)
+        # valid_phase_shifts.T has shape (n_phase_shifts, n_basis)
+        # -> (batch, n_electrodes, high - low, n_basis)
+        solve_phases = np.take_along_axis(valid_phase_shifts.T[None, None, :, :],
+                                          solve_indices[:, :, None, :],
+                                          axis=2)
+        # at_a_matrix has shape
+        # (batch, n_valid_phase_shifts, n_basis, n_basis)
+        # -> (batch, n_electrodes, high-low, n_basis, n_basis)
+        solve_at_a = np.take_along_axis(at_a_matrix[:, None, :, :, :],
+                                        solve_indices[:, :, :, None, None],
+                                        axis=2)
+
+        # at_b_vector has shape
+        # (batch, n_electrodes, n_valid_phase_shifts, n_basis)
+        # -> (batch, n_electrodes, high - low, n_basis)
+        solve_at_b = np.take_along_axis(at_b_vector[:, :, :, :],
+                                        solve_indices[:, :, :, None],
+                                        axis=2)
+
+        # shape (batch, n_electrodes)
+        objective_cutoff = solution_heap.peek_max_all()
+
+        # Note that there are now two different kinds of invalid problems
+        # (1) invalid problems corresponding to invalid electrodes (what we had
+        #       before in the grid-search case
+        # (2) invalid problems corresponding to useless phase shifts (the particular
+        #       phase shift is guaranteed to not be good enough, so we don't need
+        #       to bother solving this particular prolem)
+
+        # figure out which of the problems are worth solving
+
+        # shape (batch, n_electrodes, high - low)
+        objective_lower_bound = np.take_along_axis(lower_bounds, solve_indices, axis=2)
+        worth_solving = objective_lower_bound < objective_cutoff[:, :, None]
+        is_valid_over_electrodes = worth_solving & valid_problems[:, :, None]
+
+        if np.sum(is_valid_over_electrodes) == 0:  # nothing worth solving for in this chunk
+            continue
+
+        compact_at_a, compact_at_b, compact_phases, compact_valid = compactify_unshared_problems(solve_at_a,
+                                                                                  solve_at_b,
+                                                                                  solve_phases,
+                                                                                  is_valid_over_electrodes)
+
+        print(compact_at_a.shape, high - low)
+
+        unshared_solver = make_unshared_shifts_solver(regularization_type,
+                                                      compact_at_a,
+                                                      compact_at_b,
+                                                      compact_valid,
+                                                      regularization_lambda,
+                                                      init_low=amplitude_initialize_range[0],
+                                                      init_high=amplitude_initialize_range[1],
+                                                      group_sel_matrix=group_sel_matrix,
+                                                      verbose=verbose_solver).to(
+            device)  # type: Union[BatchedMultiProxProblem, UnsharedShiftSolver, BatchedShiftSolver]
+
+        _ = unshared_solver.solve(solver_params)
+
+        # shape (batch, n_electrodes, n_phase_shifts, n_basis)
+        amplitudes_solved = unshared_solver.return_amplitudes().detach().cpu().numpy()
+
+        # shape (batch, n_electrodes, n_phase_shifts)
+        objective_fn_vals = unshared_solver.compute_loss_for_argmin().detach().cpu().numpy()
+
+        solution_heap.merge_next_best(objective_fn_vals,
+                                      amplitudes_solved,
+                                      compact_phases)
+
+        pbar.update(1)
+
+    pbar.close()
+
+    best_objectives, best_amplitudes, best_phases = solution_heap.return_best_n()
+
+    return best_phases
+
+
+def grid_search_solve_shared_shifts(observed_ft: np.ndarray,
+                                    ft_basis: np.ndarray,
+                                    n_true_frequencies: int,
+                                    regularization_type: RegularizationType,
+                                    regularization_lambda: Union[float, np.ndarray],
+                                    valid_phase_shift_range: Tuple[int, int],
+                                    first_pass_step_size: int,
+                                    second_pass_best_n: int,
+                                    solver_params: ProxSolverParams,
+                                    device: torch.device,
+                                    group_sel_matrix: Optional[np.ndarray] = None,
+                                    valid_problems: Optional[np.ndarray] = None,
+                                    amplitude_initialize_range: Tuple[float, float] = (0.0, 1.0),
+                                    max_batch_size: int = 1024,
+                                    verbose_solver: bool = False) -> np.ndarray:
+    '''
+
+    :param observed_ft:
+    :param ft_basis:
+    :param n_true_frequencies:
+    :param regularization_type:
+    :param regularization_lambda:
+    :param valid_phase_shift_range:
+    :param first_pass_step_size:
+    :param second_pass_best_n:
+    :param solver_params:
+    :param device:
+    :param group_sel_matrix:
+    :param valid_problems:
+    :param amplitude_initialize_range:
+    :param max_batch_size:
+    :param verbose_solver:
+    :return:
+    '''
+    batch, n_electrodes, _ = observed_ft.shape
+    _, n_basis, n_rfft_frequencies = ft_basis.shape
+
+    ######### Step 1: first pass, perform nonnegative least squares minimization on a coarse ###############
+    ######## grid of phase shifts, then pick the N best ####################################################
+    # shape (n_basis, (high_shift - low_shift)^n_basis)
+    valid_phase_shifts_matrix = make_shared_phase_grid_matrix(valid_phase_shift_range,
+                                                              first_pass_step_size,
+                                                              n_basis)
+    _, n_valid_phase_shifts = valid_phase_shifts_matrix.shape
+
+    amplitude_results = np.zeros((batch, n_electrodes, n_valid_phase_shifts, n_basis),
+                                 dtype=np.float32)
+    objective_results = np.zeros((batch, n_electrodes, n_valid_phase_shifts), dtype=np.float32)
+
+    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False,
+                     desc='First pass grid search')
+    for low in range(0, n_valid_phase_shifts, max_batch_size):
+        high = min(n_valid_phase_shifts, low + max_batch_size)
+
+        amplitude_batch, objective_batch = batched_fast_time_shifts_and_amplitudes_shared_shifts2(
+            observed_ft,
+            ft_basis,
+            valid_phase_shifts_matrix[None, :, low:high],
+            regularization_lambda,
+            regularization_type,
+            n_true_frequencies,
+            solver_params,
+            device,
+            group_sel_matrix=group_sel_matrix,
+            valid_problems=valid_problems,
+            solver_verbose=verbose_solver,
+            init_low=amplitude_initialize_range[0],
+            init_high=amplitude_initialize_range[1]
+        )
+
+        amplitude_results[:, :, low:high, :] = amplitude_batch
+        objective_results[:, :, low:high] = objective_batch
+        pbar.update(1)
+    pbar.close()
+
+    # pick the N best nodes to expand in detail
+    # shape (batch, n_electrodes, second_pass_best_n)
+    partition_idx = np.argpartition(objective_results, second_pass_best_n, axis=2)[:, :, :second_pass_best_n]
+
+    # shape (batch * n_electrodes * second_pass_best_n)
+    partition_idx_flat = partition_idx.reshape((-1))
+
+    # shape (n_basis, batch * n_electrodes * second_pass_best)
+    best_phases_flat = valid_phase_shifts_matrix[:, partition_idx_flat]
+
+    # shape (batch, n_electrodes, n_basis, second_pass_best_n)
+    best_phases = best_phases_flat.reshape(n_basis, batch, n_electrodes, second_pass_best_n).transpose(1, 2, 0, 3)
+
+    return best_phases
+
+
 def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
         observed_ft: np.ndarray,
         ft_basis: np.ndarray,
@@ -1548,7 +2245,7 @@ def make_unshared_shifts_solver(
         amplitudes_matrix_init: Optional[np.ndarray] = None,
         verbose: bool = True,
         init_low: float = 0.0,
-        init_high: float = 1e-2) \
+        init_high: float = 1.0) \
         -> Union[UnsharedShiftSolver, BatchedMultiProxProblem]:
     '''
 
@@ -1708,6 +2405,7 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
         valid_problems: Optional[np.ndarray] = None,
         amplitude_initialize_range: Tuple[float, float] = (0.0, 1.0),
         max_batch_size: int = 1024,
+        use_branch_and_bound: bool = False,
         verbose_solver: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     '''
     Coarse-to-fine joint fitting of amplitudes and time shifts. Algorithm has two distinct phases:
@@ -1751,61 +2449,42 @@ def batched_coarse_to_fine_time_shifts_and_amplitudes2(
 
     ######### Step 1: first pass, perform nonnegative least squares minimization on a coarse ###############
     ######## grid of phase shifts, then pick the N best ####################################################
-    low_shift, high_shift = valid_phase_shift_range
-    shift_steps = np.r_[low_shift:high_shift:first_pass_step_size]
-    mg = np.stack(np.meshgrid(*[shift_steps for _ in range(n_basis)]), axis=0)
+    if use_branch_and_bound:
+        # shape (batch, n_electrodes, second_pass_best_n, n_basis)
+        best_phases = branch_bound_solve_shared_shifts(observed_ft,
+                                                       ft_basis,
+                                                       n_true_frequencies,
+                                                       regularization_type,
+                                                       regularization_lambda,
+                                                       valid_phase_shift_range,
+                                                       first_pass_step_size,
+                                                       second_pass_best_n,
+                                                       solver_params,
+                                                       device,
+                                                       group_sel_matrix=group_sel_matrix,
+                                                       valid_problems=valid_problems,
+                                                       amplitude_initialize_range=amplitude_initialize_range,
+                                                       max_batch_size=max_batch_size,
+                                                       verbose_solver=verbose_solver)
+    else:
+        # shape (batch, n_electrodes, second_pass_best_n, n_basis)
+        best_phases = grid_search_solve_shared_shifts(observed_ft,
+                                                       ft_basis,
+                                                       n_true_frequencies,
+                                                       regularization_type,
+                                                       regularization_lambda,
+                                                       valid_phase_shift_range,
+                                                       first_pass_step_size,
+                                                       second_pass_best_n,
+                                                       solver_params,
+                                                       device,
+                                                       group_sel_matrix=group_sel_matrix,
+                                                       valid_problems=valid_problems,
+                                                       amplitude_initialize_range=amplitude_initialize_range,
+                                                       max_batch_size=max_batch_size,
+                                                       verbose_solver=verbose_solver)
 
-    # shape (n_basis, (high_shift - low_shift)^n_basis)
-    valid_phase_shifts_matrix = mg.reshape((n_basis, -1))
-
-    _, n_valid_phase_shifts = valid_phase_shifts_matrix.shape
-
-    amplitude_results = np.zeros((batch, n_electrodes, n_valid_phase_shifts, n_basis),
-                                 dtype=np.float32)
-    objective_results = np.zeros((batch, n_electrodes, n_valid_phase_shifts), dtype=np.float32)
-
-    pbar = tqdm.tqdm(total=int(np.ceil(n_valid_phase_shifts / max_batch_size)), leave=False,
-                     desc='First pass grid search')
-    for low in range(0, n_valid_phase_shifts, max_batch_size):
-        high = min(n_valid_phase_shifts, low + max_batch_size)
-
-        amplitudes_random_init = np.random.uniform(amplitude_initialize_range[0],
-                                                   amplitude_initialize_range[1],
-                                                   size=(batch, n_electrodes, high - low, n_basis))
-
-        amplitude_batch, objective_batch = batched_fast_time_shifts_and_amplitudes_shared_shifts2(
-            observed_ft,
-            ft_basis,
-            valid_phase_shifts_matrix[None, :, low:high],
-            regularization_lambda,
-            regularization_type,
-            n_true_frequencies,
-            solver_params,
-            device,
-            group_sel_matrix=group_sel_matrix,
-            valid_problems=valid_problems,
-            amplitude_matrix_real_np=amplitudes_random_init,
-            solver_verbose=verbose_solver,
-        )
-
-        amplitude_results[:, :, low:high, :] = amplitude_batch
-        objective_results[:, :, low:high] = objective_batch
-        pbar.update(1)
-    pbar.close()
-
-    # pick the N best nodes to expand in detail
-    # shape (batch, n_electrodes, second_pass_best_n)
-    partition_idx = np.argpartition(objective_results, second_pass_best_n, axis=2)[:, :, :second_pass_best_n]
-
-    # shape (batch * n_electrodes * second_pass_best_n)
-    partition_idx_flat = partition_idx.reshape((-1))
-
-    # shape (n_basis, batch * n_electrodes * second_pass_best)
-    best_phases_flat = valid_phase_shifts_matrix[:, partition_idx_flat]
-
-    # shape (batch, n_electrodes, n_basis, second_pass_best_n)
-    best_phases = best_phases_flat.reshape(n_basis, batch, n_electrodes, second_pass_best_n).transpose(1, 2, 0, 3)
-
+    best_phases = best_phases.permute(0, 1, 3, 2) # FIXME replace the bottom routine later
     #### Do the fine search ###################################################
 
     second_pass_fine_steps = np.r_[-second_pass_width:second_pass_width + 1]
@@ -2091,7 +2770,6 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         fine_search_width: int = 2,
         grid_search_batch_size: int = 1024,
         maxiter_decomp: int = 25,
-        n_inner_optimization_iters: int = 15,
         l1_regularize_lambda: Optional[float] = None,
         use_scaled_mse_penalty: bool = False,
         use_scaled_regularization_terms: bool = False,
