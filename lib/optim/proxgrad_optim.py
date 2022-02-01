@@ -94,19 +94,34 @@ class MultiProxProblem(nn.Module):
         for x in self.parameters(recurse=False):
             assert x.shape[0] == self.n_problems, f"dim0 of each variable must be {self.n_problems}"
 
+    def _batch_flatten_variables(self,
+                                 variable_list: Iterable[torch.Tensor]) \
+            -> torch.Tensor:
+        return torch.cat([x.reshape(self.n_problems, -1)
+                          for x in variable_list], dim=1)
+
+    def _batch_unflatten_variables(self,
+                                   flat_variables: torch.Tensor) \
+            -> List[torch.Tensor]:
+
+        return_seq, offset = [], 0
+        shape_sequence = [x.shape for x in self.parameters(recurse=False)]
+        for tup_seq in shape_sequence:
+            sizeof = tup_seq[-1]
+            return_seq.append(flat_variables[:, offset:offset + sizeof].reshape(tup_seq))
+            offset += sizeof
+
+        return return_seq
+
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
         raise NotImplementedError
 
     def _packed_prox_proj(self, packed_variables, **kwargs) -> torch.Tensor:
 
         with torch.no_grad():
-            unpacked_variables = _multiproblem_unflatten_variables(
-                packed_variables,
-                [x.shape for x in self.parameters(recurse=False)]
-            )
+            unpacked_variables = self._batch_unflatten_variables(packed_variables)
             prox_projected_unpacked = self._prox_proj(*unpacked_variables, **kwargs)
-
-            return _multiproblem_flatten_variables(prox_projected_unpacked, self.n_problems)
+            return self._batch_flatten_variables(prox_projected_unpacked)
 
     def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError
@@ -118,8 +133,7 @@ class MultiProxProblem(nn.Module):
         :param kwargs:
         :return: shape (n_problems, )
         '''
-        unpacked_variables = _multiproblem_unflatten_variables(packed_variables,
-                                                               [x.shape for x in self.parameters(recurse=False)])
+        unpacked_variables = self._batch_unflatten_variables(packed_variables)
         return self._smooth_loss(*unpacked_variables, **kwargs)
 
     def _packed_loss_and_gradients(self, packed_variables: torch.Tensor, **kwargs) \
@@ -142,12 +156,7 @@ class MultiProxProblem(nn.Module):
             packed_variables.grad.zero_()
 
         loss_tensor = self._packed_smooth_loss(packed_variables, **kwargs)
-
-        # n_problems-tuple of 1x1 tensors, each tensor corresponds to loss
-        # for specific problem
-        loss_split_by_problem = torch.split(loss_tensor, 1, dim=0)
-
-        gradients_output, = autograd.grad(loss_split_by_problem,
+        gradients_output, = autograd.grad(torch.sum(loss_tensor),
                                           packed_variables)
 
         return loss_tensor, gradients_output
@@ -175,8 +184,7 @@ class MultiProxProblem(nn.Module):
         '''
 
         # shape (n_problems, ?)
-        vars_iter = _multiproblem_flatten_variables(self.parameters(recurse=False),
-                                                    self.n_problems).detach().clone()
+        vars_iter = self._batch_flatten_variables(self.parameters(recurse=False)).detach().clone()
 
         for iter in range(max_iter):
 
@@ -195,20 +203,51 @@ class MultiProxProblem(nn.Module):
                     break
 
         with torch.no_grad():
-            stepped_variables = _multiproblem_unflatten_variables(
-                vars_iter,
-                [x.shape for x in self.parameters(recurse=False)])
+            stepped_variables = self._batch_unflatten_variables(vars_iter)
             self.assign_optimization_vars(*stepped_variables)
-
             return self._smooth_loss(*stepped_variables, **kwargs)
 
-    def line_search_prox_solve(self,
-                               init_learning_rate: float,
-                               max_iter: int,
-                               converge_epsilon: float,
-                               backtracking_beta: float) -> Tuple[torch.Tensor, ...]:
+    def prox_grad_solve(self,
+                        init_learning_rate: float,
+                        max_iter: int,
+                        converge_epsilon: float,
+                        backtracking_beta: float,
+                        **kwargs) -> torch.Tensor:
 
-        pass
+        # shape (n_problems, ?)
+        vars_iter = self._batch_flatten_variables(self.parameters(recurse=False)).detach().clone()
+
+        # shape (n_problems, )
+        step_size = torch.ones((self.n_problems, ), dtype=vars_iter.dtype,
+                               device=vars_iter.device) * init_learning_rate
+
+        for iter in range(max_iter):
+
+            # shape (n_problems, ) and shape (n_problems, ?)
+            current_loss, gradient_flattened = self._packed_loss_and_gradients(vars_iter, **kwargs)
+
+            # Backtracking search, with projection inside the search
+            vars_iter, step_size = self._projected_backtracking_search(
+                current_loss,
+                vars_iter,
+                gradient_flattened,
+                step_size,
+                backtracking_beta,
+                **kwargs
+            )
+
+            if self.verbose:
+                current_mean = torch.mean(current_loss)
+                print(f"iter={iter}, mean loss={current_mean.item()}\r", end="")
+
+            has_converged = torch.norm(gradient_flattened, dim=1) < converge_epsilon
+            if torch.all(has_converged):
+                break
+
+        with torch.no_grad():
+            stepped_variables = self._batch_unflatten_variables(vars_iter)
+            self.assign_optimization_vars(*stepped_variables)
+            return self._smooth_loss(*stepped_variables, **kwargs)
 
     def _projected_backtracking_search(self,
                                        s_loss: torch.Tensor,
@@ -272,9 +311,13 @@ class MultiProxProblem(nn.Module):
             stepped_loss = self._packed_eval_smooth_loss(projected_stepped_vars, **kwargs)
 
             approx_smaller_loss = quad_approx_val < stepped_loss
+
             while torch.any(approx_smaller_loss):
                 # shape (n_problems, )
-                step_size = step_size * (backtracking_beta * approx_smaller_loss.float())
+                update_multiplier = approx_smaller_loss.float() * backtracking_beta \
+                                    + (~approx_smaller_loss).float() * 1.0
+                # shape (n_problems, )
+                step_size = step_size * update_multiplier
 
                 # shape (n_problems, ?)
                 stepped_vars_vectorized = s_vars_vectorized - gradients_vectorized * step_size[:, None]
@@ -316,8 +359,7 @@ class MultiProxProblem(nn.Module):
         '''
 
         # shape (n_problems, ?)
-        vars_iter = _multiproblem_flatten_variables(self.parameters(recurse=False),
-                                                    self.n_problems).detach().clone()
+        vars_iter = self._batch_flatten_variables(self.parameters(recurse=False)).detach().clone()
         vars_iter_min1 = vars_iter.detach().clone()
 
         # shape (n_problems, )
@@ -353,18 +395,59 @@ class MultiProxProblem(nn.Module):
             )
 
             if self.verbose:
-                print(f"iter={iter}, mean loss={torch.mean(current_loss).item()}", end='')
+                print(f"iter={iter}, mean loss={torch.mean(current_loss).item()}\r", end='')
 
             # quit early if all of the problems converged
-            if torch.all(torch.norm(vars_iter - vars_iter_min1)) < converge_epsilon:
+            has_converged = torch.norm(vars_iter - vars_iter_min1, dim=1) < converge_epsilon
+            if torch.all(has_converged):
                 break
 
         with torch.no_grad():
-            stepped_variables = _multiproblem_unflatten_variables(vars_iter,
-                                                                  [x.shape for x in self.parameters(recurse=False)])
+            stepped_variables = self._batch_unflatten_variables(vars_iter)
             self.assign_optimization_vars(*stepped_variables)
-
             return self._smooth_loss(*stepped_variables, **kwargs)
+
+    def solve(self,
+              solver_params: ProxSolverParams,
+              **kwargs) -> torch.Tensor:
+        if isinstance(solver_params, ProxFixedStepSizeSolverParams):
+
+            if solver_params.initial_learning_rate is None:
+                try:
+                    step_size = self.compute_fixed_step_size()
+                    return self.fixed_step_size_prox_solve(
+                        step_size,
+                        solver_params.max_iter,
+                        solver_params.converge_epsilon
+                    )
+                except NotImplementedError:
+                    raise ValueError("initial_learning_rate if compute_fixed_step_size not implemented")
+
+            return self.fixed_step_size_prox_solve(
+                solver_params.initial_learning_rate,
+                solver_params.max_iter,
+                solver_params.converge_epsilon
+            )
+
+        elif isinstance(solver_params, ProxGradSolverParams):
+            return self.prox_grad_solve(
+                solver_params.initial_learning_rate,
+                solver_params.max_iter,
+                solver_params.converge_epsilon,
+                solver_params.backtracking_beta,
+                **kwargs
+            )
+
+        elif isinstance(solver_params, ProxFISTASolverParams):
+            return self.fista_prox_solve(
+                solver_params.initial_learning_rate,
+                solver_params.max_iter,
+                solver_params.converge_epsilon,
+                solver_params.backtracking_beta,
+                **kwargs
+            )
+
+        raise TypeError("solver_params must be instance of ProxSolverParams")
 
 
 class BatchedMultiProxProblem(nn.Module, ABC):
@@ -525,7 +608,7 @@ class BatchedMultiProxProblem(nn.Module, ABC):
             # shape (batch, n_problems, ) and (batch, n_problems, ?)
             current_loss, gradient_flattened = self._packed_loss_and_gradients(vars_iter, **kwargs)
 
-            # FISTA backtracking search, with projection inside the backtracking search
+            # Backtracking search, with projection inside the backtracking search
             vars_iter, step_size = self._projected_backtracking_search(
                 current_loss,
                 vars_iter,
