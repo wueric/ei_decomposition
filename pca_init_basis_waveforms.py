@@ -76,7 +76,7 @@ if __name__ == '__main__':
 
     # now unpad and downsample
     unpadded_means = cluster_means[:, before_samples:-after_samples]
-    unpadded_downsampled_means = unpadded_means[::args.upsample]
+    unpadded_downsampled_means = unpadded_means[:, ::args.upsample]
 
     with open(args.basis_pickle, 'wb') as pfile:
         pickle_dict = {
