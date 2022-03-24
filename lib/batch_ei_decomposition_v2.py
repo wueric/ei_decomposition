@@ -12,7 +12,7 @@ from lib.optim.proxgrad_optim import BatchedMultiProxProblem, AutogradBatchMulti
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector
 
-from typing import Union, Optional, Tuple, Dict, List
+from typing import Union, Optional, Tuple, Dict, List, Any
 from enum import Enum
 from dataclasses import dataclass
 
@@ -2125,6 +2125,13 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
     return fit_amplitudes_rescaled, iter_basis_waveform_td, iter_delays, loss_dict
 
 
+@dataclass
+class WaveformPriorSummary:
+    gaussian_width_samples: float
+    waveform_regularization_lambda: Union[float, np.ndarray]
+    waveform_prior_take_mean: bool
+
+
 def batch_two_step_decompose_cells_by_fitted_compartments2(
         eis_by_cell_id: Dict[int, np.ndarray],
         initialized_basis_vectors: np.ndarray,
@@ -2140,16 +2147,19 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         fine_search_width: int = 2,
         grid_search_batch_size: int = 1024,
         maxiter_decomp: int = 25,
-        waveform_prior_params: Optional[WaveformPriorParams] = None,
+        waveform_prior_summary: Optional[WaveformPriorSummary] = None,
         realign_basis_time_per_iter: bool = False,
-        realign_basis_sample_num: int = 60,
+        realign_basis_sample_num: int = 20,
         l1_regularize_lambda: Optional[float] = None,
         use_scaled_mse_penalty: bool = False,
         use_scaled_regularization_terms: bool = False,
         grouped_l1l2_groups: Optional[List[np.ndarray]] = None) \
-        -> Union[Tuple[Dict[int, Dict[str, np.ndarray]], Dict[str, float]],
-                 Dict[int, Dict[str, np.ndarray]]]:
+        -> Tuple[Dict[int, Dict[str, np.ndarray]], Dict[str, Any]]:
     '''
+    REVISION NOTE:
+
+    We have to upsample both the basis waveforms and the raw data. This is to make sure that
+        computing waveform prior means and covariance matrices can be done simply.
 
     :param eis_by_cell_id: Dict mapping cell id to raw EIs. Each EI must have shape (n_electrodes, n_timepoints)
     :param initialized_basis_vectors: Initial value for basis waveforms in time domain. It helps to specify reasonable
@@ -2158,7 +2168,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         Even though each EI will be fitted with its own separate basis waveforms, we use the same initialization
             for each EI, since this initialization corresponds to a generic reasonable initial guess
 
-        shape (n_basis_waveforms, n_timepoints_raw)
+        shape (n_basis_waveforms, n_timepoints)
     :param device: torch device
     :param l1_regularize_lambda: float, regularization constant for L1 or group-sparse L1
     :param snr_abs_threshold:
@@ -2167,6 +2177,18 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
     :param maxiter_decomp:
     :return:
     '''
+    n_basis = initialized_basis_vectors.shape[0]
+    sample_realignment_timepoint = realign_basis_sample_num * supersample_factor + abs(shifts[0])
+
+    # upsample the basis prior mean waveforms
+    # these are also the initial guesses for the first amplitude iteration
+    # even if we don't use the prior distribution when solving for the waveforms
+    # shape (n_basis, supersample_factor * n_timepoints_raw)
+    init_basis_upsampled = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
+
+    # shape (n_basis, n_timepoints)
+    padded_basis_waveforms = np.pad(init_basis_upsampled,
+                                    [(0, 0), (abs(shifts[0]), abs(shifts[1]))])
 
     autobatched_list = auto_prebatch_pack_significant_electrodes(eis_by_cell_id,
                                                                  snr_abs_threshold)
@@ -2197,7 +2219,33 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
                                                       [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
                                                       mode='constant')
 
-        batched_basis_waveforms = np.tile(initialized_basis_vectors, (batch, 1, 1))
+        # shape (batch, n_basis, n_timepoints)
+        batched_basis_waveforms = np.tile(padded_basis_waveforms, (batch, 1, 1))
+
+        n_timepoints = padded_channels_sufficient_magnitude.shape[-1]
+
+        # if we are using the waveform prior, construct the covariance matrix
+        waveform_prior_params = None
+        if waveform_prior_summary is not None:
+            idx_vec = np.r_[0:n_timepoints]
+            diff_time = idx_vec[:, None] - idx_vec[None, :]
+
+            # by default use the same covariance matrix for everybody
+            # we need to convert the width in units of original samples to upsampled samples
+            gaussian_prior_width = waveform_prior_summary.gaussian_width_samples * supersample_factor
+
+            exp_arg = (diff_time * diff_time) / (2 * gaussian_prior_width * gaussian_prior_width)
+
+            # shape (n_timepoints, n_timepoints)
+            sample_time_cov_mat = np.exp(-exp_arg)
+
+            # by default use the same covariance matrix for everybody
+            # shape (n_basis, n_timepoints, n_timepoints)
+            cov_matrix_per_basis = np.tile(sample_time_cov_mat, (n_basis, 1, 1))
+
+            waveform_prior_params = WaveformPriorParams(cov_matrix_per_basis,
+                                                        waveform_prior_summary.waveform_regularization_lambda,
+                                                        waveform_prior_summary.waveform_prior_take_mean)
 
         # amplitudes has shape (batch, n_observations, n_basis_waveforms))
         # waveforms has shape (batch, n_basis_waveforms, n_timepoints)
@@ -2220,7 +2268,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
             use_scaled_regularization_terms=use_scaled_regularization_terms,
             waveform_prior_params=waveform_prior_params,
             realign_basis_time_per_iter=realign_basis_time_per_iter,
-            realign_basis_sample_num=realign_basis_sample_num,
+            realign_basis_sample_num=sample_realignment_timepoint,
             group_sel_matrix=make_group_sparse_mat_from_group_list(grouped_l1l2_groups,
                                                                    initialized_basis_vectors.shape[0]),
         )
@@ -2233,4 +2281,11 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
     # now unpack the results
     result_dict = auto_unbatch_unpack_significant_electrodes(wip_decomp_list, autobatched_list)
 
-    return result_dict
+    upsample_padding_parameters = {
+        'upsample' : supersample_factor,
+        'left_pad' : abs(shifts[0]),
+        'right_pad' : abs(shifts[1]),
+        'alignment_sample_pad_upsample' : sample_realignment_timepoint
+    }
+
+    return result_dict, upsample_padding_parameters

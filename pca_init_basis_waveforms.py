@@ -1,6 +1,5 @@
 import numpy as np
-from lib.util_fns import pack_significant_electrodes_into_matrix, generate_fourier_phase_shift_matrices, \
-    shift_align_abs_peak, bspline_upsample_waveforms
+from lib.util_fns import pack_significant_electrodes_into_matrix, shift_align_abs_peak, bspline_upsample_waveforms
 
 import pickle
 import argparse
@@ -9,23 +8,23 @@ from sklearn.mixture import GaussianMixture
 
 from typing import Dict
 
-import visionloader as vl
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Select initial basis waveforms')
 
     parser.add_argument('data_pickle', type=str, help='path to data pickle')
     parser.add_argument('basis_pickle', type=str, help='path to output pickle file')
-    parser.add_argument('--upsample', '-u', type=int, default=5, help='upsample factor')
-    parser.add_argument('--before', '-b', type=int, default=100, help='left shift samples')
-    parser.add_argument('--after', '-a', type=int, default=100, help='right shift samples')
+    parser.add_argument('--upsample', '-u', type=int, default=2, help='upsample factor')
+    parser.add_argument('--before', '-b', type=int, default=40, help='left shift samples')
+    parser.add_argument('--after', '-a', type=int, default=40, help='right shift samples')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
-    parser.add_argument('--alignment_sample', '-l', type=int, default=150, help='sample to align peak at')
+    parser.add_argument('--alignment_sample', '-l', type=int, default=20,
+                        help='sample to align peak at, in units of original samples')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--n_pca_components', '-p', type=int, default=5, help='number of PCA components to use for clustering')
 
     args = parser.parse_args()
 
+    before_samples, after_samples = args.before, args.after
     shifts = (-args.before, args.after)
     n_pca_components = args.n_pca_components
     n_basis_waveforms = args.nbasis
@@ -52,7 +51,9 @@ if __name__ == '__main__':
     padded_magnitude = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
     padded_channels_normed = padded_channels_sufficient_magnitude / padded_magnitude[:, None]
 
-    aligned_data = shift_align_abs_peak(padded_channels_normed, args.alignment_sample)
+    padded_scaled_alignment_point = args.before + args.upsample * args.alignment_sample
+
+    aligned_data = shift_align_abs_peak(padded_channels_normed, padded_scaled_alignment_point)
     n_waveforms, n_timepoints = aligned_data.shape
 
     u, s, vh = np.linalg.svd(aligned_data, full_matrices=False)
@@ -73,13 +74,14 @@ if __name__ == '__main__':
 
     cluster_means = cluster_means / np.linalg.norm(cluster_means, axis=1, keepdims=True)
 
+    # now unpad and downsample
+    unpadded_means = cluster_means[:, before_samples:-after_samples]
+    unpadded_downsampled_means = unpadded_means[::args.upsample]
+
     with open(args.basis_pickle, 'wb') as pfile:
         pickle_dict = {
-            'basis' : cluster_means,
-            'upsample' : args.upsample,
-            'before': args.before,
-            'after' : args.after,
-            'thresh' : args.thresh
+            'basis' : unpadded_downsampled_means,
+            'alignment_sample' : args.alignment_sample
         }
         pickle.dump(pickle_dict, pfile)
 
