@@ -3,20 +3,23 @@ import torch.nn as nn
 
 import numpy as np
 
-from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3
+from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3, \
+    batch_fourier_complex_least_square_with_prior_optimize, construct_rfft_covariance_matrix
 from lib.losseval import batch_evaluate_mse_flat
 from lib.optim.proxgrad_optim import BatchedMultiProxProblem, AutogradBatchMultiProxProblem, \
-    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, ProxGradSolverParams
+    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, \
+    ProxGradSolverParams
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector
 
 from typing import Union, Optional, Tuple, Dict, List
 from enum import Enum
+from dataclasses import dataclass
 
 import tqdm
 
 from lib.util_fns import auto_unbatch_unpack_significant_electrodes, auto_prebatch_pack_significant_electrodes, \
-    bspline_upsample_waveforms
+    bspline_upsample_waveforms, shift_waveform_peaks_and_adjust_shifts
 
 
 class RegularizationType(Enum):
@@ -1883,11 +1886,18 @@ def make_group_sparse_mat_from_group_list(group_list: List[np.ndarray],
     return group_sel_matrix
 
 
+@dataclass
+class WaveformPriorParams:
+    waveform_cov_mat_time_domain: np.ndarray
+    waveform_regularization_lambda: Union[float, np.ndarray]
+    waveform_prior_take_mean: bool
+
+
 def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: np.ndarray,
                                                       is_valid_matrix: np.ndarray,
                                                       initialized_basis_waveforms: np.ndarray,
-                                                      regularization_type: RegularizationType,
-                                                      regularization_lambda: float,
+                                                      sparsity_regularization_type: RegularizationType,
+                                                      sparsity_regularization_lambda: float,
                                                       valid_shift_range: Tuple[int, int],
                                                       shift_grid_step: int,
                                                       fine_search_top_n: int,
@@ -1897,13 +1907,16 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
                                                       solver_params: ProxSolverParams,
                                                       device: torch.device,
                                                       max_batch_size=8192,
+                                                      waveform_prior_params: Optional[WaveformPriorParams] = None,
+                                                      realign_basis_time_per_iter: bool = False,
+                                                      realign_basis_sample_num: int = 60,
                                                       use_scaled_mse_penalty: bool = False,
                                                       use_scaled_regularization_terms: bool = False,
-                                                      group_sel_matrix: Optional[np.ndarray] = None,
-                                                      sobolev_lambda: Optional[float] = None) \
+                                                      group_sel_matrix: Optional[np.ndarray] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     '''
     Batched version of the main iteration loop for the two-step alternating optimization process.
+    We can optionally specify a Gaussian prior for the waveform shapes
     Optimization steps are
 
         (1) With fixed waveforms, solve for both the amplitudes and the timeshifts together by performing grid search
@@ -1969,7 +1982,20 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
         waveform_observation_loss_weight = raw_data_magnitude.copy().squeeze(2)
 
     if not use_scaled_regularization_terms:
-        regularization_lambda = 1.0 / raw_data_magnitude.squeeze(2)
+        sparsity_regularization_lambda = 1.0 / raw_data_magnitude.squeeze(2)
+
+    use_prior_waveform_optim = waveform_prior_params is not None
+    if use_prior_waveform_optim:
+        # shape (batch, n_basis, n_rfft_freqs)
+        waveform_prior_mean_rfft = np.fft.rfft(initialized_basis_waveforms, axis=2)
+
+        # convert the time-domain waveform covariance matrices to Fourier domain
+        # shape (n_basis, n_rfft_freqs, n_rfft_freqs)
+        waveform_cov_mat_rfft_domain = construct_rfft_covariance_matrix(
+            waveform_prior_params.waveform_cov_mat_time_domain)
+
+        # shape (n_basis, n_rfft_freqs, n_rfft_freqs)
+        waveform_inv_cov_matrices = np.linalg.inv(waveform_cov_mat_rfft_domain)
 
     pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization', leave=False)
     for iter_count in range(n_iter):
@@ -1987,8 +2013,8 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             observations_fourier_transform,
             iter_basis_waveform_ft,
             n_frequencies_not_rfft,
-            regularization_type,
-            regularization_lambda,
+            sparsity_regularization_type,
+            sparsity_regularization_lambda,
             valid_shift_range,
             shift_grid_step,
             fine_search_top_n,
@@ -2001,21 +2027,44 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             max_batch_size=max_batch_size,
             verbose_solver=False)
 
-        # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
-        iter_basis_waveform_ft = batch_fourier_complex_least_square_optimize3(
-            iter_real_amplitudes,
-            iter_delays,
-            observations_fourier_transform,
-            is_valid_matrix,
-            iter_basis_waveform_ft,
-            n_frequencies_not_rfft,
-            device,
-            observation_loss_weight=waveform_observation_loss_weight,
-            sobolev_lambda=sobolev_lambda
-        )
+        if use_prior_waveform_optim:
+            # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+            iter_basis_waveform_ft = batch_fourier_complex_least_square_with_prior_optimize(
+                iter_real_amplitudes,
+                iter_delays,
+                observations_fourier_transform,
+                is_valid_matrix,
+                waveform_inv_cov_matrices,
+                waveform_prior_mean_rfft,
+                n_frequencies_not_rfft,
+                waveform_prior_params.waveform_regularization_lambda,
+                device,
+                observation_loss_weight=waveform_observation_loss_weight,
+                mean_over_electrodes=waveform_prior_params.waveform_prior_take_mean
+            )
+
+        else:
+            # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+            iter_basis_waveform_ft = batch_fourier_complex_least_square_optimize3(
+                iter_real_amplitudes,
+                iter_delays,
+                observations_fourier_transform,
+                is_valid_matrix,
+                iter_basis_waveform_ft,
+                n_frequencies_not_rfft,
+                device,
+                observation_loss_weight=waveform_observation_loss_weight,
+            )
 
         # shape (batch, n_canonical_waveforms, n_samples), real-valued float
         iter_basis_waveform_td = np.real(np.fft.irfft(iter_basis_waveform_ft, n=n_samples, axis=2))
+
+        if realign_basis_time_per_iter:
+            # shape (batch, n_canonical_waveforms, n_samples), real-valued float
+            # and shape (batch, n_canonical_waveforms), integer
+            iter_basis_waveform_td, iter_delays = shift_waveform_peaks_and_adjust_shifts(iter_basis_waveform_td,
+                                                                                         realign_basis_sample_num)
+            iter_basis_waveform_ft = np.fft.rfft(iter_basis_waveform_td)
 
         # real valued np.ndarray, shape (batch, n_canonical_waveforms, 1)
         raw_optimized_waveform_magnitude = np.linalg.norm(iter_basis_waveform_td, axis=2, keepdims=True)
@@ -2091,12 +2140,13 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         fine_search_width: int = 2,
         grid_search_batch_size: int = 1024,
         maxiter_decomp: int = 25,
-        n_inner_optimization_iters: int = 15,
+        waveform_prior_params: Optional[WaveformPriorParams] = None,
+        realign_basis_time_per_iter: bool = False,
+        realign_basis_sample_num: int = 60,
         l1_regularize_lambda: Optional[float] = None,
         use_scaled_mse_penalty: bool = False,
         use_scaled_regularization_terms: bool = False,
-        grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
-        sobolev_reg: Optional[float] = None) \
+        grouped_l1l2_groups: Optional[List[np.ndarray]] = None) \
         -> Union[Tuple[Dict[int, Dict[str, np.ndarray]], Dict[str, float]],
                  Dict[int, Dict[str, np.ndarray]]]:
     '''
@@ -2168,9 +2218,11 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
             max_batch_size=grid_search_batch_size,
             use_scaled_mse_penalty=use_scaled_mse_penalty,
             use_scaled_regularization_terms=use_scaled_regularization_terms,
+            waveform_prior_params=waveform_prior_params,
+            realign_basis_time_per_iter=realign_basis_time_per_iter,
+            realign_basis_sample_num=realign_basis_sample_num,
             group_sel_matrix=make_group_sparse_mat_from_group_list(grouped_l1l2_groups,
                                                                    initialized_basis_vectors.shape[0]),
-            sobolev_lambda=sobolev_reg,
         )
 
         wip_decomp_list.append((amplitudes, delays, waveforms))

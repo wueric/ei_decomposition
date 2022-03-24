@@ -3,7 +3,8 @@ import torch
 import pickle
 import argparse
 
-from lib.batch_ei_decomposition_v2 import RegularizationType, batch_two_step_decompose_cells_by_fitted_compartments2
+from lib.batch_ei_decomposition_v2 import RegularizationType, batch_two_step_decompose_cells_by_fitted_compartments2, \
+    WaveformPriorParams
 from lib.optim.proxgrad_optim import ProxGradSolverParams, ProxFISTASolverParams
 
 if __name__ == '__main__':
@@ -18,8 +19,6 @@ if __name__ == '__main__':
     parser.add_argument('--inneropt_iter', '-i', type=int, default=15, help='maximum number of FISTA iterations for inner solver steps')
     parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
                         help='L1 regularization lambda for amplitudes')
-    parser.add_argument('--sobolev_reg', '-s', type=float, default=1e-3,
-                        help='L2 regularization for waveform second derivatives')
     parser.add_argument('--grid_step', type=int, default=5, help='step size for grid search')
     parser.add_argument('--grid_top_n', type=int, default=4, help='top n for grid search')
     parser.add_argument('--fine_search_width', type=int, default=2, help='width for fine search')
@@ -33,6 +32,14 @@ if __name__ == '__main__':
                         help='whether or not to use group L1L2 regularization')
     parser.add_argument('--eps_cutoff', '-e', type=float, default=1e-3,
                         help='converge epsilon. Default uses comparison to t^2 |G_t|^2, which is robust but does not guarantee bounds on convergence')
+    parser.add_argument('--shape_prior', '-s', action='store_true', default=False,
+                        help='use waveform shape prior in waveform optimization step')
+    parser.add_argument('--shape_kernel', type=float, default=5.0,
+                        help='width of shape Gaussian kernel for waveform covariance')
+    parser.add_argument('--shape_weight_reg', type=float, default=1.0,
+                        help='weight of the waveform shape prior regularization term')
+    parser.add_argument('--shape_take_mean', action='store_true', default=False,
+                        help='take mean over the electrodes when computing the waveform shape optimization')
 
     args = parser.parse_args()
 
@@ -58,6 +65,10 @@ if __name__ == '__main__':
         group_assignments = basis_dict['group_assignments']
         regularization_type = RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED
 
+    shape_regularization_params = None
+    if args.shape_prior:
+        shape_regularization_params = WaveformPriorParams()
+
     decomposition_dict = batch_two_step_decompose_cells_by_fitted_compartments2(
         eis_by_cell_id,
         initial_basis,
@@ -75,8 +86,7 @@ if __name__ == '__main__':
         grid_search_batch_size=args.grid_batch_size,
         use_scaled_mse_penalty=args.renormalize_loss,
         use_scaled_regularization_terms=args.renormalize_penalty,
-        grouped_l1l2_groups=group_assignments,
-        sobolev_reg=args.sobolev_reg
+        grouped_l1l2_groups=group_assignments
     )
 
     with open(args.output_pickle, 'wb') as joint_fit_file:

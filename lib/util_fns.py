@@ -735,3 +735,33 @@ def shift_align_abs_peak(normalized_data_matrix: np.ndarray,
     aligned_data = np.real(np.fft.irfft(data_ft * shift_matrix, axis=1, n=n_samples))
 
     return aligned_data
+
+
+def shift_waveform_peaks_and_adjust_shifts(waveform_matrix_td: np.ndarray,
+                                           phase_delays: np.ndarray,
+                                           abs_peak_alignment_point: int) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    '''
+
+    :param waveform_matrix_td: shape (..., n_basis, n_samples)
+    :param phase_delays: shape (..., n_basis), ... must correspond to the ... in
+        waveform_matrix_td
+    :param abs_peak_alignment_point: sample number to align to
+    :return:
+    '''
+
+    n_basis, n_samples = waveform_matrix_td.shape[-2:]
+
+    # shape (..., n_basis)
+    max_point = np.argmax(np.abs(waveform_matrix_td), axis=-1)
+    delays = abs_peak_alignment_point - max_point
+
+    shift_matrix = generate_fourier_phase_shift_matrices(delays, n_samples)
+
+    data_ft = np.fft.rfft(waveform_matrix_td, axis=-1)
+
+    aligned_waveforms = np.real(np.fft.irfft(data_ft * shift_matrix, axis=1, n=n_samples))
+
+    adjusted_phase_delays = phase_delays + delays
+
+    return aligned_waveforms, adjusted_phase_delays
