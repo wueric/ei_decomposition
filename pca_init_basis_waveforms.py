@@ -13,19 +13,14 @@ if __name__ == '__main__':
 
     parser.add_argument('data_pickle', type=str, help='path to data pickle')
     parser.add_argument('basis_pickle', type=str, help='path to output pickle file')
-    parser.add_argument('--upsample', '-u', type=int, default=2, help='upsample factor')
-    parser.add_argument('--before', '-b', type=int, default=40, help='left shift samples')
-    parser.add_argument('--after', '-a', type=int, default=40, help='right shift samples')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
-    parser.add_argument('--alignment_sample', '-l', type=int, default=20,
-                        help='sample to align peak at, in units of original samples')
+    parser.add_argument('--alignment_sample', '-l', type=int, default=60,
+                        help='sample to align peak at, in units of upsampled/padded samples')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--n_pca_components', '-p', type=int, default=5, help='number of PCA components to use for clustering')
 
     args = parser.parse_args()
 
-    before_samples, after_samples = args.before, args.after
-    shifts = (-args.before, args.after)
     n_pca_components = args.n_pca_components
     n_basis_waveforms = args.nbasis
 
@@ -36,14 +31,9 @@ if __name__ == '__main__':
     eis_by_cell_id = preprocessed_dict['eis_by_cell_id'] # type: Dict[int, np.ndarray]
     cell_list = list(eis_by_cell_id.keys())
 
-    ei_data_mat, matrix_indices_by_cell_id = pack_significant_electrodes_into_matrix(eis_by_cell_id,
+    padded_channels_sufficient_magnitude, matrix_indices_by_cell_id = pack_significant_electrodes_into_matrix(eis_by_cell_id,
                                                                                      cell_list,
                                                                                      args.thresh)
-
-    bspline_supersampled = bspline_upsample_waveforms(ei_data_mat, args.upsample)
-    padded_channels_sufficient_magnitude = np.pad(bspline_supersampled,
-                                                  [(0, 0), (abs(shifts[0]), abs(shifts[1]))],
-                                                  mode='constant')
 
     if padded_channels_sufficient_magnitude.shape[0] > 5000:
         padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude[::5,:]
@@ -74,14 +64,14 @@ if __name__ == '__main__':
 
     cluster_means = cluster_means / np.linalg.norm(cluster_means, axis=1, keepdims=True)
 
-    # now unpad and downsample
-    unpadded_means = cluster_means[:, before_samples:-after_samples]
-    unpadded_downsampled_means = unpadded_means[:, ::args.upsample]
+    pickle_dict = {
+        'basis': cluster_means,
+        'alignment_sample': args.alignment_sample,
+        'before': preprocessed_dict['before'],
+        'after': preprocessed_dict['after'],
+        'upsample': preprocessed_dict['upsample']
+    }
 
     with open(args.basis_pickle, 'wb') as pfile:
-        pickle_dict = {
-            'basis' : unpadded_downsampled_means,
-            'alignment_sample' : args.alignment_sample
-        }
         pickle.dump(pickle_dict, pfile)
 
