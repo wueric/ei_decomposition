@@ -41,9 +41,7 @@ if __name__ == '__main__':
     padded_magnitude = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
     padded_channels_normed = padded_channels_sufficient_magnitude / padded_magnitude[:, None]
 
-    padded_scaled_alignment_point = args.before + args.upsample * args.alignment_sample
-
-    aligned_data = shift_align_abs_peak(padded_channels_normed, padded_scaled_alignment_point)
+    aligned_data = shift_align_abs_peak(padded_channels_normed, args.alignment_sample)
     n_waveforms, n_timepoints = aligned_data.shape
 
     u, s, vh = np.linalg.svd(aligned_data, full_matrices=False)

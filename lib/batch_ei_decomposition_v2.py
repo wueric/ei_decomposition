@@ -2190,7 +2190,6 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         # cell_order: shape (batch, ) integer cell id
 
         batch, max_n_sig_electrodes, n_timepoints = batched_data_mat.shape
-        padded_channels_sufficient_magnitude = batched_data_mat.reshape(batch * max_n_sig_electrodes, n_timepoints)
 
         # shape (batch, n_basis, n_timepoints)
         batched_basis_waveforms = np.tile(initialized_basis_vectors, (batch, 1, 1))
@@ -2220,7 +2219,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         # amplitudes has shape (batch, n_observations, n_basis_waveforms))
         # waveforms has shape (batch, n_basis_waveforms, n_timepoints)
         amplitudes, waveforms, delays, mse = batch_shifted_fourier_nmf_iterative_optimization4(
-            padded_channels_sufficient_magnitude,
+            batched_data_mat,
             is_valid_mat,
             batched_basis_waveforms,
             regularization_type,
