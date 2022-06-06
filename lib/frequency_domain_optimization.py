@@ -322,11 +322,122 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
     return solved_waveforms
 
 
-def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarray:
+def _pack_complex_to_real_imag(complex_valued_matrix: np.ndarray,
+                               n_timepoints: int,
+                               axis: int = -1) -> np.ndarray:
+    '''
+    Packs arbitrary complex-valued matrix into the stacked real-imaginary form,
+        with the correct frequency order
+    :param complex_valued_matrix: shape (... )
+    :return:
     '''
 
+    orig_shape = complex_valued_matrix.shape
+    target_shape = list(orig_shape)
+    target_shape[axis] = n_timepoints
+    real_imag_matrix = np.zeros(target_shape, dtype=np.float32)
+
+    real_values = np.real(complex_valued_matrix)
+    imag_values = np.imag(complex_valued_matrix)
+
+    # handle the real component; the real component has the full ((n_timepoints // 2) + 1) number of values
+    # floor division here doesn't matter since n even
+    real_indices_flat = np.r_[0:(n_timepoints // 2) + 1]
+    expanded_real_indices_shape = [1 for _ in orig_shape]
+    expanded_real_indices_shape[axis] = real_indices_flat.shape[0]
+    real_indices = real_indices_flat.reshape(expanded_real_indices_shape)
+    np.put_along_axis(real_imag_matrix, real_indices, real_values, axis=axis)
+
+    # handle the imaginary component
+    # we need to skip the first and last entries along axis in the even case
+    # and only the first entry in the odd case
+    if n_timepoints % 2 == 0:
+        imag_indices_sel_flat = np.r_[1:(n_timepoints // 2)]
+    else:
+        imag_indices_sel_flat = np.r_[1:(n_timepoints // 2) + 1]
+    selected_imag_values = np.take(imag_values, imag_indices_sel_flat, axis=axis)
+
+    imag_indices_put_flat = np.r_[(n_timepoints // 2) + 1: n_timepoints]
+    expanded_imag_indices_shape = [1 for _ in orig_shape]
+    expanded_imag_indices_shape[axis] = imag_indices_put_flat.shape[0]
+    imag_indices_put = imag_indices_put_flat.reshape(expanded_imag_indices_shape)
+
+    np.put_along_axis(real_imag_matrix, imag_indices_put, selected_imag_values, axis=axis)
+
+    return real_imag_matrix
+
+
+def _unpack_real_imag_to_complex(stacked_real_imag: np.ndarray,
+                                 n_timepoints: int,
+                                 axis: int = -1) -> np.ndarray:
+    '''
+    Unpacks the stacked real-imaginary form back into a complex-valued matrix
+
+    Inverse operation of _pack_complex_to_real_imag
+    :return:
+    '''
+    n_rfft_freqs = (n_timepoints // 2) + 1
+
+    orig_shape = stacked_real_imag.shape
+    target_shape = list(orig_shape)
+    target_shape[axis] = n_rfft_freqs
+
+    complex_matrix = np.zeros(target_shape, dtype=np.csingle)
+
+    # handle the imaginary component, since the imaginary component requires
+    # use of put, and put is easier to use when starting with an emtpy destination
+    imag_index_sel = np.r_[(n_timepoints // 2) + 1:n_timepoints]
+    imag_component = np.take(stacked_real_imag, imag_index_sel, axis=axis) * 1j
+
+    if n_timepoints % 2 == 0:
+        imag_index_put_flat = np.r_[1:(n_timepoints // 2)]
+    else:
+        imag_index_put_flat = np.r_[1:(n_timepoints // 2) + 1]
+
+    imag_index_put_shape = [1 for _ in orig_shape]
+    imag_index_put_shape[axis] = imag_index_put_flat.shape[0]
+
+    imag_index_put = imag_index_put_flat.reshape(imag_index_put_shape)
+
+    np.put_along_axis(complex_matrix, imag_index_put, imag_component, axis=axis)
+
+    # handle the real component
+    # the real component consists of the first ((n_timepoints // 2) + 1) entries along axis
+    # which can just be added to the final result
+    real_index_sel = np.r_[0:(n_timepoints // 2) + 1]
+    real_component = np.take(stacked_real_imag, real_index_sel, axis=axis)
+    complex_matrix += real_component
+
+    return complex_matrix
+
+
+def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarray:
+    '''
+    Constructs NxN (n_timepoints x n_timepoints) real-imaginary covariance matrix
+        from a NxN time-domain covariance matrix
+
+    Facts about the rFFT matrix:
+        * For an N-sequence, the rFFT matrix has shape (N // 2 + 1, N) ,
+        * The 0th row, i.e. F[0, :] is the DC component, and is entirely real-valued
+        * For N even, the last row, i.e. F[-1, :] is the maximum frequency component,
+            and is also entirely real-valued
+
+    Therefore, we have two cases for the rank of the real/imaginary stacked transform matrix:
+
+    Case 1, N is even: The real matrix has rank (N / 2) + 1, and the imaginary matrix has rank (N/2) - 1,
+        so the total system has rank N
+    Case 2, N is odd: The real matrix has rank (N // 2 + 1), and the imaginary matrix has rank (N // 2)
+        so the total system has rank N
+
+    We need to construct both the real and imaginary matrices separately from the full rFFT matrix,
+        and then stack the components
+
+    Our variable ordering convention will be:
+        * First, (N // 2 ) + 1 real-valued variables, same frequency order as rFFT
+        * Imaginary-valued variables, same frequency order as rFFT
+
     :param time_domain_covariance_matrix: shape (..., n_timepoints, n_timepoints)
-    :return: shape (..., n_rfft_freqs, n_rfft_freqs)
+    :return: shape (..., n_timepoints, n_timepoints)
     '''
 
     # first we have to make the RFFT matrix
@@ -334,29 +445,311 @@ def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarra
 
     # shape (n_rfft_freqs, n_timepoints)
     rfft_matrix = np.fft.rfft(np.eye(n_timepoints), axis=0)
-    hermit_transpose_rfft_mat = rfft_matrix.conj().T
 
-    # we have to expand_dim the rfft_mat and hermitian transpose so that
-    # we can compute the covariance matrix product
-    n_dims_needs_expansion = time_domain_covariance_matrix.ndim - 2
+    # shape (N, N), no matter if N is even or odd
+    # this is G-matrix in the writeup
+    real_imag_stacked_ft_matrix = _pack_complex_to_real_imag(rfft_matrix,
+                                                             n_timepoints,
+                                                             axis=0)
 
-    rfft_mat_expanded = np.expand_dims(rfft_matrix, axis=tuple(range(n_dims_needs_expansion)))
-    rfft_mat_H_expanded = np.expand_dims(hermit_transpose_rfft_mat, axis=tuple(range(n_dims_needs_expansion)))
+    # shape (N, N)
+    cov_matrix = real_imag_stacked_ft_matrix[None, :, :] @ time_domain_covariance_matrix \
+                 @ (real_imag_stacked_ft_matrix.T)[None, :, :]
 
-    left_multiply = rfft_mat_expanded @ time_domain_covariance_matrix
-    cov_mat = left_multiply @ rfft_mat_H_expanded
-
-    return np.real(cov_mat)
+    return cov_matrix
 
 
 def DEBUG_identity_prior_optimize(
         rfft_domain_inv_cov_matrix: np.ndarray,
-        basis_prior_mean_ft: np.ndarray,
-        n_true_frequencies: int,
-        regularization_lambda: Union[np.ndarray, float]) -> np.ndarray:
-    
-    
+        basis_prior_mean_rfft: np.ndarray,
+        n_true_frequencies: int) -> np.ndarray:
     pass
+
+
+def _torch_pack_complex_to_real_imag_stack(real_component: torch.Tensor,
+                                           imag_component: torch.Tensor,
+                                           n_timepoints: int,
+                                           dim: int = -1) -> torch.Tensor:
+    '''
+    :param real_component:
+    :param imag_component:
+    :param n_timepoints:
+    :param dim:
+    :return:
+    '''
+
+    with torch.no_grad():
+        device = real_component.device
+        half_shape = real_component.shape
+        full_shape = list(half_shape)
+        full_shape[dim] = n_timepoints
+
+        stacked_tensor = torch.zeros(full_shape, device=device)
+
+        if n_timepoints % 2 == 0:
+            # throw away first and last rows of the imaginary
+            n_real_coeffs = (n_timepoints // 2) + 1
+
+            range_expand_shape = list(half_shape)
+            range_expand_shape[dim] = -1
+            real_range = torch.range(0, n_real_coeffs, dtype=torch.long, device=device).expand(*range_expand_shape)
+
+            stacked_tensor.scatter(dim, real_range, real_component)
+
+            imag_select_range = torch.range(1, (n_timepoints // 2), dtype=torch.long, device=device).expand(
+                range_expand_shape)
+            imag_component_trimmed = torch.gather(imag_component, dim, imag_select_range)
+
+            imag_put_range = torch.range(n_real_coeffs, n_timepoints, dtype=torch.long, device=device).expand(
+                range_expand_shape)
+            stacked_tensor.scatter(dim, imag_put_range, imag_component_trimmed)
+
+            return stacked_tensor
+
+        else:
+
+            # throw away only the first row of the imaginary
+            # throw away first and last rows of the imaginary
+            n_real_coeffs = (n_timepoints // 2) + 1
+
+            range_expand_shape = list(half_shape)
+            range_expand_shape[dim] = -1
+            real_range = torch.range(0, n_real_coeffs, dtype=torch.long, device=device).expand(*range_expand_shape)
+
+            stacked_tensor.scatter(dim, real_range, real_component)
+
+            imag_select_range = torch.range(1, (n_timepoints // 2) + 1, dtype=torch.long, device=device).expand(
+                range_expand_shape)
+            imag_component_trimmed = torch.gather(imag_component, dim, imag_select_range)
+
+            imag_put_range = torch.range(n_real_coeffs, n_timepoints, dtype=torch.long, device=device).expand(
+                range_expand_shape)
+            stacked_tensor.scatter(dim, imag_put_range, imag_component_trimmed)
+
+            imag_put_range = torch.range(n_real_coeffs, n_timepoints, dtype=torch.long, device=device).expand(
+                range_expand_shape)
+            stacked_tensor.scatter(dim, imag_put_range, imag_component_trimmed)
+
+            return stacked_tensor
+
+
+def construct_prior_coefficients_and_rhs(prior_waveforms_mean_ft_ri_stack: torch.Tensor,
+                                         prior_waveforms_ft_cov_mat_ri_stack: torch.Tensor) \
+        -> Tuple[torch.Tensor, torch.Tensor]:
+    '''
+
+    (Should return a system of equations that recovers the Fourier coefficients of the prior
+        waveform basis if solved directly)
+
+    :param prior_waveforms_mean_ft_ri_stack: real-imag stack of the Fourier coefficients of
+        the prior mean for each basis waveform,
+        shape (batch, n_basis, N)
+    :param prior_waveforms_ft_cov_mat_ri_stack: real-imag stack of the covariance matrices
+        for the prior distribution,
+        shape (batch, n_basis, N, N)
+
+        This must be a valid covariance matrix, i.e. last two dimensions should be square,
+            full rank, symmetric
+    :return:
+    '''
+
+    # shape (batch, n_basis, N, N)
+    inv_cov_mat = torch.linalg.inv(prior_waveforms_ft_cov_mat_ri_stack)
+
+    # shape (batch, n_basis, N, N) @ (batch, n_basis, N, 1)
+    # -> (batch, n_basis, N, 1) -> (batch, n_basis, N)
+    rhs = (inv_cov_mat @ prior_waveforms_mean_ft_ri_stack[:, :, None, :]).squeeze(3)
+
+    return inv_cov_mat, rhs
+
+
+def compute_variable_indices(frequency_num: torch.Tensor,
+                             basis_num: torch.Tensor,
+                             coeffs_are_imag: bool,
+                             n_timepoints: int) -> torch.Tensor:
+    '''
+
+    :param frequency_num: shape (...), integer-valued
+    :param basis_num: shape (...), integer-valued
+    :param real_or_imag:
+    :param n_timepoints: int
+    :return: shape (...), integer-valued
+    '''
+
+    basis_offset = n_timepoints + basis_num
+    if coeffs_are_imag:
+        basis_offset = basis_offset + (n_timepoints // 2) + 1
+    return frequency_num + basis_offset
+
+
+def compute_variable_placement_indices(coeffs_are_real: bool,
+                                       n_timepoints: int,
+                                       n_basis: int,
+                                       device: torch.device) -> torch.Tensor:
+    n_real_coeffs = (n_timepoints // 2) + 1
+
+    if n_timepoints % 2 == 0:
+        n_imag_coeffs = (n_timepoints // 2) - 1
+    else:
+        n_imag_coeffs = (n_timepoints // 2)
+
+    # need to construct the index tensor to place the real coefficients
+    # of both Eqn groups 1 and 2
+    # shape (n_real_coeffs, n_basis)
+    d_real_freq_ix = torch.range(0, n_real_coeffs,
+                                 dtype=torch.long, device=device).expand(-1, n_basis)
+    d_real_basis_ix = torch.range(0, n_basis,
+                                  dtype=torch.long, device=device).expand(n_real_coeffs, -1)
+
+    # shape (n_real_coeffs, n_basis)
+    d_real_placement_indices = compute_variable_indices(d_real_freq_ix,
+                                                        d_real_basis_ix,
+                                                        coeffs_are_real, n_timepoints)
+
+    # shape (n_imag_coeffs, n_basis)
+    d_imag_freq_ix = torch.range(0, n_imag_coeffs,
+                                 dtype=torch.long, device=device).expand(-1, n_basis)
+    d_imag_basis_ix = torch.range(0, n_basis,
+                                  dtype=torch.long, device=device).expand(n_imag_coeffs, -1)
+
+    # shape (n_imag_coeffs, n_basis)
+    d_imag_placement_indices = compute_variable_indices(d_imag_freq_ix,
+                                                        d_imag_basis_ix,
+                                                        coeffs_are_real, n_timepoints)
+
+    # shape (n_timepoints = N, n_basis)
+    placement_indices = torch.cat([d_real_placement_indices, d_imag_placement_indices], dim=0)
+
+    return placement_indices
+
+
+def rearrange_mse_grouped_coefficients(eq1_group_real_coeffs: torch.Tensor,
+                                       eq1_group_imag_coeffs: torch.Tensor,
+                                       eq1_group_rhs: torch.Tensor,
+                                       eq2_group_real_coeffs: torch.Tensor,
+                                       eq2_group_imag_coeffs: torch.Tensor,
+                                       eq2_group_rhs: torch.Tensor,
+                                       n_timepoints: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    '''
+
+    Rows are different equations, corresponding to derivative of MSE objective
+        w.r.t. the corresponding Fourier coefficients
+    Columns correspond to the variables, which are the Fourier coefficients
+
+    variable ordering is (real components, imaginary components) stacked by basis waveform
+
+    :param eq1_group_real_coeffs: shape (batch, n_basis, n_basis, n_rfft_freqs)
+        These are the real coefficients that come from differentiating the MSE loss w.r.t. the real component
+    :param eq1_group_imag_coeffs: shape (batch, n_basis, n_basis, n_rfft_freqs)
+        These are the imag coefficients that come from differentiating the MSE loss w.r.t. the real component
+    :param eq1_group_rhs: shape (batch, n_basis, n_rfft_frequencies)
+    :param eq2_group_real_coeffs: shape (batch, n_basis, n_basis, n_rfft_freqs)
+        These are the real coefficients that come from differentiating the MSE loss w.r.t. the imag component
+    :param eq2_group_imag_coeffs: shape (batch, n_basis, n_basis, n_rfft_freqs)
+        These are the imag coefficients that come from differentiating the MSE loss w.r.t. the imag component
+    :param eq2_group_rhs: shape (batch, n_basis, n_rfft_frequencies)
+    :param n_timepoints: int, number of time samples
+    :return:
+    '''
+
+    with torch.no_grad():
+        batch, n_basis = eq1_group_real_coeffs.shape[:2]
+        device = eq1_group_real_coeffs.device
+
+        # all shape (batch, n_basis, n_rfft_freqs, n_basis)
+        eq1_group_real_perm = eq1_group_real_coeffs.permute(0, 1, 3, 2)
+        eq1_group_imag_perm = eq1_group_imag_coeffs.permute(0, 1, 3, 2)
+        eq2_group_real_perm = eq2_group_real_coeffs.permute(0, 1, 3, 2)
+        eq2_group_imag_perm = eq2_group_imag_coeffs.permute(0, 1, 3, 2)
+
+        # shape (batch, n_basis, N, n_basis)
+        # -> (batch, n_basis * N, n_basis)
+        real_coeff_ri_stack = _torch_pack_complex_to_real_imag_stack(eq1_group_real_perm,
+                                                                     eq2_group_real_perm,
+                                                                     n_timepoints,
+                                                                     dim=2).reshape(batch, -1, n_basis)
+        imag_coeff_ri_stack = _torch_pack_complex_to_real_imag_stack(eq1_group_imag_perm,
+                                                                     eq2_group_imag_perm,
+                                                                     n_timepoints,
+                                                                     dim=2).reshape(batch, -1, n_basis)
+
+        # shape (batch, n_basis, N) -> (batch, n_basis * N)
+        rhs_ri_stack = _torch_pack_complex_to_real_imag_stack(eq1_group_rhs,
+                                                              eq2_group_rhs,
+                                                              n_timepoints,
+                                                              dim=2).reshape(batch, -1)
+
+        output_tensor = torch.zeros((batch, n_timepoints * n_basis, n_timepoints * n_basis),
+                                    dtype=eq1_group_real_coeffs.dtype, device=device)
+
+        # shape (N, n_basis) -> (n_basis * N, n_basis) -> (batch, n_basis * N, n_basis)
+        real_one_basis_placement_ix = compute_variable_placement_indices(True, n_timepoints, n_basis, device).repeat(
+            n_basis, 1).expand(batch, -1, -1)
+
+        # shape (N, n_basis) -> (n_basis * N, n_basis) -> (batch, n_basis * N, n_basis)
+        imag_one_basis_placement_ix = compute_variable_placement_indices(False, n_timepoints, n_basis, device).repeat(
+            n_basis, 1).expand(batch, -1, -1)
+
+        output_tensor.scatter_add(2, real_one_basis_placement_ix, real_coeff_ri_stack)
+        output_tensor.scatter_add(2, imag_one_basis_placement_ix, imag_coeff_ri_stack)
+
+        return output_tensor, rhs_ri_stack
+
+
+def rearrange_prior_grouped_coefficients(prior_waveforms_mean_ft_ri_stack: torch.Tensor,
+                                         prior_waveforms_ft_cov_mat_ri_stack: torch.Tensor,
+                                         prior_lambdas: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    '''
+    Restructures the equations into the full-size form for
+        the contributions from the Gaussian prior
+
+    Should be full rank, and block diagonal
+
+    :param prior_waveforms_mean_ft_ri_stack: real-imag stack of the Fourier coefficients of
+        the prior mean for each basis waveform,
+        shape (batch, n_basis, N)
+    :param prior_waveforms_ft_cov_mat_ri_stack: real-imag stack of the covariance matrices
+        for the prior distribution,
+        shape (batch, n_basis, N, N)
+
+        This must be a valid covariance matrix, i.e. last two dimensions should be square,
+            full rank, symmetric
+    :param prior_lambdas: lambda weights on the Gaussian prior term
+        shape (batch, n_basis), allowing each cell and basis waveform to have an individually-controlled
+        prior
+
+    :return: (batch, n_basis * N, n_basis * N) , corresponding to the coefficients of the
+        linear system of equations for each cell,
+
+        and
+            (batch, n_basis * N), corresponding to the RHS of the linear systems for each cell
+    '''
+
+    batch = prior_waveforms_mean_ft_ri_stack.shape[0]
+
+    with torch.no_grad():
+        # first construct the prior coefficients
+        # shape (batch, n_basis, N, N) and shape (batch, n_basis, N)
+        prior_coeffs, prior_rhs_contrib = construct_prior_coefficients_and_rhs(prior_waveforms_mean_ft_ri_stack,
+                                                                               prior_waveforms_ft_cov_mat_ri_stack)
+
+        prior_coeffs = prior_coeffs * prior_lambdas[:, :, None, None]
+        prior_rhs_contrib = prior_rhs_contrib * prior_lambdas[:, :, None]
+
+        # then use torch put operations to pack these coefficients into something
+        # that can be added to the MSE coefficients
+
+        # variable ordering is (real components, imaginary components) stacked by basis waveform
+
+        # shape (batch, n_basis * N, n_basis * N)
+        prior_block_diag = torch.block_diag(*torch.split(prior_coeffs, 1, dim=1))
+
+        # shape (batch, n_basis * N)
+        prior_coeffs_stacked = prior_rhs_contrib.reshape(batch, -1)
+
+        # now we need tensor indexing operations over each frequency to put in the MSE data
+
+        return prior_block_diag, prior_coeffs_stacked
 
 
 def batch_fourier_complex_least_square_with_prior_optimize(
@@ -364,21 +757,20 @@ def batch_fourier_complex_least_square_with_prior_optimize(
         batched_phase_delays: np.ndarray,
         batched_ft_observations: np.ndarray,
         batched_valid_mat: np.ndarray,
-        rfft_domain_inv_cov_matrix: np.ndarray,
-        basis_prior_mean_ft: np.ndarray,
+        ri_stack_ft_domain_inv_cov_matrix: np.ndarray,
+        ri_stack_basis_prior_mean_ft: np.ndarray,
         n_true_frequencies: int,
         regularization_lambda: Union[np.ndarray, float],
         device: torch.device,
-        observation_loss_weight: Optional[np.ndarray] = None,
-        mean_over_electrodes: bool = False) -> np.ndarray:
+        observation_loss_weight: Optional[np.ndarray] = None) -> np.ndarray:
     '''
-    Used to solve reduced-rank basis waveform optimization problems in parallel,
+    Used to solve basis waveform optimization problems in parallel,
         where we have a prior on the mean and have a covariance matrix describing
         the temporal correlation structure between samples in time domain
 
     Note that once we include the prior, the problem is no longer separable by component
         in frequency domain. Rather than solve a bunch of 2K x 2K systems, we solve a
-        single 2FK x 2FK system.
+        single NK x NK system where N is the number of time samples.
 
     :param batched_amplitudes_real: real-valued amplitudes for each observation, each shifted canonical waveform,
         shape (batch, n_observations, n_basis_waveforms)
@@ -389,9 +781,9 @@ def batch_fourier_complex_least_square_with_prior_optimize(
     :param batched_valid_mat: boolean matrix marking which entries of the above matrices correspond to real data,
         and which entries correspond to padding.
         shape (batch, n_observations), boolean valued
-    :param rfft_domain_inv_cov_matrix: shape (batch, n_basis_waveforms, n_rfft_frequencies, n_rfft_frequencies)
-    :param basis_prior_mean_ft: shape (batch, n_basis_waveforms, n_rfft_frequencies)
-    :param regularization_lambda: float, lambda scale factor for the waveform, or np.array, shape (n_basis, )
+    :param ri_stack_ft_domain_inv_cov_matrix: shape (batch, n_basis_waveforms, n_timepoints = N, n_timepoints = N)
+    :param ri_stack_basis_prior_mean_ft: shape (batch, n_basis_waveforms, N = n_timepoints)
+    :param regularization_lambda: float, lambda scale factor for the waveform, or np.array, shape (batch, n_basis)
         if we want to specify a different regularization coefficient for each basis (for example, if we're
         much more certain about one type of basis waveform vs another)
     :param device:
@@ -399,12 +791,32 @@ def batch_fourier_complex_least_square_with_prior_optimize(
     :return:
     '''
 
+    batch, n_observations, n_basis = batched_amplitudes_real.shape
+    _, _, n_rfft_frequencies = batched_ft_observations.shape
+
+    if isinstance(regularization_lambda, float):
+        regularization_lambda = np.ones((batch, n_basis), dtype=np.float32) * regularization_lambda
+
+    # coefficient assembly strategy (i.e. how do we compute and arrange the coefficients of the linear system to
+    # avoid confusing ourselves?)
+    # In the real-imag stacked version of covariance matrices and vectors, the frequencies are all-over-the-place
+    # so we need to use _pack and _unpack to arrange the frequency coefficients of the phases and waveform
+    # Fourier transforms
+
     if observation_loss_weight is not None:
         batched_amplitudes_real = batched_amplitudes_real * observation_loss_weight[:, :, None]
         batched_ft_observations = batched_ft_observations * observation_loss_weight[:, :, None]
 
-    batch, n_observations, n_basis = batched_amplitudes_real.shape
-    _, _, n_rfft_frequencies = batched_ft_observations.shape
+    # First compute the prior matrix
+    ri_ft_prior_cov_mat_torch = torch.tensor(ri_stack_ft_domain_inv_cov_matrix, dtype=torch.float32, device=device)
+    ri_ft_prior_mean_torch = torch.tensor(ri_stack_basis_prior_mean_ft, dtype=torch.float32, device=device)
+    regularization_lambda_torch = torch.tensor(regularization_lambda, dtype=torch.float32, device=device)
+
+    # prior_coeffs has shape (batch, n_basis * N, n_basis * N)
+    # prior_Rhs has shape (batch, n_basis * N)
+    prior_coeffs, prior_rhs = rearrange_prior_grouped_coefficients(ri_ft_prior_mean_torch,
+                                                                   ri_ft_prior_cov_mat_torch,
+                                                                   regularization_lambda_torch)
 
     # shape (batch, n_observations)
     valid_one_matrix = torch.tensor(batched_valid_mat.astype(np.float32), dtype=torch.float32, device=device)
@@ -424,186 +836,80 @@ def batch_fourier_complex_least_square_with_prior_optimize(
     real_phase_mat_torch = torch.tensor(complex_phase_matrix.real, dtype=torch.float32, device=device)
     imag_phase_mat_torch = torch.tensor(complex_phase_matrix.imag, dtype=torch.float32, device=device)
 
-    # both have shape (batch, n_basis, n_rfft_frequencies)
-    real_prior_mean_torch = torch.tensor(basis_prior_mean_ft.real, dtype=torch.float32, device=device)
-    imag_prior_mean_torch = torch.tensor(basis_prior_mean_ft.imag, dtype=torch.float32, device=device)
+    # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
+    ####################### (l, k, None, f) ################# (l, None, j, f) ###########
+    real_real_phase = real_phase_mat_torch[:, :, :, None, :] * real_phase_mat_torch[:, :, None, :, :]
 
-    if isinstance(regularization_lambda, np.ndarray):
-        regularization_lambda_torch = torch.tensor(regularization_lambda, dtype=torch.float32, device=device)
-    else:
-        regularization_lambda_torch = regularization_lambda * torch.ones((n_basis, ), dtype=torch.float32, device=device)
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is imag{P}^{(l)}_{f,k} * imag{P}^{(l)}_{f,j}
+    imag_imag_phase = imag_phase_mat_torch[:, :, :, None, :] * imag_phase_mat_torch[:, :, None, :, :]
 
-    rfft_domain_inv_cov_matrix_torch = torch.tensor(rfft_domain_inv_cov_matrix, dtype=torch.float32, device=device)
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is imag{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
+    imag_real_phase = imag_phase_mat_torch[:, :, :, None, :] * real_phase_mat_torch[:, :, None, :, :]
 
+    # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * imag{P}^{(l)}_{f,j}
+    real_imag_phase = real_phase_mat_torch[:, :, :, None, :] * imag_phase_mat_torch[:, :, None, :, :]
 
-    ## Variable order convention for solving 2FK x 2FK system
-    # We pack a (batch, 2, K, F, 2, K, F) matrix, where we differentiate by the variables
-    # specified in the earlier axes
-    # order is (real/imag, frequency, basis)
-    linear_system_coeffs = torch.zeros((batch, 2, n_basis, n_rfft_frequencies, 2, n_basis, n_rfft_frequencies),
-                                       dtype=torch.float32, device=device)
+    # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms)
+    # the (l^{th}, k^{th}, j^{th}) entry is A_{k,l} A_{j,l}
+    amplitude_outer_product = amplitude_mat_torch[:, :, :, None] * amplitude_mat_torch[:, :, None, :]
 
-    linear_system_rhs = torch.zeros((batch, 2, n_basis, n_rfft_frequencies),
-                                    dtype=torch.float32, device=device)
+    # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_presum_real_coeff = (real_real_phase + imag_imag_phase) * amplitude_outer_product[:, :, :, :, None]
+    # we need to mask the contributions of some of the observations, since those correspond to null data
+    eq1_group_presum_real_coeff = eq1_group_presum_real_coeff * valid_one_matrix[:, :, None, None, None]
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_real_coeff = torch.sum(eq1_group_presum_real_coeff, dim=1)
 
-    with torch.no_grad():
+    # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_presum_imag_coeff = (imag_real_phase - real_imag_phase) * amplitude_outer_product[:, :, :, :, None]
+    eq1_group_presum_imag_coeff = eq1_group_presum_imag_coeff * valid_one_matrix[:, :, None, None, None]
+    # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
+    eq1_group_imag_coeff = torch.sum(eq1_group_presum_imag_coeff, dim=1)
 
-        ###### FIRST CONSTRUCT THE C_j COEFFICIENTS FROM THE DOC ########################################
-        ###### THESE CORRESPOND TO THE COEFFICIENTS FOR THE TERMS THAT ##################################
-        ###### COME FROM DIFFERENTIATING THE MSE LOSS TERM ##############################################
+    # shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    ################# (l, k, f) ############### (l, k, None) ########################### (l, None, f)
+    eq1_rhs_re = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :,
+                                                                                         None, :]
+    eq1_rhs_im = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :,
+                                                                                         None, :]
 
-        # shape (batch, n_observations) -> (batch, )
-        n_valid_observations = torch.sum(valid_one_matrix, axis=1)
+    # shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    eq1_rhs = torch.sum((eq1_rhs_re + eq1_rhs_im) * valid_one_matrix[:, :, None, None], dim=1)
 
-        # the tensors below correspond to differentiating
-        # with respect to the k^th waveform, f^th frequency
-        # (differentiation w.r.t. axes 1 and 3)
-        # variables for the different basis components along axis 2
+    # shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
+    eq2_rhs_p = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :,
+                                                                                        None, :]
+    eq2_rhs_m = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :,
+                                                                                        None, :]
 
-        # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
-        # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
-        #---------------------- (batch, l, k, None, f) ----------------- (batch, l, None, j, f) -----------
-        # -> (batch, l, k, j, f)
-        real_real_phase = real_phase_mat_torch[:, :, :, None, :] * real_phase_mat_torch[:, :, None, :, :]
+    # shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+    eq2_rhs = torch.sum((eq2_rhs_p - eq2_rhs_m) * valid_one_matrix[:, :, None, None], dim=1)
 
-        # the (l^th, k^{th}, j^{th}, f^{th}) entry is imag{P}^{(l)}_{f,k} * imag{P}^{(l)}_{f,j}
-        imag_imag_phase = imag_phase_mat_torch[:, :, :, None, :] * imag_phase_mat_torch[:, :, None, :, :]
+    mse_matrix_coeffs, mse_rhs = rearrange_mse_grouped_coefficients(
+        eq1_group_real_coeff,
+        eq1_group_imag_coeff,
+        eq1_rhs,
+        -1.0 * eq1_group_imag_coeff,
+        eq1_group_real_coeff,
+        eq2_rhs,
+        n_true_frequencies
+    )
 
-        # the (l^th, k^{th}, j^{th}, f^{th}) entry is imag{P}^{(l)}_{f,k} * real{P}^{(l)}_{f,j}
-        imag_real_phase = imag_phase_mat_torch[:, :, :, None, :] * real_phase_mat_torch[:, :, None, :, :]
+    # full_coeffs has shape (batch, n_basis * N, n_basis * N)
+    # full_rhs has shape (batch, n_basis * N)
+    full_coeffs = mse_matrix_coeffs + prior_coeffs
+    full_rhs = mse_rhs + prior_rhs
 
-        # the (l^th, k^{th}, j^{th}, f^{th}) entry is real{P}^{(l)}_{f,k} * imag{P}^{(l)}_{f,j}
-        real_imag_phase = real_phase_mat_torch[:, :, :, None, :] * imag_phase_mat_torch[:, :, None, :, :]
+    # shape (batch, n_basis * N) -> (batch, n_basis, N)
+    soln_ri = torch.linalg.solve(full_coeffs, full_rhs[:, :, None]).squeeze(2).reshape(batch, n_basis, -1)
 
-        # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms)
-        # the (l^{th}, k^{th}, j^{th}) entry is A_{k,l} A_{j,l}
-        amplitude_outer_product = amplitude_mat_torch[:, :, :, None] * amplitude_mat_torch[:, :, None, :]
+    soln_ri_np = soln_ri.detach().cpu().numpy()
 
-        ########## do all of the processing for eqn group 1 ###############################################
-        # shape (batch, n_observations, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
-        eq1_group_presum_real_coeff = (real_real_phase + imag_imag_phase) * amplitude_outer_product[:, :, :, :, None]
-        # we need to mask the contributions of some of the observations, since those correspond to null data
-        eq1_group_presum_real_coeff = eq1_group_presum_real_coeff * valid_one_matrix[:, :, None, None, None]
+    # shape (batch, n_basis, n_rfft_frequencies), complex-valued
+    soln_rfft = _unpack_real_imag_to_complex(soln_ri_np, n_true_frequencies, axis=2)
 
-        # shape (batch, n_canonical_waveforms, n_canonical_waveforms, n_rfft_frequencies)
-        eq1_group_real_coeff = torch.sum(eq1_group_presum_real_coeff, dim=1)
-        if mean_over_electrodes:
-            eq1_group_real_coeff = eq1_group_real_coeff / n_valid_observations[:, None, None, None]
-        # the above corresponds to the coefficients of the real components from the MSE term
-        # after differentiating with respect to axes 1 and 3; each entry along axis 2
-        # corresponds to the coefficient of a different variable
-
-        # shape (batch, n_observations, n_basis, n_basis, n_rfft_frequencies)
-        eq1_group_presum_imag_coeff = (imag_real_phase - real_imag_phase) * amplitude_outer_product[:, :, :, :, None]
-        eq1_group_presum_imag_coeff = eq1_group_presum_imag_coeff * valid_one_matrix[:, :, None, None, None]
-        # shape (batch, n_basis, n_basis, n_rfft_frequencies)
-        eq1_group_imag_coeff = torch.sum(eq1_group_presum_imag_coeff, dim=1)
-        if mean_over_electrodes:
-            eq1_group_imag_coeff = eq1_group_imag_coeff / n_valid_observations[:, None, None, None]
-
-        # shape (batch, n_basis, 2, n_basis, n_rfft_frequencies)
-        # -> (batch, n_basis, n_rfft_frequencies, 2, n_basis)
-        eq1_group_coeff = torch.stack([eq1_group_real_coeff, eq1_group_imag_coeff], dim=2).permute(0, 1, 4, 2, 3)
-        # the above corresponds to the coefficients of the real and imaginary components from the MSE term
-        # after differentiating with respect to axes 1 and 2; each entry along axes 3 and 4
-        # corresponds to the coefficient of a different variable
-
-        # changing the view should also change the original...
-        # slice has shape (batch, 2, K, F, 2, K, F) -> (batch, K, F, 2, K, F)
-        # after taking diagonal we have shape
-        # (batch, K, 2, K, F)
-        freq_diagonal0 = torch.diagonal(linear_system_coeffs[:, 0, :, :, :, :, :], offset=0,
-                                        dim1=2, dim2=5)
-        #FIXME
-        #freq_diagonal0 += eq1_group_coeff.permute((0, 1, 3, 4, 2))
-
-        # shape (batch, n_observations, n_basis, n_rfft_frequencies)
-        #---------------- (l, k, f) --------------- (l, k, None) --------------------------- (l, None, f)
-        eq1_rhs_re = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :,
-                                                                                             None, :]
-        eq1_rhs_im = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :,
-                                                                                             None, :]
-
-        # shape (batch, n_basis, n_frequencies)
-        eq1_rhs = torch.sum((eq1_rhs_re + eq1_rhs_im) * valid_one_matrix[:, :, None, None], dim=1)
-
-        #FIXME
-        #linear_system_rhs[:, 0, :, :] += eq1_rhs
-
-
-        ####### do all of the processing for eqn group 2 #####################################
-        # shape (batch, n_canonical_waveforms, 2, n_canonical_waveforms, n_rfft_frequencies)
-        # -> (batch, n_canonical_waveforms, n_rfft_frequencies, 2, n_canonical_waveforms)
-        eq2_group_coeff = torch.stack([-1.0 * eq1_group_imag_coeff, eq1_group_real_coeff], dim=2).permute(0, 1, 4, 2, 3)
-        # the above corresponds to the coefficients of the real and imaginary components from the MSE term
-        # after differentiating with respect to axes 1 and 2; each entry along axes 3 and 4
-        # corresponds to the coefficient of a different variable
-        
-        # changing the view should also change the original...
-        # slice has shape (batch, 2, K, F, 2, K, F) -> (batch, K, F, 2, K, F)
-        # after taking diagonal we have shape
-        # (batch, K, 2, K, F)
-        freq_diagonal2 = torch.diagonal(linear_system_coeffs[:, 1, :, :, :, :, :], offset=0,
-                                        dim1=2, dim2=5)
-        #FIXME
-        #freq_diagonal2 += eq2_group_coeff.permute((0, 1, 3, 4, 2))
-
-        # shape (batch, n_observations, n_canonical_waveforms, n_rfft_frequencies)
-        eq2_rhs_p = real_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * imag_observe_ft_torch[:, :,
-                                                                                            None, :]
-        eq2_rhs_m = imag_phase_mat_torch[:, :, :, :] * amplitude_mat_torch[:, :, :, None] * real_observe_ft_torch[:, :,
-                                                                                            None, :]
-
-        # shape (batch, n_canonical_waveforms, n_rfft_frequencies)
-        eq2_rhs = torch.sum((eq2_rhs_p - eq2_rhs_m) * valid_one_matrix[:, :, None, None], dim=1)
-        #FIXME
-        #linear_system_rhs[:, 1, :, :] += eq2_rhs
-
-        ###### NOW COMPUTE THE COEFFICIENTS FROM THE PRIOR REGULARIZATION TERMS ###################
-        # shape (1, n_basis, 1, 1) * (1, n_basis_waveforms, n_rfft_frequencies, n_rfft_frequencies)
-        # -> (1, n_basis, n_rfft_freqs, n_rfft_freqs)
-        regularization_coeffs = regularization_lambda_torch[None, :, None, None] * \
-                                rfft_domain_inv_cov_matrix_torch[None, :, :, :]
-        # (1, n_basis, n_rfft_freqs, n_rfft_freqs) -> (1, n_rfft_freqs, n_rfft_freqs, n_basis)
-        regularization_coeffs_perm = regularization_coeffs.permute((0, 2, 3, 1))
-
-        # changing the view should also change the original...
-        # slice has shape (batch, K, F, K, F)
-        # -> (batch, F, F, K)
-        basis_diag1 = torch.diagonal(linear_system_coeffs[:, 0, :, :, 0, :, :], offset=0, dim1=1, dim2=3)
-        basis_diag1 += regularization_coeffs_perm
-        basis_diag2 = torch.diagonal(linear_system_coeffs[:, 1, :, :, 1, :, :], offset=0, dim1=1, dim2=3)
-        basis_diag2 += regularization_coeffs_perm
-
-        # shape (batch, n_basis, n_rfft_freqs, n_rfft_freqs) @ (batch, n_basis, n_rfft_freqs, 1)
-        # -> (batch, n_basis, n_rfft_freqs, 1) -> (batch, n_basis, n_rfft_freqs)
-        regularization_rhs_eq1 = (rfft_domain_inv_cov_matrix_torch @ real_prior_mean_torch[:, :, :, None]).squeeze(3) \
-                                  * regularization_lambda_torch[None, :, None]
-        linear_system_rhs[:, 0, :, :] += regularization_rhs_eq1
-
-        regularization_rhs_eq2 = (rfft_domain_inv_cov_matrix_torch @ imag_prior_mean_torch[:, :, :, None]).squeeze(3) \
-                                 * regularization_lambda_torch[None, :, None]
-        linear_system_rhs[:, 1, :, :] += regularization_rhs_eq2
-
-        ##### NOW RESHAPE INTO BATCHED LINEAR SYSTEMS ####################################################
-        # shape (batch, 2 * n_basis * n_rfft_freqs, 2 * n_basis * n_rfft_freqs)
-        batched_linear_system_coeffs = linear_system_coeffs.reshape(batch, 2 * n_basis * n_rfft_frequencies,
-                                                                    2 * n_basis * n_rfft_frequencies)
-        # shape (batch, 2 * n_basis * n_rfft_freqs)
-        batched_linear_system_rhs = linear_system_rhs.reshape(batch, -1)
-
-        # shape (batch, 2 * n_basis * n_rfft_freqs)
-        print(batched_linear_system_coeffs.shape, batched_linear_system_rhs.shape)
-        batch_solved_variables = torch.linalg.solve(batched_linear_system_coeffs,
-                                                    batched_linear_system_rhs)
-
-        ##### NOW UNPACK BACK INTO FOURIER COEFFICIENTS ##################################################
-        batched_solved_variables_orig_shape = batch_solved_variables.reshape(batch, 2, n_basis, n_rfft_frequencies)
-
-        batched_solved_reals = batched_solved_variables_orig_shape[:, 0, :, :].detach().cpu().numpy()
-        batched_solved_imags = batched_solved_variables_orig_shape[:, 1, :, :].detach().cpu().numpy()
-
-        return batched_solved_reals + 1j * batched_solved_imags
+    return soln_rfft
 
 
 def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: np.ndarray,
