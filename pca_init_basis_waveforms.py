@@ -15,9 +15,10 @@ if __name__ == '__main__':
     parser.add_argument('basis_pickle', type=str, help='path to output pickle file')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
     parser.add_argument('--alignment_sample', '-l', type=int, default=60,
-                        help='sample to align peak at, in units of upsampled/padded samples')
+                        help='sample to align peak at, in units of upsampled + padded samples')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
-    parser.add_argument('--n_pca_components', '-p', type=int, default=5, help='number of PCA components to use for clustering')
+    parser.add_argument('--n_pca_components', '-p', type=int, default=5,
+                        help='number of PCA components to use for clustering')
 
     args = parser.parse_args()
 
@@ -25,18 +26,18 @@ if __name__ == '__main__':
     n_basis_waveforms = args.nbasis
 
     with open(args.data_pickle, 'rb') as pfile:
-
         preprocessed_dict = pickle.load(pfile)
 
-    eis_by_cell_id = preprocessed_dict['eis_by_cell_id'] # type: Dict[int, np.ndarray]
+    eis_by_cell_id = preprocessed_dict['eis_by_cell_id']  # type: Dict[int, np.ndarray]
     cell_list = list(eis_by_cell_id.keys())
 
-    padded_channels_sufficient_magnitude, matrix_indices_by_cell_id = pack_significant_electrodes_into_matrix(eis_by_cell_id,
-                                                                                     cell_list,
-                                                                                     args.thresh)
+    padded_channels_sufficient_magnitude, matrix_indices_by_cell_id = pack_significant_electrodes_into_matrix(
+        eis_by_cell_id,
+        cell_list,
+        args.thresh)
 
     if padded_channels_sufficient_magnitude.shape[0] > 5000:
-        padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude[::5,:]
+        padded_channels_sufficient_magnitude = padded_channels_sufficient_magnitude[::5, :]
 
     padded_magnitude = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
     padded_channels_normed = padded_channels_sufficient_magnitude / padded_magnitude[:, None]
@@ -58,7 +59,7 @@ if __name__ == '__main__':
 
     for idx in range(n_basis_waveforms):
         selector = (cluster_values == idx)
-        cluster_means[idx,:] = np.mean(aligned_data_unscaled[selector, :], axis=0)
+        cluster_means[idx, :] = np.mean(aligned_data_unscaled[selector, :], axis=0)
 
     cluster_means = cluster_means / np.linalg.norm(cluster_means, axis=1, keepdims=True)
 
@@ -72,4 +73,3 @@ if __name__ == '__main__':
 
     with open(args.basis_pickle, 'wb') as pfile:
         pickle.dump(pickle_dict, pfile)
-
