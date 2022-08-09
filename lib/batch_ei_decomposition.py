@@ -187,6 +187,9 @@ def batched_shifted_fourier_nmf_iterative_opt_with_prior(raw_waveform_data_matri
 
     # shape (batch, n_basis_waveforms, n_frequencies)
     prior_mean_rfft = np.fft.rfft(prior_basis_waveform_means, axis=2)
+    print(f"prior_mean_rfft {prior_mean_rfft.shape}")
+    print(f"prior_basis_waveform_means {prior_basis_waveform_means.shape}")
+    print(f"n_frequencies_not_rfft {n_frequencies_not_rfft}")
     # shape (batch, n_basis_waveforms, N)
     prior_mean_rfft_stacked = _pack_complex_to_real_imag(prior_mean_rfft,
                                                          n_frequencies_not_rfft,
@@ -307,7 +310,6 @@ def batch_two_step_decompose_cells_with_prior(
         converge_step_cutoff: Optional[float] = None,
         snr_abs_threshold: float = 5.0,
         amplitude_random_init_range: Tuple[float, float] = (0.0, 10.0),
-        supersample_factor: int = 5,
         shifts: Tuple[int, int] = (-100, 100),
         grid_search_step: int = 5,
         grid_search_top_n: int = 4,
@@ -329,8 +331,11 @@ def batch_two_step_decompose_cells_with_prior(
     Top-level wrapper for EI decomposition iterative algorithm including Gaussian prior on waveform shape, and
         either L1 or L2,1 sparsity/group-sparsity regularization on the amplitudes
 
-    Takes care of all of the upsampling, batching, padding, covariance matrix generation, etc. User only specifies
-        initial data, prior means and Gaussian process kernel, regularization weights, and hyperparameters
+    Unlike the previous implementation without the waveform prior, this function assumes that all of the inputs
+        have been appropriately upsampled and padded (both data matrices and initial basis waveform means).
+
+    Like the previous implementation, this function automatically takes care of batching. It also generates the
+        basis waveform covariance matrix.
 
     :param eis_by_cell_id: Dict mapping cell id to raw EIs. Each EI must have shape (n_electrodes, n_timepoints_raw)
     :param basis_prior_mean_waveforms: shape (n_basis, n_timepoints_raw)
@@ -344,7 +349,6 @@ def batch_two_step_decompose_cells_with_prior(
     :param converge_step_cutoff:
     :param snr_abs_threshold:
     :param amplitude_random_init_range:
-    :param supersample_factor:
     :param shifts:
     :param grid_search_step:
     :param grid_search_top_n:
@@ -362,13 +366,10 @@ def batch_two_step_decompose_cells_with_prior(
     '''
 
     n_basis, n_timepoints_raw = basis_prior_mean_waveforms.shape
-    left_pad, right_pad = shifts
-
-    expected_upsample_length = supersample_factor * n_timepoints_raw + left_pad + right_pad
-    upsample_time_indices = np.r_[0:expected_upsample_length:1.0] / supersample_factor
+    upsample_time_indices = np.r_[0:n_timepoints_raw:1.0]
 
     # generate the covariance matrices
-    full_cov_mat = np.zeros((n_basis, expected_upsample_length, expected_upsample_length), dtype=np.float32)
+    full_cov_mat = np.zeros((n_basis, n_timepoints_raw, n_timepoints_raw), dtype=np.float32)
     if isinstance(basis_prior_covariance, Kernel):
         kernel_cov_mat = basis_prior_covariance(upsample_time_indices)
         for i in range(n_basis):
@@ -393,21 +394,6 @@ def batch_two_step_decompose_cells_with_prior(
         # cell_order: shape (batch, ) integer cell id
 
         batch, max_n_sig_electrodes, n_timepoints_raw = batched_data_mat.shape
-        flat_data_mat = batched_data_mat.reshape(batch * max_n_sig_electrodes, n_timepoints_raw)
-
-        # shape (batch * max_n_sig_electrodes, n_timepoints_upsampled)
-        flat_bspline_supersampled = bspline_upsample_waveforms(flat_data_mat, supersample_factor)
-        _, n_timepoints_upsampled = flat_bspline_supersampled.shape
-
-        # shape (batch, max_n_sig_electrodes, n_timepoints_upsampled)
-        batched_bspline_supersampled = flat_bspline_supersampled.reshape(batch, max_n_sig_electrodes,
-                                                                         n_timepoints_upsampled)
-
-        # now zero pad before and after
-        # shape (batch, max_n_sig_electrodes, n_timepoints)
-        padded_channels_sufficient_magnitude = np.pad(batched_bspline_supersampled,
-                                                      [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
-                                                      mode='constant')
 
         # shape (n_basis_waveforms, n_timeponts_upsampled)
         # bspline_supersampled_basis = bspline_upsample_waveforms(initialized_basis_vectors, supersample_factor)
@@ -422,7 +408,7 @@ def batch_two_step_decompose_cells_with_prior(
         batched_prior_covs = np.tile(full_cov_mat, (batch, 1, 1, 1))
 
         amplitudes, waveforms, delays, mse = batched_shifted_fourier_nmf_iterative_opt_with_prior(
-            padded_channels_sufficient_magnitude,
+            batched_data_mat,
             is_valid_mat,
             batched_basis_waveforms,
             batched_prior_covs,

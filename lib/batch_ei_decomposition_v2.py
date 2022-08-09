@@ -9,6 +9,7 @@ from lib.losseval import batch_evaluate_mse_flat
 from lib.optim.optim_base import BatchedMultiProxProblem, \
     ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, \
     ProxGradSolverParams
+from lib.optim.prox_optim import batch_multiproblem_parallel_prox_solve
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector
 
@@ -479,7 +480,7 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
                  l12_group_sel_matrix: np.ndarray,
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
-                 init_low: float = -1e-1,
+                 init_low: float = 0,
                  init_high: float = 1e-1):
         '''
         Conventions for the variables in this subclass
@@ -1530,7 +1531,9 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
         device)  # type: Union[BatchedMultiProxProblem, SharedShiftSolver, BatchedShiftSolver]
 
     #### Step 3: set up projected gradient descent problem #######################################
-    _ = solver.solve(solver_params)
+    _ = batch_multiproblem_parallel_prox_solve(solver,
+                                               solver_params,
+                                               verbose=solver_verbose)
 
     # shape (batch, n_electrodes, n_phase_shifts, n_basis)
     amplitudes_solved = solver.return_amplitudes()
@@ -1684,7 +1687,9 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts2(
                                          init_high=init_high).to(
         device)  # type: Union[BatchedMultiProxProblem, UnsharedShiftSolver, BatchedShiftSolver]
 
-    _ = solver.solve(solver_params)
+    _ = batch_multiproblem_parallel_prox_solve(solver,
+                                               solver_params,
+                                               verbose=solver_verbose)
 
     # shape (batch, n_electrodes, n_phase_shifts, n_basis)
     amplitudes_solved = solver.return_amplitudes()

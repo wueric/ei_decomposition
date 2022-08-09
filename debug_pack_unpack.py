@@ -26,8 +26,6 @@ if __name__ == '__main__':
                                   args.ds_name,
                                   include_params=True,
                                   include_ei=True)
-    dataset_el_map = dataset.get_electrode_map()
-    dataset_adjacency_map = el_map.get_litke_array_adj_mat_by_array_id(dataset.array_id)
 
     with open(args.init_fit, 'rb') as pfile:
         _ = pickle.load(pfile)

@@ -346,6 +346,8 @@ def _pack_complex_to_real_imag(complex_valued_matrix: np.ndarray,
     expanded_real_indices_shape = [1 for _ in orig_shape]
     expanded_real_indices_shape[axis] = real_indices_flat.shape[0]
     real_indices = real_indices_flat.reshape(expanded_real_indices_shape)
+    print('n_timepoints', n_timepoints)
+    print(real_imag_matrix.shape, real_indices.shape, real_values.shape, axis)
     np.put_along_axis(real_imag_matrix, real_indices, real_values, axis=axis)
 
     # handle the imaginary component
@@ -361,7 +363,7 @@ def _pack_complex_to_real_imag(complex_valued_matrix: np.ndarray,
     expanded_imag_indices_shape = [1 for _ in orig_shape]
     expanded_imag_indices_shape[axis] = imag_indices_put_flat.shape[0]
     imag_indices_put = imag_indices_put_flat.reshape(expanded_imag_indices_shape)
-
+    
     np.put_along_axis(real_imag_matrix, imag_indices_put, selected_imag_values, axis=axis)
 
     return real_imag_matrix
