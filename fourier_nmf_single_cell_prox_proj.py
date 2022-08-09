@@ -5,7 +5,7 @@ import argparse
 
 from lib.batch_ei_decomposition_v2 import RegularizationType, batch_two_step_decompose_cells_by_fitted_compartments2, \
     WaveformPriorParams
-from lib.optim.proxgrad_optim import ProxGradSolverParams, ProxFISTASolverParams
+from lib.optim.optim_base import ProxGradSolverParams, ProxFISTASolverParams
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(

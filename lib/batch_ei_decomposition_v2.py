@@ -6,7 +6,7 @@ import numpy as np
 from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3, \
     batch_fourier_complex_least_square_with_prior_optimize, construct_rfft_covariance_matrix
 from lib.losseval import batch_evaluate_mse_flat
-from lib.optim.proxgrad_optim import BatchedMultiProxProblem, AutogradBatchMultiProxProblem, \
+from lib.optim.optim_base import BatchedMultiProxProblem, \
     ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, \
     ProxGradSolverParams
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
@@ -230,7 +230,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem,
 
             return (gradient_flat,)
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         return self.compute_mse_loss(*args, **kwargs)
 
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
@@ -266,7 +266,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem,
         return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
 
 
-class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxProblem,
+class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(BatchedMultiProxProblem,
                                                          BatchedShiftSolver,
                                                          SharedShiftSolver):
     '''
@@ -418,7 +418,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
         # shape (batch_size, n_electrodes * phase_shifts)
         return self.l12_lambda * group_sparse_norm
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -451,7 +451,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
 
     def compute_loss_for_argmin(self, **kwargs) -> torch.Tensor:
         with torch.no_grad():
-            loss_unshape = self._smooth_loss(*self.parameters(recurse=False), **kwargs)
+            loss_unshape = self._eval_smooth_loss(*self.parameters(recurse=False), **kwargs)
             total_loss = loss_unshape.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts)
             return total_loss
 
@@ -460,7 +460,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
         return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
 
 
-class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
+class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -599,7 +599,7 @@ class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Batch
 
         return mse_loss_component
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -682,7 +682,7 @@ class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Batch
 
     def compute_loss_for_argmin(self, **kwargs) -> torch.Tensor:
         with torch.no_grad():
-            loss_unshape = self._smooth_loss(*self.parameters(recurse=False), **kwargs)
+            loss_unshape = self._eval_smooth_loss(*self.parameters(recurse=False), **kwargs)
 
             mse_loss = loss_unshape.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts)
 
@@ -826,7 +826,7 @@ class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batc
         # shape (batch, n_electrodes * n_shifts)
         return mse_loss_contrib.reshape(self.batch_size, -1)
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -924,7 +924,7 @@ class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batc
         return amplitudes_copy.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
 
 
-class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxProblem,
+class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(BatchedMultiProxProblem,
                                                            BatchedShiftSolver,
                                                            UnsharedShiftSolver):
     '''
@@ -1088,7 +1088,7 @@ class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiPro
         # shape (batch_size, n_electrodes * phase_shifts)
         return self.l12_lambda * group_sparse_norm
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -1136,7 +1136,7 @@ class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiPro
         return amplitudes_copy.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
 
 
-class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
+class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -1278,7 +1278,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Bat
         # shape (batch, n_electrodes * n_shifts)
         return mse_loss_contrib.reshape(self.batch_size, -1)
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
