@@ -276,10 +276,10 @@ def batch_multiproblem_parallel_fista_prox_solve(batch_multi_prox_problem: Batch
             # computing the loss isn't trivial
             with torch.no_grad():
                 if batch_multi_prox_problem.has_invalid_problems:
-                    to_include_in_mean = torch.sum(current_loss * batch_multi_prox_problem.valid_problems)
+                    to_include_in_mean = torch.sum(descent_loss * batch_multi_prox_problem.valid_problems)
                     current_mean = to_include_in_mean / torch.sum(batch_multi_prox_problem.valid_problems)
                 else:
-                    current_mean = torch.mean(current_loss)
+                    current_mean = torch.mean(descent_loss)
                 print(f"iter={iter}, mean loss={current_mean.item()}")
 
         # early termination criterion

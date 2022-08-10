@@ -66,7 +66,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem,
                  l1_lambda: Union[float, np.ndarray],
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
-                 init_low: float = -1e-1,
+                 init_low: float = 0.0,
                  init_high: float = 1e-1):
         '''
         Conventions for the variables in this subclass
@@ -293,7 +293,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(BatchedMultiProxProblem
                  l12_group_sel_matrix: np.ndarray,
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
-                 init_low: float = -1e-1,
+                 init_low: float = 0.0,
                  init_high: float = 1e-1,
                  epsilon_div_by_zero: float = 1e-6):
         '''
@@ -648,7 +648,7 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
             zi_groupsel = z_amplitudes_clipped[:, :, None, :] * self.group_sel[None, None, :, :]
 
             # shape (batch_size, n_electrodes * n_phase_shifts, n_groups)
-            zi_norm = torch.norm(zi_groupsel, dim=3, p=2)
+            zi_norm = torch.linalg.norm(zi_groupsel, dim=3, ord=2)
 
             # shape (batch, n_electrodes * n_phase_shifts, n_groups), boolean-valued
             exceeds_abs = zi_norm > torch.abs(norms)
@@ -693,7 +693,7 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
             grouped_components = self.amplitudes[:, :, None, :] * self.group_sel[None, None, :, :]
 
             # shape (batch_size, n_electrodes * phase_shifts)
-            group_sparse_norm = torch.sum(torch.norm(grouped_components, p=2, dim=3), 2) * self.l12_lambda
+            group_sparse_norm = torch.sum(torch.linalg.norm(grouped_components, ord=2, dim=3), dim=2) * self.l12_lambda
 
             group_sparse_penalty = group_sparse_norm.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts)
 
@@ -1156,7 +1156,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
                  l12_group_sel_matrix: np.ndarray,
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
-                 init_low: float = -1e-1,
+                 init_low: float = 0.0,
                  init_high: float = 1e-1):
         '''
 
@@ -1316,6 +1316,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
             # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
             z_amplitudes_clipped = torch.clamp_min_(amplitudes, 0.0)
 
+            ####### EVERYTHING BELOW THIS LINE IS THE OLD IMPLEMENTATION THAT WORKS #####
             # distribute the basis weights into their respective groups
             # as long as self.group_sel does not assign weights to multiple groups
             # we should be able to recover the original basis weights by
@@ -1327,13 +1328,13 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
             zi_groupsel = z_amplitudes_clipped[:, :, None, :] * self.group_sel[None, None, :, :]
 
             # shape (batch_size, n_electrodes * n_phase_shifts, n_groups)
-            zi_norm = torch.norm(zi_groupsel, dim=3, p=2)
+            zi_norm = torch.linalg.norm(zi_groupsel, dim=3, ord=2)
 
             # shape (batch, n_electrodes * n_phase_shifts, n_groups), boolean-valued
             exceeds_abs = zi_norm > torch.abs(norms)
 
             # shape (batch, n_electrodes * n_phase_shifts, n_groups), boolean-valued
-            less_than_neg = zi_norm < -norms
+            less_than_neg = zi_norm <= -norms
 
             # now apply the clips
             # note that we need to project each group differently
@@ -1541,6 +1542,8 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
     # shape (batch, n_electrodes, n_phase_shifts)
     objective_fn_vals = solver.compute_loss_for_argmin()
 
+    del solver
+
     return amplitudes_solved.detach().cpu().numpy(), objective_fn_vals.detach().cpu().numpy()
 
 
@@ -1696,6 +1699,8 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts2(
 
     # shape (batch, n_electrodes, n_phase_shifts)
     objective_fn_vals = solver.compute_loss_for_argmin()
+
+    del solver
 
     return amplitudes_solved.detach().cpu().numpy(), objective_fn_vals.detach().cpu().numpy()
 
