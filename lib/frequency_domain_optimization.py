@@ -462,9 +462,27 @@ def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarra
 
 
 def DEBUG_identity_prior_optimize(
-        rfft_domain_inv_cov_matrix: np.ndarray,
-        basis_prior_mean_rfft: np.ndarray,
-        n_true_frequencies: int) -> np.ndarray:
+        ri_stack_ft_domain_inv_cov_matrix: np.ndarray,
+        ri_stack_basis_prior_mean_ft: np.ndarray) -> np.ndarray:
+    '''
+    Goal here is to lay out the optimization in the same order as we do for
+        the real thing, but to not include the real data pieces of the problem
+        so that we simply get the identity
+
+    This means we also have to figure out how to arrange the variables
+        correctly. Adding the prior has the effect of coupling all of the frequencies
+        of a waveform together. Since the original optimization solved separate
+        systems for equations for each frequency over all of the waveforms, this results
+        in one big system of equations (K waveforms * N timepoints x K * N) system
+
+    The variable order is (real components, imaginary components) stacked by basis waveform
+
+    (This should effectively be the computation that occurs in the no-data case,
+    i.e. if a basis waveform is outright missing for a cell)
+    @param ri_stack_ft_domain_inv_cov_matrix:
+    @param ri_stack_basis_prior_mean_ft:
+    @return:
+    '''
     pass
 
 
