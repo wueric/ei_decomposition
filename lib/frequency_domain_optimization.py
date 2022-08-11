@@ -463,7 +463,8 @@ def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarra
 
 def DEBUG_identity_prior_optimize(
         ri_stack_ft_domain_inv_cov_matrix: np.ndarray,
-        ri_stack_basis_prior_mean_ft: np.ndarray) -> np.ndarray:
+        ri_stack_basis_prior_mean_ft: np.ndarray,
+        device: torch.device) -> np.ndarray:
     '''
     Goal here is to lay out the optimization in the same order as we do for
         the real thing, but to not include the real data pieces of the problem
@@ -479,11 +480,35 @@ def DEBUG_identity_prior_optimize(
 
     (This should effectively be the computation that occurs in the no-data case,
     i.e. if a basis waveform is outright missing for a cell)
-    @param ri_stack_ft_domain_inv_cov_matrix:
-    @param ri_stack_basis_prior_mean_ft:
-    @return:
+    :param ri_stack_ft_domain_inv_cov_matrix:
+    :param ri_stack_basis_prior_mean_ft:
+    :return:
     '''
-    pass
+
+    batch = ri_stack_ft_domain_inv_cov_matrix.shape[0]
+
+    # First compute the prior matrix
+    ri_ft_prior_cov_mat_torch = torch.tensor(ri_stack_ft_domain_inv_cov_matrix, dtype=torch.float32, device=device)
+    ri_ft_prior_mean_torch = torch.tensor(ri_stack_basis_prior_mean_ft, dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        # first construct the prior coefficients
+        # shape (batch, n_basis, N, N) and shape (batch, n_basis, N)
+        prior_coeffs, prior_rhs_contrib = construct_prior_coefficients_and_rhs(ri_ft_prior_cov_mat_torch,
+                                                                               ri_ft_prior_mean_torch)
+
+        # then use torch put operations to pack these coefficients into something
+        # that can be added to the MSE coefficients
+
+        # variable ordering is (real components, imaginary components) stacked by basis waveform
+
+        # shape (batch, n_basis * N, n_basis * N)
+        prior_block_diag = torch.block_diag(*torch.split(prior_coeffs, 1, dim=1))
+
+        # shape (batch, n_basis * N)
+        prior_coeffs_stacked = prior_rhs_contrib.reshape(batch, -1)
+
+        return torch.linalg.solve(prior_block_diag, prior_coeffs_stacked)
 
 
 def _torch_pack_complex_to_real_imag_stack(real_component: torch.Tensor,
