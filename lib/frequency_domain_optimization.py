@@ -363,7 +363,7 @@ def _pack_complex_to_real_imag(complex_valued_matrix: np.ndarray,
     expanded_imag_indices_shape = [1 for _ in orig_shape]
     expanded_imag_indices_shape[axis] = imag_indices_put_flat.shape[0]
     imag_indices_put = imag_indices_put_flat.reshape(expanded_imag_indices_shape)
-    
+
     np.put_along_axis(real_imag_matrix, imag_indices_put, selected_imag_values, axis=axis)
 
     return real_imag_matrix
@@ -454,15 +454,15 @@ def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarra
                                                              n_timepoints,
                                                              axis=0)
 
-    # shape (N, N)
+    # shape (1, N, N)
     cov_matrix = real_imag_stacked_ft_matrix[None, :, :] @ time_domain_covariance_matrix \
                  @ (real_imag_stacked_ft_matrix.T)[None, :, :]
 
-    return cov_matrix
+    return cov_matrix.squeeze(0)
 
 
 def DEBUG_identity_prior_optimize(
-        ri_stack_ft_domain_inv_cov_matrix: np.ndarray,
+        ri_stack_ft_domain_cov_matrix: np.ndarray,
         ri_stack_basis_prior_mean_ft: np.ndarray,
         device: torch.device) -> np.ndarray:
     '''
@@ -480,20 +480,20 @@ def DEBUG_identity_prior_optimize(
 
     (This should effectively be the computation that occurs in the no-data case,
     i.e. if a basis waveform is outright missing for a cell)
-    :param ri_stack_ft_domain_inv_cov_matrix:
-    :param ri_stack_basis_prior_mean_ft:
+    :param ri_stack_ft_domain_cov_matrix: shape (n_basis, N, N)
+    :param ri_stack_basis_prior_mean_ft: shape (n_basis, N)
     :return:
     '''
 
-    batch = ri_stack_ft_domain_inv_cov_matrix.shape[0]
+    n_basis, n_timepoints = ri_stack_basis_prior_mean_ft.shape
 
     # First compute the prior matrix
-    ri_ft_prior_cov_mat_torch = torch.tensor(ri_stack_ft_domain_inv_cov_matrix, dtype=torch.float32, device=device)
+    ri_ft_prior_cov_mat_torch = torch.tensor(ri_stack_ft_domain_cov_matrix, dtype=torch.float32, device=device)
     ri_ft_prior_mean_torch = torch.tensor(ri_stack_basis_prior_mean_ft, dtype=torch.float32, device=device)
 
     with torch.no_grad():
         # first construct the prior coefficients
-        # shape (batch, n_basis, N, N) and shape (batch, n_basis, N)
+        # shape (n_basis, N, N) and shape (n_basis, N)
         prior_coeffs, prior_rhs_contrib = construct_prior_coefficients_and_rhs(ri_ft_prior_cov_mat_torch,
                                                                                ri_ft_prior_mean_torch)
 
@@ -502,13 +502,15 @@ def DEBUG_identity_prior_optimize(
 
         # variable ordering is (real components, imaginary components) stacked by basis waveform
 
-        # shape (batch, n_basis * N, n_basis * N)
-        prior_block_diag = torch.block_diag(*torch.split(prior_coeffs, 1, dim=1))
+        # shape (n_basis * N, n_basis * N)
+        prior_block_diag = torch.block_diag(*[x.squeeze(0) for x in torch.split(prior_coeffs, 1, dim=0)])
 
-        # shape (batch, n_basis * N)
-        prior_coeffs_stacked = prior_rhs_contrib.reshape(batch, -1)
+        # shape (n_basis * N, )
+        prior_coeffs_stacked = prior_rhs_contrib.reshape(-1)
 
-        return torch.linalg.solve(prior_block_diag, prior_coeffs_stacked)
+        soln = torch.linalg.solve(prior_block_diag, prior_coeffs_stacked)
+
+        return soln.reshape(n_basis, -1).detach().cpu().numpy()
 
 
 def _torch_pack_complex_to_real_imag_stack(real_component: torch.Tensor,
@@ -578,40 +580,42 @@ def _torch_pack_complex_to_real_imag_stack(real_component: torch.Tensor,
             return stacked_tensor
 
 
-def construct_prior_coefficients_and_rhs(prior_waveforms_mean_ft_ri_stack: torch.Tensor,
-                                         prior_waveforms_ft_cov_mat_ri_stack: torch.Tensor) \
+def construct_prior_coefficients_and_rhs(prior_waveforms_ft_cov_mat_ri_stack: torch.Tensor,
+                                         prior_waveforms_mean_ft_ri_stack: torch.Tensor) \
         -> Tuple[torch.Tensor, torch.Tensor]:
     '''
 
     (Should return a system of equations that recovers the Fourier coefficients of the prior
         waveform basis if solved directly)
-
-    :param prior_waveforms_mean_ft_ri_stack: real-imag stack of the Fourier coefficients of
-        the prior mean for each basis waveform,
-        shape (batch, n_basis, N)
+        
     :param prior_waveforms_ft_cov_mat_ri_stack: real-imag stack of the covariance matrices
         for the prior distribution,
-        shape (batch, n_basis, N, N)
+        shape (n_basis, N, N)
 
         This must be a valid covariance matrix, i.e. last two dimensions should be square,
             full rank, symmetric
+    :param prior_waveforms_mean_ft_ri_stack: real-imag stack of the Fourier coefficients of
+        the prior mean for each basis waveform,
+        shape (n_basis, N)
+
     :return:
     '''
 
-    # shape (batch, n_basis, N, N)
-    inv_cov_mat = torch.linalg.inv(prior_waveforms_ft_cov_mat_ri_stack)
+    # shape (n_basis, N, N)
+    with torch.no_grad():
+        inv_cov_mat = torch.linalg.inv(prior_waveforms_ft_cov_mat_ri_stack)
 
-    # shape (batch, n_basis, N, N) @ (batch, n_basis, N, 1)
-    # -> (batch, n_basis, N, 1) -> (batch, n_basis, N)
-    rhs = (inv_cov_mat @ prior_waveforms_mean_ft_ri_stack[:, :, None, :]).squeeze(3)
+        # shape (n_basis, N, N) @ (n_basis, N, 1)
+        # -> (n_basis, N, 1) -> (n_basis, N)
+        rhs = (inv_cov_mat @ prior_waveforms_mean_ft_ri_stack[:, :, None]).squeeze(2)
 
-    return inv_cov_mat, rhs
+        return inv_cov_mat, rhs
 
 
 def compute_variable_indices(frequency_num: torch.Tensor,
                              basis_num: torch.Tensor,
-                             coeffs_are_imag: bool,
-                             n_timepoints: int) -> torch.Tensor:
+                             n_timepoints: int,
+                             coeffs_are_imag: bool) -> torch.Tensor:
     '''
 
     :param frequency_num: shape (...), integer-valued
@@ -625,6 +629,49 @@ def compute_variable_indices(frequency_num: torch.Tensor,
     if coeffs_are_imag:
         basis_offset = basis_offset + (n_timepoints // 2) + 1
     return frequency_num + basis_offset
+
+
+def compute_variable_placement_indices_FIXED(n_timepoints: int,
+                                             n_basis: int,
+                                             coeffs_are_imag: bool,
+                                             device: torch.device) -> torch.Tensor:
+    n_real_eqns = (n_timepoints // 2) + 1
+    n_imag_eqns = (n_timepoints // 2) - 1 if n_timepoints % 2 == 0 else (n_timepoints // 2)
+
+    n_real_coeffs = n_real_eqns
+    n_imag_coeffs = n_imag_eqns
+
+    with torch.no_grad():
+        # need to construct the index tensor to place the coefficients from the original
+        # group of d/d real equations
+        d_real_freq_ix = torch.arange(0, n_real_coeffs,
+                                      dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
+        d_real_basis_ix = torch.arange(0, n_basis,
+                                       dtype=torch.long, device=device)[None, :].expand(n_real_coeffs, -1)
+
+        # shape (n_real_coeffs = n_real_eqns, n_basis)
+        d_real_placement_indices = compute_variable_indices(d_real_freq_ix,
+                                                            d_real_basis_ix,
+                                                            n_timepoints,
+                                                            coeffs_are_imag=coeffs_are_imag)
+
+        # need to construct the index tensor to place the coefficients from the original
+        # group of d/d imag equations
+        d_imag_freq_ix = torch.arange(0, n_imag_coeffs,
+                                      dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
+        d_imag_basis_ix = torch.arange(0, n_basis,
+                                       dtype=torch.long, device=device)[None, :].expand(n_imag_coeffs, -1)
+
+        # shape (n_imag_coeffs = n_imag_eqns, n_basis)
+        d_imag_placement_indices = compute_variable_indices(d_imag_freq_ix,
+                                                            d_imag_basis_ix,
+                                                            n_timepoints,
+                                                            coeffs_are_imag=coeffs_are_imag)
+
+        # shape (n_timepoints = N, n_basis)
+        placement_indices = torch.cat([d_real_placement_indices, d_imag_placement_indices], dim=0)
+
+        return placement_indices
 
 
 def compute_variable_placement_indices(coeffs_are_real: bool,
@@ -685,21 +732,65 @@ def rearrange_mse_grouped_coefficients(eq1_group_real_coeffs: torch.Tensor,
 
     :param eq1_group_real_coeffs: shape (batch, n_basis, n_basis, n_rfft_freqs)
         These are the real coefficients that come from differentiating the MSE loss w.r.t. the real component
+
+        Note that we form eq1 group by catting eq1_group_real_coeffs and eq1_group_imag_coeffs along dim 2
     :param eq1_group_imag_coeffs: shape (batch, n_basis, n_basis, n_rfft_freqs)
         These are the imag coefficients that come from differentiating the MSE loss w.r.t. the real component
+
+        Note that we form eq1 group by catting eq1_group_real_coeffs and eq1_group_imag_coeffs along dim 2
     :param eq1_group_rhs: shape (batch, n_basis, n_rfft_frequencies)
     :param eq2_group_real_coeffs: shape (batch, n_basis, n_basis, n_rfft_freqs)
         These are the real coefficients that come from differentiating the MSE loss w.r.t. the imag component
+
+        Note that we form eq2 group by catting eq2_group_real_coeffs and eq2_group_imag_coeffs along dim 2
     :param eq2_group_imag_coeffs: shape (batch, n_basis, n_basis, n_rfft_freqs)
         These are the imag coefficients that come from differentiating the MSE loss w.r.t. the imag component
+
+        Note that we form eq2 group by catting eq2_group_real_coeffs and eq2_group_imag_coeffs along dim 2
     :param eq2_group_rhs: shape (batch, n_basis, n_rfft_frequencies)
     :param n_timepoints: int, number of time samples
     :return:
+
+    Comments on variable ordering, conjugate symmetry of the Fourier transform, number of variables
+    
+    FACT: rfft gives back (N // 2) + 1 complex-valued coefficients. 
+        * If N is even, the 0^th coefficient and the last coefficient must be real-valued
+        
+        This means that that there are N / 2 + 1  real coefficients, and N / 2 - 1 imaginary
+        coefficients if we split real and imaginary, for a total of N coefficients
+        
+        * If N is odd, the 0^th coefficeint must be real-valued
+        
+        This means there are (N+1) / 2 real coefficients, and (N+1) / 2 - 1 imaginary coefficients,
+        so if we split real and imaginary, we have a total of N coefficients
+        
+    This means that the first imaginary coefficient, and possibly the last imaginary coefficient
+        from the original set of equations must be handled as special cases
+        
+    FACT: Delay in the Fourier domain corresponds to multiplication by $e^{-j \omega n}$ where n is
+        the number of delay samples. This is generally uninteresting, except in the case of the 0^th coefficient
+        where $\omega = 0$ or in the last case of the last coefficient of $N$ is even, where $\omega = 2 \pi$.
+
+        * If $\omega = 0$, $e^{-j \omega n} = e^{0} = 1$ and therefore the delay factor is real-valued.
+            
+            This means that the coefficients corresponding to imaginary variables of equation group 1 
+            (differentiating w.r.t. the real component) for $\omega=0$ are zero.
+            
+            This also means that the coefficients corresponding to the imaginary variables of equatino group 2
+            (differentiating w.r..t the imag component) for $\omega=0$ are purely real-valued and in fact
+            are all the same, i.e. this ends up requiring that the solution be 0 for those variables.
+            
+        * If $\omega = 2\pi$, $e^{-j \omega n} = e^{-2 \pi \omega n} = 1$, and the same thing as above happens.
     '''
 
     with torch.no_grad():
         batch, n_basis = eq1_group_real_coeffs.shape[:2]
         device = eq1_group_real_coeffs.device
+
+        ##########################################################################
+        # Reimplementation here
+        output_tensor = torch.zeros((batch, n_timepoints * n_basis, n_timepoints * n_basis),
+                                    dtype=eq1_group_real_coeffs.dtype, device=device)
 
         # all shape (batch, n_basis, n_rfft_freqs, n_basis)
         eq1_group_real_perm = eq1_group_real_coeffs.permute(0, 1, 3, 2)
@@ -707,42 +798,55 @@ def rearrange_mse_grouped_coefficients(eq1_group_real_coeffs: torch.Tensor,
         eq2_group_real_perm = eq2_group_real_coeffs.permute(0, 1, 3, 2)
         eq2_group_imag_perm = eq2_group_imag_coeffs.permute(0, 1, 3, 2)
 
-        # shape (batch, n_basis, N, n_basis)
-        # -> (batch, n_basis * N, n_basis)
-        real_coeff_ri_stack = _torch_pack_complex_to_real_imag_stack(eq1_group_real_perm,
-                                                                     eq2_group_real_perm,
-                                                                     n_timepoints,
-                                                                     dim=2).reshape(batch, -1, n_basis)
-        imag_coeff_ri_stack = _torch_pack_complex_to_real_imag_stack(eq1_group_imag_perm,
-                                                                     eq2_group_imag_perm,
-                                                                     n_timepoints,
-                                                                     dim=2).reshape(batch, -1, n_basis)
+        if n_timepoints % 2 == 0:
+            # all shape (batch, n_basis, n_rfft_freqs - 2, n_basis)
+            eq2_group_real_perm_relev = eq2_group_real_perm[:, :, 1:-1, :]
+            eq2_group_imag_perm_relev = eq2_group_imag_perm[:, :, 1:-1, :]
 
-        # shape (batch, n_basis, N) -> (batch, n_basis * N)
-        rhs_ri_stack = _torch_pack_complex_to_real_imag_stack(eq1_group_rhs,
-                                                              eq2_group_rhs,
-                                                              n_timepoints,
-                                                              dim=2).reshape(batch, -1)
+            # shape (batch, n_basis, n_rfft_freqs - 2)
+            eq2_group_rhs_relev = eq2_group_rhs[:, :, 1:-1]
+        else:
+            # all shape (batch, n_basis, n_rfft_freqs - 1, n_basis)
+            eq2_group_real_perm_relev = eq2_group_real_perm[:, :, 1:, :]
+            eq2_group_imag_perm_relev = eq2_group_imag_perm[:, :, 1:, :]
 
-        output_tensor = torch.zeros((batch, n_timepoints * n_basis, n_timepoints * n_basis),
-                                    dtype=eq1_group_real_coeffs.dtype, device=device)
+            # shape (batch, n_basis, n_rfft_freqs - 1)
+            eq2_group_rhs_relev = eq2_group_rhs[:, :, 1:]
 
-        # shape (N, n_basis) -> (n_basis * N, n_basis) -> (batch, n_basis * N, n_basis)
-        real_one_basis_placement_ix = compute_variable_placement_indices(True, n_timepoints, n_basis, device).repeat(
-            n_basis, 1).expand(batch, -1, -1)
+        # all shape (batch, n_basis, N, n_basis)
+        real_coeff_grouped_by_basis_stack = torch.cat([eq1_group_real_perm, eq2_group_real_perm_relev], dim=2)
+        imag_coeff_grouped_by_basis_stack = torch.cat([eq1_group_imag_perm, eq2_group_imag_perm_relev], dim=2)
 
-        # shape (N, n_basis) -> (n_basis * N, n_basis) -> (batch, n_basis * N, n_basis)
-        imag_one_basis_placement_ix = compute_variable_placement_indices(False, n_timepoints, n_basis, device).repeat(
-            n_basis, 1).expand(batch, -1, -1)
+        # all shape (batch, n_basis * N, n_basis)
+        real_coeff_grouped_by_basis_flat = real_coeff_grouped_by_basis_stack.reshape(batch, -1, n_basis)
+        imag_coeff_grouped_by_basis_flat = imag_coeff_grouped_by_basis_stack.reshape(batch, -1, n_basis)
 
-        output_tensor.scatter_add(2, real_one_basis_placement_ix, real_coeff_ri_stack)
-        output_tensor.scatter_add(2, imag_one_basis_placement_ix, imag_coeff_ri_stack)
+        # shape (n_basis * N, n_basis) -> (1, n_basis * N, n_basis) -> (batch, n_basis * N, n_basis)
+        real_coeff_placement_ix = compute_variable_placement_indices_FIXED(n_timepoints,
+                                                                           n_basis,
+                                                                           coeffs_are_imag=False,
+                                                                           device=device)[None, :, :].expand(batch, -1,
+                                                                                                             -1)
+        imag_coeff_placement_ix = compute_variable_placement_indices_FIXED(n_timepoints,
+                                                                           n_basis,
+                                                                           coeffs_are_imag=True,
+                                                                           device=device)[None, :, :].expand(batch, -1,
+                                                                                                             -1)
 
-        return output_tensor, rhs_ri_stack
+        output_tensor.scatter_add(2, real_coeff_placement_ix, real_coeff_grouped_by_basis_flat)
+        output_tensor.scatter_add(2, imag_coeff_placement_ix, imag_coeff_grouped_by_basis_flat)
+
+        # shape (batch, n_basis, N)
+        rhs_grouped_by_basis_stack = torch.cat([eq1_group_rhs, eq2_group_rhs_relev], dim=2)
+
+        # shape (batch, n_basis * N)
+        rhs_tensor = rhs_grouped_by_basis_stack.reshape(batch, -1)
+
+        return output_tensor, rhs_tensor
 
 
-def rearrange_prior_grouped_coefficients(prior_waveforms_mean_ft_ri_stack: torch.Tensor,
-                                         prior_waveforms_ft_cov_mat_ri_stack: torch.Tensor,
+def rearrange_prior_grouped_coefficients(ri_stack_ft_domain_cov_matrix: torch.Tensor,
+                                         ri_stack_basis_prior_mean_ft: torch.Tensor,
                                          prior_lambdas: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     '''
     Restructures the equations into the full-size form for
@@ -750,49 +854,48 @@ def rearrange_prior_grouped_coefficients(prior_waveforms_mean_ft_ri_stack: torch
 
     Should be full rank, and block diagonal
 
-    :param prior_waveforms_mean_ft_ri_stack: real-imag stack of the Fourier coefficients of
-        the prior mean for each basis waveform,
-        shape (batch, n_basis, N)
-    :param prior_waveforms_ft_cov_mat_ri_stack: real-imag stack of the covariance matrices
+    :param ri_stack_ft_domain_cov_matrix: real-imag stack of the covariance matrices
         for the prior distribution,
-        shape (batch, n_basis, N, N)
+        shape (n_basis, N, N)
+
+    :param ri_stack_basis_prior_mean_ft: real-imag stack of the Fourier coefficients of
+        the prior mean for each basis waveform,
+        shape (n_basis, N)
 
         This must be a valid covariance matrix, i.e. last two dimensions should be square,
             full rank, symmetric
     :param prior_lambdas: lambda weights on the Gaussian prior term
-        shape (batch, n_basis), allowing each cell and basis waveform to have an individually-controlled
+        shape (n_basis, ), allowing each cell and basis waveform to have an individually-controlled
         prior
 
-    :return: (batch, n_basis * N, n_basis * N) , corresponding to the coefficients of the
+    :return: (n_basis * N, n_basis * N) , corresponding to the coefficients of the
         linear system of equations for each cell,
 
         and
-            (batch, n_basis * N), corresponding to the RHS of the linear systems for each cell
+            (n_basis * N), corresponding to the RHS of the linear systems for each cell
     '''
-
-    batch = prior_waveforms_mean_ft_ri_stack.shape[0]
 
     with torch.no_grad():
         # first construct the prior coefficients
-        # shape (batch, n_basis, N, N) and shape (batch, n_basis, N)
-        prior_coeffs, prior_rhs_contrib = construct_prior_coefficients_and_rhs(prior_waveforms_mean_ft_ri_stack,
-                                                                               prior_waveforms_ft_cov_mat_ri_stack)
+        # shape (n_basis, N, N) and shape (n_basis, N)
+        prior_coeffs, prior_rhs_contrib = construct_prior_coefficients_and_rhs(ri_stack_ft_domain_cov_matrix,
+                                                                               ri_stack_basis_prior_mean_ft)
 
-        prior_coeffs = prior_coeffs * prior_lambdas[:, :, None, None]
-        prior_rhs_contrib = prior_rhs_contrib * prior_lambdas[:, :, None]
+        # shape (n_basis, N, N) and shape (n_basis, N)
+        print(prior_coeffs.shape, prior_lambdas.shape)
+        prior_coeffs = prior_coeffs * prior_lambdas[:, None, None]
+        prior_rhs_contrib = prior_rhs_contrib * prior_lambdas[:, None]
 
         # then use torch put operations to pack these coefficients into something
         # that can be added to the MSE coefficients
 
         # variable ordering is (real components, imaginary components) stacked by basis waveform
 
-        # shape (batch, n_basis * N, n_basis * N)
-        prior_block_diag = torch.block_diag(*torch.split(prior_coeffs, 1, dim=1))
+        # shape (n_basis * N, n_basis * N)
+        prior_block_diag = torch.block_diag(*[x.squeeze(0) for x in torch.split(prior_coeffs, 1, dim=0)])
 
-        # shape (batch, n_basis * N)
-        prior_coeffs_stacked = prior_rhs_contrib.reshape(batch, -1)
-
-        # now we need tensor indexing operations over each frequency to put in the MSE data
+        # shape (n_basis * N)
+        prior_coeffs_stacked = prior_rhs_contrib.reshape(-1, )
 
         return prior_block_diag, prior_coeffs_stacked
 
@@ -802,7 +905,7 @@ def batch_fourier_complex_least_square_with_prior_optimize(
         batched_phase_delays: np.ndarray,
         batched_ft_observations: np.ndarray,
         batched_valid_mat: np.ndarray,
-        ri_stack_ft_domain_inv_cov_matrix: np.ndarray,
+        ri_stack_ft_domain_cov_matrix: np.ndarray,
         ri_stack_basis_prior_mean_ft: np.ndarray,
         n_true_frequencies: int,
         regularization_lambda: Union[np.ndarray, float],
@@ -816,6 +919,17 @@ def batch_fourier_complex_least_square_with_prior_optimize(
     Note that once we include the prior, the problem is no longer separable by component
         in frequency domain. Rather than solve a bunch of 2K x 2K systems, we solve a
         single NK x NK system where N is the number of time samples.
+        
+    Reminder about the original equation grouping and variable ordering:
+        * Eqn group 1 refers to the set of K equations in 2K variables that are produced
+            by differentiating the MSE objective w.r.t. the real component of the F^th Fourier
+            coefficient of each basis waveform
+        * Eqn group 2 refers to the set of K equations in 2K variables that are produced
+            by differentiating the MSE objective w.r.t. the imaginary component of the F^th Fourier
+            coefficient of each basis waveform
+
+        * The variable ordering is all real coefficients, followed by all imag coefficients
+
 
     :param batched_amplitudes_real: real-valued amplitudes for each observation, each shifted canonical waveform,
         shape (batch, n_observations, n_basis_waveforms)
@@ -840,7 +954,7 @@ def batch_fourier_complex_least_square_with_prior_optimize(
     _, _, n_rfft_frequencies = batched_ft_observations.shape
 
     if isinstance(regularization_lambda, float):
-        regularization_lambda = np.ones((batch, n_basis), dtype=np.float32) * regularization_lambda
+        regularization_lambda = np.ones((n_basis,), dtype=np.float32) * regularization_lambda
 
     # coefficient assembly strategy (i.e. how do we compute and arrange the coefficients of the linear system to
     # avoid confusing ourselves?)
@@ -853,14 +967,14 @@ def batch_fourier_complex_least_square_with_prior_optimize(
         batched_ft_observations = batched_ft_observations * observation_loss_weight[:, :, None]
 
     # First compute the prior matrix
-    ri_ft_prior_cov_mat_torch = torch.tensor(ri_stack_ft_domain_inv_cov_matrix, dtype=torch.float32, device=device)
+    ri_ft_prior_cov_mat_torch = torch.tensor(ri_stack_ft_domain_cov_matrix, dtype=torch.float32, device=device)
     ri_ft_prior_mean_torch = torch.tensor(ri_stack_basis_prior_mean_ft, dtype=torch.float32, device=device)
     regularization_lambda_torch = torch.tensor(regularization_lambda, dtype=torch.float32, device=device)
 
-    # prior_coeffs has shape (batch, n_basis * N, n_basis * N)
-    # prior_Rhs has shape (batch, n_basis * N)
-    prior_coeffs, prior_rhs = rearrange_prior_grouped_coefficients(ri_ft_prior_mean_torch,
-                                                                   ri_ft_prior_cov_mat_torch,
+    # prior_coeffs has shape (n_basis * N, n_basis * N)
+    # prior_Rhs has shape (n_basis * N)
+    prior_coeffs, prior_rhs = rearrange_prior_grouped_coefficients(ri_ft_prior_cov_mat_torch,
+                                                                   ri_ft_prior_mean_torch,
                                                                    regularization_lambda_torch)
 
     # shape (batch, n_observations)
@@ -935,7 +1049,7 @@ def batch_fourier_complex_least_square_with_prior_optimize(
         eq1_group_real_coeff,
         eq1_group_imag_coeff,
         eq1_rhs,
-        -1.0 * eq1_group_imag_coeff,
+        -eq1_group_imag_coeff,
         eq1_group_real_coeff,
         eq2_rhs,
         n_true_frequencies
@@ -943,8 +1057,8 @@ def batch_fourier_complex_least_square_with_prior_optimize(
 
     # full_coeffs has shape (batch, n_basis * N, n_basis * N)
     # full_rhs has shape (batch, n_basis * N)
-    full_coeffs = mse_matrix_coeffs + prior_coeffs
-    full_rhs = mse_rhs + prior_rhs
+    full_coeffs = mse_matrix_coeffs + prior_coeffs[None, :, :]
+    full_rhs = mse_rhs + prior_rhs[None, :]
 
     # shape (batch, n_basis * N) -> (batch, n_basis, N)
     soln_ri = torch.linalg.solve(full_coeffs, full_rhs[:, :, None]).squeeze(2).reshape(batch, n_basis, -1)
