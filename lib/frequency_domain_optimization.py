@@ -68,8 +68,7 @@ def _batch_assemble_coefficients_and_solve(batched_amplitudes_real: np.ndarray,
                                            batch_valid_mat: np.ndarray,
                                            n_true_frequencies: int,
                                            device: torch.device,
-                                           observation_loss_weight: Optional[np.ndarray] = None,
-                                           sobolev_lambda: Optional[float] = None):
+                                           observation_loss_weight: Optional[np.ndarray] = None):
     '''
     Can be used to solve reduced rank basis waveform matrices as well; i.e. n_basis_waveforms for the inputs
         of this function can be less than n_basis_waveforms overall in the case that a particular cell is
@@ -175,24 +174,6 @@ def _batch_assemble_coefficients_and_solve(batched_amplitudes_real: np.ndarray,
     # shape (batch, n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
     joint_coeff = joint_coeff_permute.permute(0, 3, 1, 2)
 
-    if sobolev_lambda is not None:
-        frequencies = np.fft.rfftfreq(n_true_frequencies)  # shape (n_rfft_frequencies, )
-
-        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
-        canonical_waveforms_identity = np.eye(2 * n_canonical_waveforms) * 2 * np.pi
-
-        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
-        canonical_waveform_freq_diag = canonical_waveforms_identity[:, :, None] * frequencies[None, None, :]
-
-        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms, n_rfft_frequencies)
-        diagonal_regularize = 2 * sobolev_lambda * np.power(1 - np.cos(canonical_waveform_freq_diag), 2)
-
-        diagonal_regularize_torch_perm = torch.tensor(diagonal_regularize, dtype=torch.float32, device=device)
-        # shape (n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
-        diagonal_regularize_torch = diagonal_regularize_torch_perm.permute(2, 0, 1)
-
-        joint_coeff = joint_coeff + diagonal_regularize_torch[None, :, :, :]
-
     # shape (batch, 2 * n_canonical_waveforms, n_rfft_frequencies)
     joint_rhs_permute = torch.cat([eq1_rhs, eq2_rhs], dim=1)
 
@@ -220,8 +201,7 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
                                                  n_true_frequencies: int,
                                                  device: torch.device,
                                                  norm_cutoff: float = 1e-2,
-                                                 observation_loss_weight: Optional[np.ndarray] = None,
-                                                 sobolev_lambda: Optional[float] = None) \
+                                                 observation_loss_weight: Optional[np.ndarray] = None) \
         -> np.ndarray:
     '''
     Computes the Fourier-domain waveform optimization in batch, for cases where we have multiple sets of
@@ -313,7 +293,6 @@ def batch_fourier_complex_least_square_optimize3(batched_amplitudes_real: np.nda
             device,
             observation_loss_weight=None if observation_loss_weight is None else observation_loss_weight[of_this_rank,
                                                                                  :],
-            sobolev_lambda=sobolev_lambda
         )
 
         # now we have to reassemble the solutions
@@ -513,73 +492,6 @@ def DEBUG_identity_prior_optimize(
         return soln.reshape(n_basis, -1).detach().cpu().numpy()
 
 
-def _torch_pack_complex_to_real_imag_stack(real_component: torch.Tensor,
-                                           imag_component: torch.Tensor,
-                                           n_timepoints: int,
-                                           dim: int = -1) -> torch.Tensor:
-    '''
-    :param real_component:
-    :param imag_component:
-    :param n_timepoints:
-    :param dim:
-    :return:
-    '''
-
-    with torch.no_grad():
-        device = real_component.device
-        half_shape = real_component.shape
-        full_shape = list(half_shape)
-        full_shape[dim] = n_timepoints
-
-        stacked_tensor = torch.zeros(full_shape, device=device)
-
-        if n_timepoints % 2 == 0:
-            # throw away first and last rows of the imaginary
-            n_real_coeffs = (n_timepoints // 2) + 1
-
-            range_expand_shape = list(half_shape)
-            range_expand_shape[dim] = -1
-            real_range = torch.range(0, n_real_coeffs, dtype=torch.long, device=device).expand(*range_expand_shape)
-
-            stacked_tensor.scatter(dim, real_range, real_component)
-
-            imag_select_range = torch.range(1, (n_timepoints // 2), dtype=torch.long, device=device).expand(
-                range_expand_shape)
-            imag_component_trimmed = torch.gather(imag_component, dim, imag_select_range)
-
-            imag_put_range = torch.range(n_real_coeffs, n_timepoints, dtype=torch.long, device=device).expand(
-                range_expand_shape)
-            stacked_tensor.scatter(dim, imag_put_range, imag_component_trimmed)
-
-            return stacked_tensor
-
-        else:
-
-            # throw away only the first row of the imaginary
-            # throw away first and last rows of the imaginary
-            n_real_coeffs = (n_timepoints // 2) + 1
-
-            range_expand_shape = list(half_shape)
-            range_expand_shape[dim] = -1
-            real_range = torch.range(0, n_real_coeffs, dtype=torch.long, device=device).expand(*range_expand_shape)
-
-            stacked_tensor.scatter(dim, real_range, real_component)
-
-            imag_select_range = torch.range(1, (n_timepoints // 2) + 1, dtype=torch.long, device=device).expand(
-                range_expand_shape)
-            imag_component_trimmed = torch.gather(imag_component, dim, imag_select_range)
-
-            imag_put_range = torch.range(n_real_coeffs, n_timepoints, dtype=torch.long, device=device).expand(
-                range_expand_shape)
-            stacked_tensor.scatter(dim, imag_put_range, imag_component_trimmed)
-
-            imag_put_range = torch.range(n_real_coeffs, n_timepoints, dtype=torch.long, device=device).expand(
-                range_expand_shape)
-            stacked_tensor.scatter(dim, imag_put_range, imag_component_trimmed)
-
-            return stacked_tensor
-
-
 def construct_prior_coefficients_and_rhs(prior_waveforms_ft_cov_mat_ri_stack: torch.Tensor,
                                          prior_waveforms_mean_ft_ri_stack: torch.Tensor) \
         -> Tuple[torch.Tensor, torch.Tensor]:
@@ -617,6 +529,7 @@ def compute_variable_indices(frequency_num: torch.Tensor,
                              n_timepoints: int,
                              coeffs_are_imag: bool) -> torch.Tensor:
     '''
+    The variable ordering is (basis 1 real, basis 1 imag; basis 2 real, basis 2 imag; ...)
 
     :param frequency_num: shape (...), integer-valued
     :param basis_num: shape (...), integer-valued
@@ -625,16 +538,39 @@ def compute_variable_indices(frequency_num: torch.Tensor,
     :return: shape (...), integer-valued
     '''
 
-    basis_offset = n_timepoints + basis_num
+    basis_offset = n_timepoints * basis_num
     if coeffs_are_imag:
-        basis_offset = basis_offset + (n_timepoints // 2) + 1
+        basis_offset += (n_timepoints // 2)
     return frequency_num + basis_offset
 
 
-def compute_variable_placement_indices_FIXED(n_timepoints: int,
-                                             n_basis: int,
-                                             coeffs_are_imag: bool,
-                                             device: torch.device) -> torch.Tensor:
+def compute_all_eqn_real_var_placement_indices(n_timepoints: int,
+                                               n_basis: int,
+                                               device: torch.device) -> torch.Tensor:
+    '''
+    Computes the placement coefficients (for either torch.scatter or torch.scatter_add)
+        for all equations (d / d_real AND d / d_imag), but only placing
+        the real variables
+        
+    Needs a second call to compute_all_eqn_imag_var_placement_indices to be able to
+        form a full rank system
+        
+    Indices and equation ordering correspond to the ordering
+    X marks the variables whose indices are computed using this function call
+                                        VARIABLES 
+                           (basis 1 real, basis 1 imag, basis 2 real, basis 2 imag, ...)    
+        (d / basis 1 real) |     X       |             |      X      |             |
+    E   (d / basis 1 imag) |     X       |             |      X      |             |
+    Q   (d / basis 2 real) |     X       |             |      X      |             |
+    N   (d / basis 2 imag) |     X       |             |      X      |             |
+             ...
+    
+    @param n_timepoints: int, number of samples = number of Fourier domain unknowns
+    @param n_basis: int, number of basis waveforms
+    @param device: 
+    @return: torch.Tensor, shape (n_basis * n_timepoints, n_basis)
+    '''
+
     n_real_eqns = (n_timepoints // 2) + 1
     n_imag_eqns = (n_timepoints // 2) - 1 if n_timepoints % 2 == 0 else (n_timepoints // 2)
 
@@ -642,77 +578,386 @@ def compute_variable_placement_indices_FIXED(n_timepoints: int,
     n_imag_coeffs = n_imag_eqns
 
     with torch.no_grad():
-        # need to construct the index tensor to place the coefficients from the original
-        # group of d/d real equations
         d_real_freq_ix = torch.arange(0, n_real_coeffs,
                                       dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
         d_real_basis_ix = torch.arange(0, n_basis,
                                        dtype=torch.long, device=device)[None, :].expand(n_real_coeffs, -1)
 
-        # shape (n_real_coeffs = n_real_eqns, n_basis)
-        d_real_placement_indices = compute_variable_indices(d_real_freq_ix,
-                                                            d_real_basis_ix,
-                                                            n_timepoints,
-                                                            coeffs_are_imag=coeffs_are_imag)
+        # shape (n_real_eqns = n_real_coeffs, n_basis)
+        d_real_real_var_ix = compute_variable_indices(d_real_freq_ix,
+                                                      d_real_basis_ix,
+                                                      n_timepoints,
+                                                      coeffs_are_imag=False)
 
-        # need to construct the index tensor to place the coefficients from the original
-        # group of d/d imag equations
-        d_imag_freq_ix = torch.arange(0, n_imag_coeffs,
+        d_imag_freq_ix = torch.arange(1, n_imag_coeffs + 1, dtype=torch.long, device=device)[:, None].expand(-1,
+                                                                                                             n_basis)
+        d_imag_basis_ix = torch.arange(0, n_basis, dtype=torch.long, device=device)[None, :].expand(n_imag_coeffs, -1)
+
+        # shape (n_imag_eqns = n_imag_coeffs, n_basis)
+        d_imag_real_var_ix = compute_variable_indices(d_imag_freq_ix,
+                                                      d_imag_basis_ix,
+                                                      n_timepoints,
+                                                      coeffs_are_imag=False)
+
+        # shape (n_timepoints, n_basis)
+        all_eqns_real_placement_indices = torch.cat([d_real_real_var_ix, d_imag_real_var_ix], dim=0)
+
+        # shape (n_basis * n_timepoints, n_basis)
+        return all_eqns_real_placement_indices.repeat(n_basis, 1)
+
+
+def _make_real_coeff_eqn_split_size_list(n_timepoints: int,
+                                         n_basis: int) -> List[int]:
+    '''
+
+    @param n_timepoints:
+    @param n_basis:
+    @return:
+    '''
+
+    n_real_eqns = (n_timepoints // 2) + 1
+    n_imag_eqns = (n_timepoints // 2) - 1 if n_timepoints % 2 == 0 else (n_timepoints // 2)
+
+    output = []
+    for b in range(n_basis):
+        output.extend([n_real_eqns, n_imag_eqns])
+    return output
+
+
+def _make_imag_coeff_eqn_split_size_list(n_timepoints: int,
+                                         n_basis: int) -> List[int]:
+    '''
+    
+    @param n_timepoints: 
+    @param n_basis: 
+    @return: 
+    '''
+    n_real_eqns = (n_timepoints // 2) + 1
+    n_imag_eqns = (n_timepoints // 2) - 1 if n_timepoints % 2 == 0 else (n_timepoints // 2)
+
+    output = []
+    if n_timepoints % 2 == 0:
+        # even case, we need to throw away both the \omega=0 equation
+        # and the \omega=2\pi equation, i.e. the first and last real equations
+        for b in range(n_basis):
+            output.extend([1, n_real_eqns - 2, 1, n_imag_eqns])
+    else:
+        # odd case, we only need to throw away the \omega=0 equation
+        # i.e. the first real equation
+        for b in range(n_basis):
+            output.extend([1, n_real_eqns - 1, n_imag_eqns])
+    return output
+
+
+def chop_real_coeff_eqn_split(target_tensor: torch.Tensor,
+                              n_timepoints: int,
+                              n_basis: int,
+                              dim: int) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    '''
+    Produces views corresponding to the real entries from target_tensor,
+        as well as the imaginary entries from target_tensor
+
+    IMPORTANT: must return a bunch of VIEWS from target_tensor, not
+        new tensors, otherwise we will not be able to use the output
+        of this function to make in-place modifications
+
+    @param target_tensor: shape (..., n_basis * n_timepoints, ...)
+    @param n_timepoints: int
+    @param n_basis: int
+    @param dim: int, dimension that we want to apply the split operation on
+        Note that target_tensor must have size (n_timepoints * n_basis) along
+            this dimension
+    @return:
+    '''
+
+    check_dim = target_tensor.shape[dim]
+    if check_dim != (n_timepoints * n_basis):
+        raise ValueError(f'target_tensor dim {dim} must have size {n_timepoints * n_dim}, received {check_dim}')
+
+    slice_list = _make_real_coeff_eqn_split_size_list(n_timepoints, n_basis)
+    if sum(slice_list) != (n_timepoints * n_basis):
+        raise ValueError(f'Something wrong with slice_list')
+    split_tensors = torch.split(target_tensor, slice_list, dim=dim)
+
+    real_splits_by_basis = []  # type: List[torch.Tensor]
+    imag_splits_by_basis = []  # type: List[torch.Tensor]
+    for ii, split_tensor in enumerate(split_tensors):
+        if ii % 2 == 0:
+            real_splits_by_basis.append(split_tensor)
+        else:
+            imag_splits_by_basis.append(split_tensor)
+
+    return real_splits_by_basis, imag_splits_by_basis
+
+
+def chop_imag_coeff_eqn_split(target_tensor: torch.Tensor,
+                              n_timepoints: int,
+                              n_basis: int,
+                              dim: int) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    '''
+    Produces views corresponding to the non-zero subset of the real entries from target_tensor,
+        as well as the imaginary entries from target_tensor
+        
+    IMPORTANT: must return a bunch of VIEWS from target_tensor, not
+        new tensors, otherwise we will not be able to use the output
+        of this function to make in-place modifications
+        
+    @param target_tensor: shape (..., n_basis * n_timepoints, ...)
+    @param n_timepoints: int
+    @param n_basis: int
+    @param dim: int, dimension that we want to apply the split
+        operation on. Note that target_tensor must have size (n_timepoints * n_basis)
+        along this dimension
+    @return: 
+    '''
+
+    check_dim = target_tensor.shape[dim]
+    if check_dim != (n_timepoints * n_basis):
+        raise ValueError(f'target_tensor dim {dim} must have size {n_timepoints * n_dim}, received {check_dim}')
+
+    slice_list = _make_imag_coeff_eqn_split_size_list(n_timepoints, n_basis)
+    if sum(slice_list) != (n_timepoints * n_basis):
+        raise ValueError(f'Something wrong with slice_list')
+    split_tensors = torch.split(target_tensor, slice_list, dim=dim)
+
+    real_splits_by_basis = []  # type: List[torch.Tensor]
+    imag_splits_by_basis = []  # type: List[torch.Tensor]
+    if n_timepoints % 2 == 0:
+        for ii, split_tensor in enumerate(split_tensors):
+            if ii % 4 == 1:
+                real_splits_by_basis.append(split_tensor)
+            elif ii % 4 == 3:
+                imag_splits_by_basis.append(split_tensor)
+    else:
+        for ii, split_tensor in enumerate(split_tensors):
+            if ii % 3 == 1:
+                real_splits_by_basis.append(split_tensor)
+            elif ii % 3 == 2:
+                imag_splits_by_basis.append(split_tensor)
+
+    return real_splits_by_basis, imag_splits_by_basis
+
+
+def place_all_eqn_imag_var_coeffs(all_eqns_imag_coeffs_by_basis_flat: torch.Tensor,
+                                  dest_tensor: torch.Tensor,
+                                  n_timepoints: int,
+                                  n_basis: int,
+                                  device: torch.device) -> None:
+    '''
+    Places coefficients for the imaginary variables only by copying the relevant
+        values from imag_coeffs_by_basis_flat to dest_tensor
+        
+    Indices and equation ordering correspond to the ordering
+    X marks the variables whose indices are computed using this function call
+                                        VARIABLES
+                           (basis 1 real, basis 1 imag, basis 2 real, basis 2 imag, ...)
+        (d / basis 1 real) |             |      X      |             |      X      |
+    E   (d / basis 1 imag) |             |      X      |             |      X      |
+    Q   (d / basis 2 real) |             |      X      |             |      X      |
+    N   (d / basis 2 imag) |             |      X      |             |      X      |
+             ...
+    
+    NOTE: relies on the fact that torch.split returns a VIEW of the original tensor
+    
+    @param all_eqns_imag_coeffs_by_basis_flat: shape (batch, n_basis * N, n_basis)
+        Tensor containing coefficients for the imaginary variables, where dim 1 corresponds
+        to different equations, already in the correct order
+        
+        Note that for the imaginary case, we have to discard the omega=0 coefficient
+        for N odd, and we have to dicard the omega=0 and omega=2\pi coefficients for N even
+    @param dest_tensor: shape (batch, n_basis * N, n_basis * N), the batched square destination matrix
+    @param n_timepoints: int
+    @param n_basis: int
+    @return: None. This function should modify dest_tensor in place
+    '''
+
+    batch = all_eqns_imag_coeffs_by_basis_flat.shape[0]
+
+    source_split_real_block, source_split_imag_block = chop_imag_coeff_eqn_split(all_eqns_imag_coeffs_by_basis_flat,
+                                                                                 n_timepoints,
+                                                                                 n_basis,
+                                                                                 dim=1)
+    dest_split_real_block, dest_split_imag_block = chop_imag_coeff_eqn_split(dest_tensor,
+                                                                             n_timepoints,
+                                                                             n_basis,
+                                                                             dim=1)
+
+    # first copy the imaginary coefficients of the real equations
+    for real_eqn_source, real_eqn_dest in zip(source_split_real_block, dest_split_real_block):
+        # real_eqn_source has shape (batch, n_useful_real_eqns = n_imag_coeffs, n_basis)
+        # real_eqn_dest has shape (batch, n_useful_real_eqns = n_imag_coeffs, n_basis * N)
+        d_real_freq_ix = torch.arange(1, 1 + real_eqn_source.shape[1],
+                                      dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
+        d_real_basis_ix = torch.arange(0, n_basis,
+                                       dtype=torch.long, device=device)[None, :].expand(d_real_freq_ix.shape[0], -1)
+
+        # shape (n_useful_real_eqns, n_basis) -> (batch, n_useful_real_eqns, n_basis)
+        d_real_imag_var_ix = compute_variable_indices(d_real_freq_ix,
+                                                      d_real_basis_ix,
+                                                      n_timepoints,
+                                                      coeffs_are_imag=True)[None, :, :].expand(batch, -1, -1)
+
+        real_eqn_dest.scatter_add_(2, d_real_imag_var_ix, real_eqn_source)
+
+    # then copy the imaginary coefficients of the imaginary equations
+    for imag_eqn_source, imag_eqn_dest in zip(source_split_imag_block, dest_split_imag_block):
+        # real_eqn_source has shape (batch, n_imag_coeffs, n_basis)
+        # real_eqn_dest has shape (batch, n_imag_coeffs, n_basis * N)
+        d_imag_freq_ix = torch.arange(1, 1 + imag_eqn_source.shape[1],
                                       dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
         d_imag_basis_ix = torch.arange(0, n_basis,
-                                       dtype=torch.long, device=device)[None, :].expand(n_imag_coeffs, -1)
+                                       dtype=torch.long, device=device)[None, :].expand(d_imag_freq_ix.shape[0], -1)
 
-        # shape (n_imag_coeffs = n_imag_eqns, n_basis)
-        d_imag_placement_indices = compute_variable_indices(d_imag_freq_ix,
-                                                            d_imag_basis_ix,
-                                                            n_timepoints,
-                                                            coeffs_are_imag=coeffs_are_imag)
+        # shape (n_useful_real_eqns, n_basis) -> (batch, n_useful_real_eqns, n_basis)
+        d_imag_imag_var_ix = compute_variable_indices(d_imag_freq_ix,
+                                                      d_imag_basis_ix,
+                                                      n_timepoints,
+                                                      coeffs_are_imag=True)[None, :, :].expand(batch, -1, -1)
 
-        # shape (n_timepoints = N, n_basis)
-        placement_indices = torch.cat([d_real_placement_indices, d_imag_placement_indices], dim=0)
+        imag_eqn_dest.scatter_add_(2, d_imag_imag_var_ix, imag_eqn_source)
 
-        return placement_indices
+    return
 
 
-def compute_variable_placement_indices(coeffs_are_real: bool,
-                                       n_timepoints: int,
-                                       n_basis: int,
-                                       device: torch.device) -> torch.Tensor:
-    n_real_coeffs = (n_timepoints // 2) + 1
+def place_all_eqn_real_var_coeffs(all_eqns_real_coeffs_by_basis_flat: torch.Tensor,
+                                  dest_tensor: torch.Tensor,
+                                  n_timepoints: int,
+                                  n_basis: int,
+                                  device: torch.device) -> None:
+    '''
+    Places coefficients for the real variables only by copying the relevant
+        values from all_eqns_real_coeffs_by_basis_flat to dest_tensor
 
-    if n_timepoints % 2 == 0:
-        n_imag_coeffs = (n_timepoints // 2) - 1
-    else:
-        n_imag_coeffs = (n_timepoints // 2)
+    Indices and equation ordering correspond to the ordering
+    X marks the variables whose indices are computed using this function call
+                                            VARIABLES
+                           (basis 1 real, basis 1 imag, basis 2 real, basis 2 imag, ...)
+        (d / basis 1 real) |     X       |             |      X      |             |
+    E   (d / basis 1 imag) |     X       |             |      X      |             |
+    Q   (d / basis 2 real) |     X       |             |      X      |             |
+    N   (d / basis 2 imag) |     X       |             |      X      |             |
+             ...
 
-    # need to construct the index tensor to place the real coefficients
-    # of both Eqn groups 1 and 2
-    # shape (n_real_coeffs, n_basis)
-    d_real_freq_ix = torch.range(0, n_real_coeffs,
-                                 dtype=torch.long, device=device).expand(-1, n_basis)
-    d_real_basis_ix = torch.range(0, n_basis,
-                                  dtype=torch.long, device=device).expand(n_real_coeffs, -1)
+    NOTE: relies on the fact that torch.split returns a VIEW of the original tensor
 
-    # shape (n_real_coeffs, n_basis)
-    d_real_placement_indices = compute_variable_indices(d_real_freq_ix,
-                                                        d_real_basis_ix,
-                                                        coeffs_are_real, n_timepoints)
+    @param all_eqns_real_coeffs_by_basis_flat: shape (batch, n_basis * N, n_basis)
+        Tensor containing coefficients for the imaginary variables, where dim 1 corresponds
+        to different equations, already in the correct order
+    @param dest_tensor: shape (batch, n_basis * N, n_basis * N), the batched square destination matrix
+    @param n_timepoints: int
+    @param n_basis: int
+    @return: None. This function should modify dest_tensor in place
+    '''
 
-    # shape (n_imag_coeffs, n_basis)
-    d_imag_freq_ix = torch.range(0, n_imag_coeffs,
-                                 dtype=torch.long, device=device).expand(-1, n_basis)
-    d_imag_basis_ix = torch.range(0, n_basis,
-                                  dtype=torch.long, device=device).expand(n_imag_coeffs, -1)
+    batch = all_eqns_real_coeffs_by_basis_flat.shape[0]
 
-    # shape (n_imag_coeffs, n_basis)
-    d_imag_placement_indices = compute_variable_indices(d_imag_freq_ix,
-                                                        d_imag_basis_ix,
-                                                        coeffs_are_real, n_timepoints)
+    source_split_real_block, source_split_imag_block = chop_real_coeff_eqn_split(all_eqns_real_coeffs_by_basis_flat,
+                                                                                 n_timepoints,
+                                                                                 n_basis,
+                                                                                 dim=1)
 
-    # shape (n_timepoints = N, n_basis)
-    placement_indices = torch.cat([d_real_placement_indices, d_imag_placement_indices], dim=0)
+    dest_split_real_block, dest_split_imag_block = chop_real_coeff_eqn_split(dest_tensor,
+                                                                             n_timepoints,
+                                                                             n_basis,
+                                                                             dim=1)
 
-    return placement_indices
+    # first copy the real coefficients of the real equations
+    for real_eqn_source, real_eqn_dest in zip(source_split_real_block, dest_split_real_block):
+        # real_eqn_source has shape (batch, n_useful_real_eqns = n_imag_coeffs, n_basis)
+        # real_eqn_dest has shape (batch, n_useful_real_eqns = n_imag_coeffs, n_basis * N)
+        d_real_freq_ix = torch.arange(0, real_eqn_source.shape[1],
+                                      dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
+        d_real_basis_ix = torch.arange(0, n_basis,
+                                       dtype=torch.long, device=device)[None, :].expand(d_real_freq_ix.shape[0], -1)
+
+        # shape (n_useful_real_eqns, n_basis) -> (batch, n_useful_real_eqns, n_basis)
+        d_real_imag_var_ix = compute_variable_indices(d_real_freq_ix,
+                                                      d_real_basis_ix,
+                                                      n_timepoints,
+                                                      coeffs_are_imag=False)[None, :, :].expand(batch, -1, -1)
+
+        real_eqn_dest.scatter_add_(2, d_real_imag_var_ix, real_eqn_source)
+
+    # then copy the imag coefficients of the real equations
+    for imag_eqn_source, imag_eqn_dest in zip(source_split_imag_block, dest_split_imag_block):
+        # real_eqn_source has shape (batch, n_imag_coeffs, n_basis)
+        # real_eqn_dest has shape (batch, n_imag_coeffs, n_basis * N)
+        d_imag_freq_ix = torch.arange(1, 1 + imag_eqn_source.shape[1],
+                                      dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
+        d_imag_basis_ix = torch.arange(0, n_basis,
+                                       dtype=torch.long, device=device)[None, :].expand(d_imag_freq_ix.shape[0], -1)
+
+        # shape (n_useful_real_eqns, n_basis) -> (batch, n_useful_real_eqns, n_basis)
+        d_imag_imag_var_ix = compute_variable_indices(d_imag_freq_ix,
+                                                      d_imag_basis_ix,
+                                                      n_timepoints,
+                                                      coeffs_are_imag=False)[None, :, :].expand(batch, -1, -1)
+
+        imag_eqn_dest.scatter_add_(2, d_imag_imag_var_ix, imag_eqn_source)
+
+    return
+
+
+def compute_all_eqn_imag_var_placement_indices(n_timepoints: int,
+                                               n_basis: int,
+                                               device: torch.device) -> torch.Tensor:
+    '''
+    Computes the placement coefficients (for either torch.scatter or torch.scatter_add)
+        for all equations (d / d_real AND d / d_imag), but only placing
+        the imag variables
+
+    Needs a second call to compute_all_eqn_real_var_placement_indices to be able to
+        form a full rank system
+
+    Indices and equation ordering correspond to the ordering
+    X marks the variables whose indices are computed using this function call
+                                        VARIABLES
+                           (basis 1 real, basis 1 imag, basis 2 real, basis 2 imag, ...)
+        (d / basis 1 real) |             |      X      |             |      X      |
+    E   (d / basis 1 imag) |             |      X      |             |      X      |
+    Q   (d / basis 2 real) |             |      X      |             |      X      |
+    N   (d / basis 2 imag) |             |      X      |             |      X      |
+             ...
+
+    @param n_timepoints: int, number of samples = number of Fourier domain unknowns
+    @param n_basis: int, number of basis waveforms
+    @param device:
+    @return: torch.Tensor, shape (n_basis * n_timepoints, n_basis)
+    '''
+
+    n_real_eqns = (n_timepoints // 2) + 1
+    n_imag_eqns = (n_timepoints // 2) - 1 if n_timepoints % 2 == 0 else (n_timepoints // 2)
+
+    n_real_coeffs = n_real_eqns
+    n_imag_coeffs = n_imag_eqns
+
+    with torch.no_grad():
+        d_real_freq_ix = torch.arange(0, n_real_coeffs,
+                                      dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
+        d_real_basis_ix = torch.arange(0, n_basis,
+                                       dtype=torch.long, device=device)[None, :].expand(n_real_coeffs, -1)
+
+        # shape (n_real_eqns = n_real_coeffs, n_basis)
+        d_real_imag_var_ix = compute_variable_indices(d_real_freq_ix,
+                                                      d_real_basis_ix,
+                                                      n_timepoints,
+                                                      coeffs_are_imag=True)
+
+        d_imag_freq_ix = torch.arange(1, n_imag_coeffs + 1, dtype=torch.long, device=device)[:, None].expand(-1,
+                                                                                                             n_basis)
+        d_imag_basis_ix = torch.arange(0, n_basis, dtype=torch.long, device=device)[None, :].expand(n_imag_coeffs, -1)
+
+        # shape (n_imag_eqns = n_imag_coeffs, n_basis)
+        d_imag_imag_var_ix = compute_variable_indices(d_imag_freq_ix,
+                                                      d_imag_basis_ix,
+                                                      n_timepoints,
+                                                      coeffs_are_imag=True)
+
+        # shape (n_timepoints, n_basis)
+        all_eqns_imag_placement_indices = torch.cat([d_real_imag_var_ix, d_imag_imag_var_ix], dim=0)
+
+        # shape (n_basis * n_timepoints, n_basis)
+        return all_eqns_imag_placement_indices.repeat(n_basis, 1)
 
 
 def rearrange_mse_grouped_coefficients(eq1_group_real_coeffs: torch.Tensor,
@@ -821,20 +1066,16 @@ def rearrange_mse_grouped_coefficients(eq1_group_real_coeffs: torch.Tensor,
         real_coeff_grouped_by_basis_flat = real_coeff_grouped_by_basis_stack.reshape(batch, -1, n_basis)
         imag_coeff_grouped_by_basis_flat = imag_coeff_grouped_by_basis_stack.reshape(batch, -1, n_basis)
 
-        # shape (n_basis * N, n_basis) -> (1, n_basis * N, n_basis) -> (batch, n_basis * N, n_basis)
-        real_coeff_placement_ix = compute_variable_placement_indices_FIXED(n_timepoints,
-                                                                           n_basis,
-                                                                           coeffs_are_imag=False,
-                                                                           device=device)[None, :, :].expand(batch, -1,
-                                                                                                             -1)
-        imag_coeff_placement_ix = compute_variable_placement_indices_FIXED(n_timepoints,
-                                                                           n_basis,
-                                                                           coeffs_are_imag=True,
-                                                                           device=device)[None, :, :].expand(batch, -1,
-                                                                                                             -1)
-
-        output_tensor.scatter_add(2, real_coeff_placement_ix, real_coeff_grouped_by_basis_flat)
-        output_tensor.scatter_add(2, imag_coeff_placement_ix, imag_coeff_grouped_by_basis_flat)
+        place_all_eqn_real_var_coeffs(real_coeff_grouped_by_basis_flat,
+                                      output_tensor,
+                                      n_timepoints,
+                                      n_basis,
+                                      device)
+        place_all_eqn_imag_var_coeffs(imag_coeff_grouped_by_basis_flat,
+                                      output_tensor,
+                                      n_timepoints,
+                                      n_basis,
+                                      device)
 
         # shape (batch, n_basis, N)
         rhs_grouped_by_basis_stack = torch.cat([eq1_group_rhs, eq2_group_rhs_relev], dim=2)
@@ -882,7 +1123,6 @@ def rearrange_prior_grouped_coefficients(ri_stack_ft_domain_cov_matrix: torch.Te
                                                                                ri_stack_basis_prior_mean_ft)
 
         # shape (n_basis, N, N) and shape (n_basis, N)
-        print(prior_coeffs.shape, prior_lambdas.shape)
         prior_coeffs = prior_coeffs * prior_lambdas[:, None, None]
         prior_rhs_contrib = prior_rhs_contrib * prior_lambdas[:, None]
 
@@ -980,6 +1220,9 @@ def batch_fourier_complex_least_square_with_prior_optimize(
     # shape (batch, n_observations)
     valid_one_matrix = torch.tensor(batched_valid_mat.astype(np.float32), dtype=torch.float32, device=device)
 
+    # shape (batch, )
+    n_valid_per_batch = torch.sum(valid_one_matrix, dim=1)
+
     # real valued, shape (batch, n_observations, n_canonical_waveforms)
     amplitude_mat_torch = torch.tensor(batched_amplitudes_real, dtype=torch.float32, device=device)
 
@@ -1076,7 +1319,6 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
                                                       ft_complex_observations_np: np.ndarray,
                                                       n_true_frequencies: int,
                                                       device: torch.device,
-                                                      sobolev_lambda: Optional[float] = None,
                                                       observation_loss_weight: Optional[
                                                           np.ndarray] = None) -> np.ndarray:
     '''
@@ -1090,8 +1332,6 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
     :param n_true_frequencies : int, number of frequencies = n_samples for the normal FFT
         (not the number of rFFT frequencies)
     :param device: torch.device
-    :param sobolev_lambda: scalar lambda for second derivative penalty for regularizing smoothness for
-        the waveforms
     :param observation_loss_weight: lambda vector of weights, for weighting the contribution to the loss
         of each individual waveform. shape (n_observations, )
     :return: tuple of real component, imaginary component of canonical waveform Fourier transform
@@ -1169,22 +1409,6 @@ def fourier_complex_least_squares_optimize_waveforms3(amplitude_matrix_real_np: 
 
     # shape (n_rfft_frequencies, 2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
     joint_coeff = joint_coeff_permute.permute(2, 0, 1)
-
-    if sobolev_lambda is not None:
-        frequencies = np.fft.rfftfreq(n_true_frequencies)  # shape (n_rfft_frequencies, )
-
-        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms)
-        canonical_waveforms_identity = np.eye(2 * n_canonical_waveforms) * 2 * np.pi
-
-        # shape (2 * n_canonical_waveforms, 2 * n_canonical_waveforms,, n_rfft_frequencies)
-        canonical_waveform_freq_diag = canonical_waveforms_identity[:, :, None] * frequencies[None, None, :]
-
-        diagonal_regularize = 2 * sobolev_lambda * np.power(1 - np.cos(canonical_waveform_freq_diag), 2)
-
-        diagonal_regularize_torch_perm = torch.tensor(diagonal_regularize, dtype=torch.float32, device=device)
-        diagonal_regularize_torch = diagonal_regularize_torch_perm.permute(2, 0, 1)
-
-        joint_coeff = joint_coeff + diagonal_regularize_torch
 
     # shape (2 * n_canonical_waveforms, n_rfft_frequencies)
     joint_rhs_permute = torch.cat([eq1_rhs, eq2_rhs], dim=0)
