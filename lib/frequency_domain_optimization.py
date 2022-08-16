@@ -420,8 +420,6 @@ def construct_rfft_covariance_matrix(time_domain_covariance_matrix: np.ndarray) 
     :param time_domain_covariance_matrix: shape (..., n_timepoints, n_timepoints)
     :return: shape (..., n_timepoints, n_timepoints)
     '''
-    print('td_dom', time_domain_covariance_matrix.shape)
-
     # first we have to make the RFFT matrix
     n_timepoints = time_domain_covariance_matrix.shape[-1]
 
@@ -438,9 +436,7 @@ def construct_rfft_covariance_matrix(time_domain_covariance_matrix: np.ndarray) 
     cov_matrix = real_imag_stacked_ft_matrix[None, :, :] @ time_domain_covariance_matrix \
                  @ (real_imag_stacked_ft_matrix.T)[None, :, :]
 
-    print('rfft_dom', cov_matrix.shape)
-
-    return cov_matrix.squeeze(0)
+    return cov_matrix
 
 
 def DEBUG_identity_prior_optimize(
@@ -945,7 +941,7 @@ def rearrange_mse_grouped_coefficients(eq1_group_real_coeffs: torch.Tensor,
         This means that that there are N / 2 + 1  real coefficients, and N / 2 - 1 imaginary
         coefficients if we split real and imaginary, for a total of N coefficients
         
-        * If N is odd, the 0^th coefficeint must be real-valued
+        * If N is odd, the 0^th coefficient must be real-valued
         
         This means there are (N+1) / 2 real coefficients, and (N+1) / 2 - 1 imaginary coefficients,
         so if we split real and imaginary, we have a total of N coefficients
@@ -1121,8 +1117,8 @@ def batch_fourier_complex_least_square_with_prior_optimize(
     :param batched_valid_mat: boolean matrix marking which entries of the above matrices correspond to real data,
         and which entries correspond to padding.
         shape (batch, n_observations), boolean valued
-    :param ri_stack_ft_domain_inv_cov_matrix: shape (batch, n_basis_waveforms, n_timepoints = N, n_timepoints = N)
-    :param ri_stack_basis_prior_mean_ft: shape (batch, n_basis_waveforms, N = n_timepoints)
+    :param ri_stack_ft_domain_inv_cov_matrix: shape (N = n_timepoints, N = n_timepoints)
+    :param ri_stack_basis_prior_mean_ft: shape (n_basis_waveforms, N = n_timepoints)
     :param regularization_lambda: float, lambda scale factor for the waveform, or np.array, shape (batch, n_basis)
         if we want to specify a different regularization coefficient for each basis (for example, if we're
         much more certain about one type of basis waveform vs another)
