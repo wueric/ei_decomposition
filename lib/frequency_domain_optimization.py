@@ -392,7 +392,7 @@ def _unpack_real_imag_to_complex(stacked_real_imag: np.ndarray,
     return complex_matrix
 
 
-def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarray:
+def construct_rfft_covariance_matrix(time_domain_covariance_matrix: np.ndarray) -> np.ndarray:
     '''
     Constructs NxN (n_timepoints x n_timepoints) real-imaginary covariance matrix
         from a NxN time-domain covariance matrix
@@ -420,6 +420,7 @@ def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarra
     :param time_domain_covariance_matrix: shape (..., n_timepoints, n_timepoints)
     :return: shape (..., n_timepoints, n_timepoints)
     '''
+    print('td_dom', time_domain_covariance_matrix.shape)
 
     # first we have to make the RFFT matrix
     n_timepoints = time_domain_covariance_matrix.shape[-1]
@@ -436,6 +437,8 @@ def construct_rfft_covariance_matrix(time_domain_covariance_matrix) -> np.ndarra
     # shape (1, N, N)
     cov_matrix = real_imag_stacked_ft_matrix[None, :, :] @ time_domain_covariance_matrix \
                  @ (real_imag_stacked_ft_matrix.T)[None, :, :]
+
+    print('rfft_dom', cov_matrix.shape)
 
     return cov_matrix.squeeze(0)
 

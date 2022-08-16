@@ -52,7 +52,6 @@ if __name__ == '__main__':
 
     shift_tuple = (-basis_dict['before'], basis_dict['after'])
     upsample_factor = basis_dict['upsample']
-    snr_thresh = basis_dict['thresh']
 
     group_assignments = None
     if args.group:
@@ -73,7 +72,7 @@ if __name__ == '__main__':
                               converge_epsilon=args.eps_cutoff),
         compute_device,
         l1_regularize_lambda=args.weight_reg,
-        snr_abs_threshold=snr_thresh,
+        snr_abs_threshold=args.thresh,
         shifts=shift_tuple,
         grid_search_step=args.grid_step,
         grid_search_top_n=args.grid_top_n,
@@ -91,14 +90,13 @@ if __name__ == '__main__':
             'l1_reg': args.weight_reg,
             'maxiter': args.maxiter,
             'padding': shift_tuple,
-            'upsample': args.upsample,
-            'thresh': snr_thresh,
+            'upsample': upsample_factor,
+            'thresh': args.thresh,
             'scale_mse_for_waveforms': args.renormalize_loss,
             'scale_regularization_terms': args.renormalize_penalty,
             'use_grouped_l1l2_norm': args.group,
             'group_assignments': group_assignments,
             'use_basis_weighted_l1': args.l1_comp_weights,
-            'sobolev_reg': args.sobolev_reg,
             'initial_basis_mean': initial_basis,
             'GP_prior_weight': args.prior_weight,
             'GP_length': args.prior_width,
