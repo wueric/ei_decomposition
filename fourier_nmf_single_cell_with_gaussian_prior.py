@@ -3,7 +3,8 @@ import torch
 import pickle
 import argparse
 
-import lib.batch_ei_decomposition as batch_ei_decomp
+import lib.batch_ei_decomposition_v2 as batch_ei_decomp2
+from lib.optim.prox_optim import ProxFISTASolverParams
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -26,14 +27,14 @@ if __name__ == '__main__':
                         help='renormalize data waveforms')
     parser.add_argument('--group', '-g', action='store_true', default=False,
                         help='whether or not to use group L1L2 regularization')
-    parser.add_argument('--l1_comp_weights', '-l', action='store_true', default=False,
-                        help='whether or not to use componentwise weighted L1 regularization')
-    parser.add_argument('--prior_weight', '-pw', default=1e-3,
+    parser.add_argument('--prior_weight', '-pw', default=1.0,
                         help='Lambda for Gaussian prior regularization term')
+    parser.add_argument('--prior_width', '-psigma', default=5.0,
+                        help='Distance parameter for prior kernel')
     parser.add_argument('--eps_cutoff', '-e', type=float, default=1e-3,
-                        help='converge epsilon. Default uses comparison to t^2 |G_t|^2, which is robust but does not guarantee bounds on convergence')
-    parser.add_argument('--eps_eigen', '--f', action='store_true', default=False,
-                        help='use original eigenvalue based convergence, which provides a provable suboptimality for least squares but breaks with strong regularization')
+                        help='converge epsilon. Default 1e-3')
+    parser.add_argument('--opt_iter', '-o', type=int, default=10,
+                        help='Maximum iters for inner FISTA solver')
 
     args = parser.parse_args()
 
@@ -48,7 +49,6 @@ if __name__ == '__main__':
     with open(args.basis_prior_pickle, 'rb') as pfile:
         basis_dict = pickle.load(pfile)
     initial_basis = basis_dict['basis']
-    initial_basis_covariance = basis_dict['covariance']
 
     shift_tuple = (-basis_dict['before'], basis_dict['after'])
     upsample_factor = basis_dict['upsample']
@@ -58,33 +58,32 @@ if __name__ == '__main__':
     if args.group:
         group_assignments = basis_dict['group_assignments']
 
-    componentwise_weights = None
-    if args.l1_comp_weights:
-        componentwise_weights = basis_dict['componentwise_weights']
+    waveform_prior_params = None
+    if args.prior_weight != 0.0:
+        waveform_prior_params = batch_ei_decomp2.WaveformPriorSummary(args.prior_width,
+                                                                      args.prior_weight,
+                                                                      True)
 
-    decomposition_dict = batch_ei_decomp.batch_two_step_decompose_cells_with_prior(
+    decomposition_dict = batch_ei_decomp2.batch_two_step_decompose_cells_by_fitted_compartments2(
         eis_by_cell_id,
         initial_basis,
-        initial_basis_covariance,
-        args.prior_weight,
+        batch_ei_decomp2.RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED,
+        ProxFISTASolverParams(initial_learning_rate=0.0,
+                              max_iter=args.opt_iter,
+                              converge_epsilon=args.eps_cutoff),
         compute_device,
-        maxiter_decomp=args.maxiter,
         l1_regularize_lambda=args.weight_reg,
-        shifts=shift_tuple,
-        supersample_factor=upsample_factor,
         snr_abs_threshold=snr_thresh,
+        shifts=shift_tuple,
         grid_search_step=args.grid_step,
         grid_search_top_n=args.grid_top_n,
         fine_search_width=args.fine_search_width,
         grid_search_batch_size=args.grid_batch_size,
+        maxiter_decomp=args.maxiter,
+        waveform_prior_summary=waveform_prior_params,
+        grouped_l1l2_groups=group_assignments,
         use_scaled_mse_penalty=args.renormalize_loss,
         use_scaled_regularization_terms=args.renormalize_penalty,
-        use_grouped_l1l2_norm=args.group,
-        grouped_l1l2_groups=group_assignments,
-        use_basis_weighted_l1_norm=args.l1_comp_weights,
-        basis_weights_for_l1=componentwise_weights,
-        converge_epsilon=args.eps_cutoff,
-        converge_step_cutoff=args.eps_cutoff if not args.eps_eigen else None,
     )
 
     with open(args.output_pickle, 'wb') as joint_fit_file:
@@ -99,11 +98,10 @@ if __name__ == '__main__':
             'use_grouped_l1l2_norm': args.group,
             'group_assignments': group_assignments,
             'use_basis_weighted_l1': args.l1_comp_weights,
-            'basis_weights_for_l1': componentwise_weights,
             'sobolev_reg': args.sobolev_reg,
             'initial_basis_mean': initial_basis,
-            'cov_kernel': initial_basis_covariance,
             'GP_prior_weight': args.prior_weight,
+            'GP_length': args.prior_width,
         }
 
         pickle_dict = {

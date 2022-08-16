@@ -3,6 +3,8 @@ import torch.nn as nn
 
 import numpy as np
 
+from sklearn.gaussian_process.kernels import RBF
+
 from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3, \
     batch_fourier_complex_least_square_with_prior_optimize, construct_rfft_covariance_matrix
 from lib.losseval import batch_evaluate_mse_flat
@@ -2050,7 +2052,6 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
                 waveform_prior_params.waveform_regularization_lambda,
                 device,
                 observation_loss_weight=waveform_observation_loss_weight,
-                mean_over_electrodes=waveform_prior_params.waveform_prior_take_mean
             )
 
         else:
@@ -2185,7 +2186,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
     :param maxiter_decomp:
     :return:
     '''
-    n_basis = initialized_basis_vectors.shape[0]
+    n_basis, n_timepoints = initialized_basis_vectors.shape
 
     autobatched_list = auto_prebatch_pack_significant_electrodes(eis_by_cell_id,
                                                                  snr_abs_threshold)
@@ -2213,14 +2214,15 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
             # by default use the same covariance matrix for everybody
             gaussian_prior_width = waveform_prior_summary.gaussian_width_samples
 
-            exp_arg = (diff_time * diff_time) / (2 * gaussian_prior_width * gaussian_prior_width)
+            initial_basis_covariance = RBF(length_scale=gaussian_prior_width)
+            t_time = np.r_[0:n_timepoints]
+            t_diff = t_time[:, None] - t_time[None, :]
 
-            # shape (n_timepoints, n_timepoints)
-            sample_time_cov_mat = np.exp(-exp_arg)
+            time_cov_matrix = initial_basis_covariance(t_diff)
 
             # by default use the same covariance matrix for everybody
             # shape (n_basis, n_timepoints, n_timepoints)
-            cov_matrix_per_basis = np.tile(sample_time_cov_mat, (n_basis, 1, 1))
+            cov_matrix_per_basis = np.tile(time_cov_matrix, (n_basis, 1, 1))
 
             waveform_prior_params = WaveformPriorParams(cov_matrix_per_basis,
                                                         waveform_prior_summary.waveform_regularization_lambda,
