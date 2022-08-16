@@ -898,68 +898,6 @@ def place_all_eqn_real_var_coeffs(all_eqns_real_coeffs_by_basis_flat: torch.Tens
     return
 
 
-def compute_all_eqn_imag_var_placement_indices(n_timepoints: int,
-                                               n_basis: int,
-                                               device: torch.device) -> torch.Tensor:
-    '''
-    Computes the placement coefficients (for either torch.scatter or torch.scatter_add)
-        for all equations (d / d_real AND d / d_imag), but only placing
-        the imag variables
-
-    Needs a second call to compute_all_eqn_real_var_placement_indices to be able to
-        form a full rank system
-
-    Indices and equation ordering correspond to the ordering
-    X marks the variables whose indices are computed using this function call
-                                        VARIABLES
-                           (basis 1 real, basis 1 imag, basis 2 real, basis 2 imag, ...)
-        (d / basis 1 real) |             |      X      |             |      X      |
-    E   (d / basis 1 imag) |             |      X      |             |      X      |
-    Q   (d / basis 2 real) |             |      X      |             |      X      |
-    N   (d / basis 2 imag) |             |      X      |             |      X      |
-             ...
-
-    @param n_timepoints: int, number of samples = number of Fourier domain unknowns
-    @param n_basis: int, number of basis waveforms
-    @param device:
-    @return: torch.Tensor, shape (n_basis * n_timepoints, n_basis)
-    '''
-
-    n_real_eqns = (n_timepoints // 2) + 1
-    n_imag_eqns = (n_timepoints // 2) - 1 if n_timepoints % 2 == 0 else (n_timepoints // 2)
-
-    n_real_coeffs = n_real_eqns
-    n_imag_coeffs = n_imag_eqns
-
-    with torch.no_grad():
-        d_real_freq_ix = torch.arange(0, n_real_coeffs,
-                                      dtype=torch.long, device=device)[:, None].expand(-1, n_basis)
-        d_real_basis_ix = torch.arange(0, n_basis,
-                                       dtype=torch.long, device=device)[None, :].expand(n_real_coeffs, -1)
-
-        # shape (n_real_eqns = n_real_coeffs, n_basis)
-        d_real_imag_var_ix = compute_variable_indices(d_real_freq_ix,
-                                                      d_real_basis_ix,
-                                                      n_timepoints,
-                                                      coeffs_are_imag=True)
-
-        d_imag_freq_ix = torch.arange(1, n_imag_coeffs + 1, dtype=torch.long, device=device)[:, None].expand(-1,
-                                                                                                             n_basis)
-        d_imag_basis_ix = torch.arange(0, n_basis, dtype=torch.long, device=device)[None, :].expand(n_imag_coeffs, -1)
-
-        # shape (n_imag_eqns = n_imag_coeffs, n_basis)
-        d_imag_imag_var_ix = compute_variable_indices(d_imag_freq_ix,
-                                                      d_imag_basis_ix,
-                                                      n_timepoints,
-                                                      coeffs_are_imag=True)
-
-        # shape (n_timepoints, n_basis)
-        all_eqns_imag_placement_indices = torch.cat([d_real_imag_var_ix, d_imag_imag_var_ix], dim=0)
-
-        # shape (n_basis * n_timepoints, n_basis)
-        return all_eqns_imag_placement_indices.repeat(n_basis, 1)
-
-
 def rearrange_mse_grouped_coefficients(eq1_group_real_coeffs: torch.Tensor,
                                        eq1_group_imag_coeffs: torch.Tensor,
                                        eq1_group_rhs: torch.Tensor,
