@@ -3,20 +3,26 @@ import torch.nn as nn
 
 import numpy as np
 
-from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3
+from sklearn.gaussian_process.kernels import RBF
+
+from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3, \
+    batch_fourier_complex_least_square_with_prior_optimize, construct_rfft_covariance_matrix, _pack_complex_to_real_imag
 from lib.losseval import batch_evaluate_mse_flat
-from lib.optim.proxgrad_optim import BatchedMultiProxProblem, AutogradBatchMultiProxProblem, \
-    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, ProxGradSolverParams
+from lib.optim.optim_base import BatchedMultiProxProblem, \
+    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, \
+    ProxGradSolverParams
+from lib.optim.prox_optim import batch_multiproblem_parallel_prox_solve
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector
 
-from typing import Union, Optional, Tuple, Dict, List
+from typing import Union, Optional, Tuple, Dict, List, Any
 from enum import Enum
+from dataclasses import dataclass
 
 import tqdm
 
 from lib.util_fns import auto_unbatch_unpack_significant_electrodes, auto_prebatch_pack_significant_electrodes, \
-    bspline_upsample_waveforms
+    bspline_upsample_waveforms, shift_waveform_peaks_and_adjust_shifts
 
 
 class RegularizationType(Enum):
@@ -62,7 +68,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem,
                  l1_lambda: Union[float, np.ndarray],
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
-                 init_low: float = -1e-1,
+                 init_low: float = 0.0,
                  init_high: float = 1e-1):
         '''
         Conventions for the variables in this subclass
@@ -227,7 +233,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem,
 
             return (gradient_flat,)
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         return self.compute_mse_loss(*args, **kwargs)
 
     def _prox_proj(self, *args, **kwargs) -> Tuple[torch.Tensor, ...]:
@@ -263,7 +269,7 @@ class SharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem,
         return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
 
 
-class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxProblem,
+class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(BatchedMultiProxProblem,
                                                          BatchedShiftSolver,
                                                          SharedShiftSolver):
     '''
@@ -289,7 +295,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
                  l12_group_sel_matrix: np.ndarray,
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
-                 init_low: float = -1e-1,
+                 init_low: float = 0.0,
                  init_high: float = 1e-1,
                  epsilon_div_by_zero: float = 1e-6):
         '''
@@ -415,7 +421,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
         # shape (batch_size, n_electrodes * phase_shifts)
         return self.l12_lambda * group_sparse_norm
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -448,7 +454,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
 
     def compute_loss_for_argmin(self, **kwargs) -> torch.Tensor:
         with torch.no_grad():
-            loss_unshape = self._smooth_loss(*self.parameters(recurse=False), **kwargs)
+            loss_unshape = self._eval_smooth_loss(*self.parameters(recurse=False), **kwargs)
             total_loss = loss_unshape.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts)
             return total_loss
 
@@ -457,7 +463,7 @@ class SharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxP
         return amplitudes_clone.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts, self.n_basis)
 
 
-class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
+class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, SharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -476,7 +482,7 @@ class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Batch
                  l12_group_sel_matrix: np.ndarray,
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
-                 init_low: float = -1e-1,
+                 init_low: float = 0,
                  init_high: float = 1e-1):
         '''
         Conventions for the variables in this subclass
@@ -596,7 +602,7 @@ class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Batch
 
         return mse_loss_component
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -644,7 +650,7 @@ class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Batch
             zi_groupsel = z_amplitudes_clipped[:, :, None, :] * self.group_sel[None, None, :, :]
 
             # shape (batch_size, n_electrodes * n_phase_shifts, n_groups)
-            zi_norm = torch.norm(zi_groupsel, dim=3, p=2)
+            zi_norm = torch.linalg.norm(zi_groupsel, dim=3, ord=2)
 
             # shape (batch, n_electrodes * n_phase_shifts, n_groups), boolean-valued
             exceeds_abs = zi_norm > torch.abs(norms)
@@ -679,7 +685,7 @@ class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Batch
 
     def compute_loss_for_argmin(self, **kwargs) -> torch.Tensor:
         with torch.no_grad():
-            loss_unshape = self._smooth_loss(*self.parameters(recurse=False), **kwargs)
+            loss_unshape = self._eval_smooth_loss(*self.parameters(recurse=False), **kwargs)
 
             mse_loss = loss_unshape.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts)
 
@@ -689,7 +695,7 @@ class SharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Batch
             grouped_components = self.amplitudes[:, :, None, :] * self.group_sel[None, None, :, :]
 
             # shape (batch_size, n_electrodes * phase_shifts)
-            group_sparse_norm = torch.sum(torch.norm(grouped_components, p=2, dim=3), 2) * self.l12_lambda
+            group_sparse_norm = torch.sum(torch.linalg.norm(grouped_components, ord=2, dim=3), dim=2) * self.l12_lambda
 
             group_sparse_penalty = group_sparse_norm.reshape(self.batch_size, self.n_electrodes, self.n_phase_shifts)
 
@@ -823,7 +829,7 @@ class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batc
         # shape (batch, n_electrodes * n_shifts)
         return mse_loss_contrib.reshape(self.batch_size, -1)
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -921,7 +927,7 @@ class UnsharedShiftsNonNegL1ProxGradSolver(ManualGradBatchMultiProxProblem, Batc
         return amplitudes_copy.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
 
 
-class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiProxProblem,
+class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(BatchedMultiProxProblem,
                                                            BatchedShiftSolver,
                                                            UnsharedShiftSolver):
     '''
@@ -1085,7 +1091,7 @@ class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiPro
         # shape (batch_size, n_electrodes * phase_shifts)
         return self.l12_lambda * group_sparse_norm
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -1133,7 +1139,7 @@ class UnsharedShiftsNonNegOrthantGroupSparseProxGradSolver(AutogradBatchMultiPro
         return amplitudes_copy.reshape(self.batch_size, self.n_electrodes, self.n_shifts, self.n_basis)
 
 
-class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
+class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShiftSolver, UnsharedShiftSolver):
     '''
     Variable order convention (in order of registration)
 
@@ -1152,7 +1158,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Bat
                  l12_group_sel_matrix: np.ndarray,
                  amplitudes_matrix_init: Optional[np.ndarray] = None,
                  verbose: bool = True,
-                 init_low: float = -1e-1,
+                 init_low: float = 0.0,
                  init_high: float = 1e-1):
         '''
 
@@ -1275,7 +1281,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Bat
         # shape (batch, n_electrodes * n_shifts)
         return mse_loss_contrib.reshape(self.batch_size, -1)
 
-    def _smooth_loss(self, *args, **kwargs) -> torch.Tensor:
+    def _eval_smooth_loss(self, *args, **kwargs) -> torch.Tensor:
         '''
 
         :param args:
@@ -1312,6 +1318,7 @@ class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Bat
             # shape (batch_size, n_electrodes * n_phase_shifts, n_basis)
             z_amplitudes_clipped = torch.clamp_min_(amplitudes, 0.0)
 
+            ####### EVERYTHING BELOW THIS LINE IS THE OLD IMPLEMENTATION THAT WORKS #####
             # distribute the basis weights into their respective groups
             # as long as self.group_sel does not assign weights to multiple groups
             # we should be able to recover the original basis weights by
@@ -1323,13 +1330,13 @@ class UnsharedShiftsGroupSparseProxGradSolver(AutogradBatchMultiProxProblem, Bat
             zi_groupsel = z_amplitudes_clipped[:, :, None, :] * self.group_sel[None, None, :, :]
 
             # shape (batch_size, n_electrodes * n_phase_shifts, n_groups)
-            zi_norm = torch.norm(zi_groupsel, dim=3, p=2)
+            zi_norm = torch.linalg.norm(zi_groupsel, dim=3, ord=2)
 
             # shape (batch, n_electrodes * n_phase_shifts, n_groups), boolean-valued
             exceeds_abs = zi_norm > torch.abs(norms)
 
             # shape (batch, n_electrodes * n_phase_shifts, n_groups), boolean-valued
-            less_than_neg = zi_norm < -norms
+            less_than_neg = zi_norm <= -norms
 
             # now apply the clips
             # note that we need to project each group differently
@@ -1527,13 +1534,17 @@ def batched_fast_time_shifts_and_amplitudes_shared_shifts2(
         device)  # type: Union[BatchedMultiProxProblem, SharedShiftSolver, BatchedShiftSolver]
 
     #### Step 3: set up projected gradient descent problem #######################################
-    _ = solver.solve(solver_params)
+    _ = batch_multiproblem_parallel_prox_solve(solver,
+                                               solver_params,
+                                               verbose=solver_verbose)
 
     # shape (batch, n_electrodes, n_phase_shifts, n_basis)
     amplitudes_solved = solver.return_amplitudes()
 
     # shape (batch, n_electrodes, n_phase_shifts)
     objective_fn_vals = solver.compute_loss_for_argmin()
+
+    del solver
 
     return amplitudes_solved.detach().cpu().numpy(), objective_fn_vals.detach().cpu().numpy()
 
@@ -1681,13 +1692,17 @@ def batched_fast_time_shifts_and_amplitudes_unshared_shifts2(
                                          init_high=init_high).to(
         device)  # type: Union[BatchedMultiProxProblem, UnsharedShiftSolver, BatchedShiftSolver]
 
-    _ = solver.solve(solver_params)
+    _ = batch_multiproblem_parallel_prox_solve(solver,
+                                               solver_params,
+                                               verbose=solver_verbose)
 
     # shape (batch, n_electrodes, n_phase_shifts, n_basis)
     amplitudes_solved = solver.return_amplitudes()
 
     # shape (batch, n_electrodes, n_phase_shifts)
     objective_fn_vals = solver.compute_loss_for_argmin()
+
+    del solver
 
     return amplitudes_solved.detach().cpu().numpy(), objective_fn_vals.detach().cpu().numpy()
 
@@ -1883,11 +1898,18 @@ def make_group_sparse_mat_from_group_list(group_list: List[np.ndarray],
     return group_sel_matrix
 
 
+@dataclass
+class WaveformPriorParams:
+    waveform_cov_mat_time_domain: np.ndarray
+    wavefrom_mean_time_domain: np.ndarray
+    waveform_regularization_lambda: np.ndarray
+
+
 def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: np.ndarray,
                                                       is_valid_matrix: np.ndarray,
                                                       initialized_basis_waveforms: np.ndarray,
-                                                      regularization_type: RegularizationType,
-                                                      regularization_lambda: float,
+                                                      sparsity_regularization_type: RegularizationType,
+                                                      sparsity_regularization_lambda: float,
                                                       valid_shift_range: Tuple[int, int],
                                                       shift_grid_step: int,
                                                       fine_search_top_n: int,
@@ -1897,13 +1919,16 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
                                                       solver_params: ProxSolverParams,
                                                       device: torch.device,
                                                       max_batch_size=8192,
+                                                      waveform_prior_params: Optional[WaveformPriorParams] = None,
+                                                      realign_basis_time_per_iter: bool = False,
+                                                      realign_basis_sample_num: int = 60,
                                                       use_scaled_mse_penalty: bool = False,
                                                       use_scaled_regularization_terms: bool = False,
-                                                      group_sel_matrix: Optional[np.ndarray] = None,
-                                                      sobolev_lambda: Optional[float] = None) \
+                                                      group_sel_matrix: Optional[np.ndarray] = None) \
         -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     '''
     Batched version of the main iteration loop for the two-step alternating optimization process.
+    We can optionally specify a Gaussian prior for the waveform shapes
     Optimization steps are
 
         (1) With fixed waveforms, solve for both the amplitudes and the timeshifts together by performing grid search
@@ -1941,6 +1966,12 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
     :param n_iter: number of iteration steps
     :param device:
     :param l1_regularization_lambda: weight for L1 regularization
+    :param waveform_prior_params: optional parameters for the waveform shape Gaussian prior
+        If specified, we drop the L2 renormalization step for the waveforms, since the Gaussian prior
+        should constrain the norm of the waveforms to a value near 1.
+
+        This function parameter summarizes the time-domain covariance matrix and mean for each of the
+        basis waveforms
     :return:
     '''
 
@@ -1969,7 +2000,26 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
         waveform_observation_loss_weight = raw_data_magnitude.copy().squeeze(2)
 
     if not use_scaled_regularization_terms:
-        regularization_lambda = 1.0 / raw_data_magnitude.squeeze(2)
+        sparsity_regularization_lambda = 1.0 / raw_data_magnitude.squeeze(2)
+
+    use_prior_waveform_optim = waveform_prior_params is not None
+    if use_prior_waveform_optim:
+        # shape (n_basis, n_rfft_freqs)
+        waveform_prior_mean_rfft = np.fft.rfft(waveform_prior_params.wavefrom_mean_time_domain,
+                                               axis=1)
+
+        waveform_prior_mean_rfft_stacked = _pack_complex_to_real_imag(waveform_prior_mean_rfft,
+                                                                      n_samples,
+                                                                      axis=1)
+
+        # convert the time-domain waveform covariance matrices to Fourier domain
+        # shape (n_basis, n_rfft_freqs, n_rfft_freqs)
+        waveform_cov_mat_rfft_domain = construct_rfft_covariance_matrix(
+            waveform_prior_params.waveform_cov_mat_time_domain)
+
+        # shape (n_basis, n_rfft_freqs, n_rfft_freqs)
+        waveform_inv_cov_matrices = np.linalg.inv(waveform_cov_mat_rfft_domain)
+
 
     pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization', leave=False)
     for iter_count in range(n_iter):
@@ -1987,8 +2037,8 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             observations_fourier_transform,
             iter_basis_waveform_ft,
             n_frequencies_not_rfft,
-            regularization_type,
-            regularization_lambda,
+            sparsity_regularization_type,
+            sparsity_regularization_lambda,
             valid_shift_range,
             shift_grid_step,
             fine_search_top_n,
@@ -2001,32 +2051,55 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             max_batch_size=max_batch_size,
             verbose_solver=False)
 
-        # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
-        iter_basis_waveform_ft = batch_fourier_complex_least_square_optimize3(
-            iter_real_amplitudes,
-            iter_delays,
-            observations_fourier_transform,
-            is_valid_matrix,
-            iter_basis_waveform_ft,
-            n_frequencies_not_rfft,
-            device,
-            observation_loss_weight=waveform_observation_loss_weight,
-            sobolev_lambda=sobolev_lambda
-        )
+        if use_prior_waveform_optim:
+            # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+            iter_basis_waveform_ft = batch_fourier_complex_least_square_with_prior_optimize(
+                iter_real_amplitudes,
+                iter_delays,
+                observations_fourier_transform,
+                is_valid_matrix,
+                waveform_inv_cov_matrices,
+                waveform_prior_mean_rfft_stacked,
+                n_frequencies_not_rfft,
+                waveform_prior_params.waveform_regularization_lambda,
+                device,
+                observation_loss_weight=waveform_observation_loss_weight,
+            )
+
+        else:
+            # complex valued, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+            iter_basis_waveform_ft = batch_fourier_complex_least_square_optimize3(
+                iter_real_amplitudes,
+                iter_delays,
+                observations_fourier_transform,
+                is_valid_matrix,
+                iter_basis_waveform_ft,
+                n_frequencies_not_rfft,
+                device,
+                observation_loss_weight=waveform_observation_loss_weight,
+            )
 
         # shape (batch, n_canonical_waveforms, n_samples), real-valued float
         iter_basis_waveform_td = np.real(np.fft.irfft(iter_basis_waveform_ft, n=n_samples, axis=2))
 
-        # real valued np.ndarray, shape (batch, n_canonical_waveforms, 1)
-        raw_optimized_waveform_magnitude = np.linalg.norm(iter_basis_waveform_td, axis=2, keepdims=True)
-        # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
-        iter_basis_waveform_ft = iter_basis_waveform_ft / raw_optimized_waveform_magnitude
-        # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_samples)
-        iter_basis_waveform_td = iter_basis_waveform_td / raw_optimized_waveform_magnitude
+        if realign_basis_time_per_iter:
+            # shape (batch, n_canonical_waveforms, n_samples), real-valued float
+            # and shape (batch, n_canonical_waveforms), integer
+            iter_basis_waveform_td, iter_delays = shift_waveform_peaks_and_adjust_shifts(iter_basis_waveform_td,
+                                                                                         realign_basis_sample_num)
+            iter_basis_waveform_ft = np.fft.rfft(iter_basis_waveform_td)
 
-        # shape (batch, n_observations, n_basis_waveforms) * (batch, 1, n_basis_waveforms)
-        # -> (batch, n_observations, n_basis_waveforms)
-        iter_real_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude.transpose((0, 2, 1))
+        if not use_prior_waveform_optim:
+            # real valued np.ndarray, shape (batch, n_canonical_waveforms, 1)
+            raw_optimized_waveform_magnitude = np.linalg.norm(iter_basis_waveform_td, axis=2, keepdims=True)
+            # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+            iter_basis_waveform_ft = iter_basis_waveform_ft / raw_optimized_waveform_magnitude
+            # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_samples)
+            iter_basis_waveform_td = iter_basis_waveform_td / raw_optimized_waveform_magnitude
+
+            # shape (batch, n_observations, n_basis_waveforms) * (batch, 1, n_basis_waveforms)
+            # -> (batch, n_observations, n_basis_waveforms)
+            iter_real_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude.transpose((0, 2, 1))
 
         orig_MSE = batch_evaluate_mse_flat(observations_fourier_transform,
                                            iter_real_amplitudes,
@@ -2076,6 +2149,53 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
     return fit_amplitudes_rescaled, iter_basis_waveform_td, iter_delays, loss_dict
 
 
+@dataclass
+class WaveformPriorSummary:
+    gaussian_width_samples: Union[float, np.ndarray]
+    waveform_regularization_lambda: Union[float, np.ndarray]
+
+
+def construct_waveform_prior_params(waveform_prior_summary: WaveformPriorSummary,
+                                    waveform_prior_mean: np.ndarray) \
+        -> WaveformPriorParams:
+
+    n_basis, n_timepoints = waveform_prior_mean.shape
+    
+    t_time = np.r_[0:n_timepoints]
+    t_diff = t_time[:, None] - t_time[None, :]
+
+    # by default use the same covariance matrix for everybody
+    gaussian_prior_width = waveform_prior_summary.gaussian_width_samples
+    cov_matrix_per_basis = np.zeros((n_basis, n_timepoints, n_timepoints), 
+                                     dtype=np.float32)
+    if isinstance(gaussian_prior_width, np.ndarray):
+        if gaussian_prior_width.shape[0] != n_basis:
+            raise ValueError(
+                f'waveform_prior_summary shape must match n_basis, got {waveform_prior_summary.shape[0]}, expected {n_basis}')
+
+        for ii, gp_width in enumerate(gaussian_prior_width):
+            initial_basis_covariance = RBF(length_scale=gp_width)
+            time_cov_matrix = initial_basis_covariance(t_diff)
+            cov_matrix_per_basis[ii, ...] = time_cov_matrix
+
+    else:
+        initial_basis_covariance = RBF(length_scale=gaussian_prior_width)
+        time_cov_matrix = initial_basis_covariance(t_diff)
+        cov_matrix_per_basis[...] = time_cov_matrix[None, :, :]
+
+    specified_lambda = waveform_prior_summary.waveform_regularization_lambda
+    if isinstance(specified_lambda, np.ndarray):
+        if specified_lambda.shape[0] != n_basis:
+            raise ValueError(
+                f'specified lambda shape must match n_basis, got {specified_lambda.shape[0]}, expected {n_basis}')
+    else:
+        specified_lambda = specified_lambda * np.ones((n_basis, ), dtype=np.float32)
+
+    return WaveformPriorParams(cov_matrix_per_basis,
+                               waveform_prior_mean,
+                               specified_lambda)
+
+
 def batch_two_step_decompose_cells_by_fitted_compartments2(
         eis_by_cell_id: Dict[int, np.ndarray],
         initialized_basis_vectors: np.ndarray,
@@ -2084,22 +2204,24 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         device: torch.device,
         snr_abs_threshold: float = 5.0,
         amplitude_random_init_range: Tuple[float, float] = (0.0, 10.0),
-        supersample_factor: int = 5,
         shifts: Tuple[int, int] = (-100, 100),
         grid_search_step: int = 5,
         grid_search_top_n: int = 4,
         fine_search_width: int = 2,
-        grid_search_batch_size: int = 1024,
-        maxiter_decomp: int = 25,
-        n_inner_optimization_iters: int = 15,
+        grid_search_batch_size: int = 8192,
+        maxiter_decomp: int = 3,
+        waveform_prior_summary: Optional[WaveformPriorSummary] = None,
+        realign_basis_time_per_iter: bool = False,
+        realign_basis_sample_num: int = 20,
         l1_regularize_lambda: Optional[float] = None,
         use_scaled_mse_penalty: bool = False,
         use_scaled_regularization_terms: bool = False,
-        grouped_l1l2_groups: Optional[List[np.ndarray]] = None,
-        sobolev_reg: Optional[float] = None) \
-        -> Union[Tuple[Dict[int, Dict[str, np.ndarray]], Dict[str, float]],
-                 Dict[int, Dict[str, np.ndarray]]]:
+        grouped_l1l2_groups: Optional[List[np.ndarray]] = None) \
+        -> Dict[int, Dict[str, np.ndarray]]:
     '''
+    REVISION NOTE:
+
+    No upsampling here anymore; that is taken care of during the data export/preprocessing step
 
     :param eis_by_cell_id: Dict mapping cell id to raw EIs. Each EI must have shape (n_electrodes, n_timepoints)
     :param initialized_basis_vectors: Initial value for basis waveforms in time domain. It helps to specify reasonable
@@ -2108,7 +2230,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         Even though each EI will be fitted with its own separate basis waveforms, we use the same initialization
             for each EI, since this initialization corresponds to a generic reasonable initial guess
 
-        shape (n_basis_waveforms, n_timepoints_raw)
+        shape (n_basis_waveforms, n_timepoints)
     :param device: torch device
     :param l1_regularize_lambda: float, regularization constant for L1 or group-sparse L1
     :param snr_abs_threshold:
@@ -2117,6 +2239,7 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
     :param maxiter_decomp:
     :return:
     '''
+    n_basis, n_timepoints = initialized_basis_vectors.shape
 
     autobatched_list = auto_prebatch_pack_significant_electrodes(eis_by_cell_id,
                                                                  snr_abs_threshold)
@@ -2130,29 +2253,21 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         # ind_sel_mat: shape (batch, n_electrodes_total), integer indices
         # cell_order: shape (batch, ) integer cell id
 
-        batch, max_n_sig_electrodes, n_timepoints_raw = batched_data_mat.shape
-        flat_data_mat = batched_data_mat.reshape(batch * max_n_sig_electrodes, n_timepoints_raw)
+        batch, max_n_sig_electrodes, n_timepoints = batched_data_mat.shape
 
-        # shape (batch * max_n_sig_electrodes, n_timepoints_upsampled)
-        flat_bspline_supersampled = bspline_upsample_waveforms(flat_data_mat, supersample_factor)
-        _, n_timepoints_upsampled = flat_bspline_supersampled.shape
-
-        # shape (batch, max_n_sig_electrodes, n_timepoints_upsampled)
-        batched_bspline_supersampled = flat_bspline_supersampled.reshape(batch, max_n_sig_electrodes,
-                                                                         n_timepoints_upsampled)
-
-        # now zero pad before and after
-        # shape (batch, max_n_sig_electrodes, n_timepoints)
-        padded_channels_sufficient_magnitude = np.pad(batched_bspline_supersampled,
-                                                      [(0, 0), (0, 0), (abs(shifts[0]), abs(shifts[1]))],
-                                                      mode='constant')
-
+        # shape (batch, n_basis, n_timepoints)
         batched_basis_waveforms = np.tile(initialized_basis_vectors, (batch, 1, 1))
+
+        # if we are using the waveform prior, construct the covariance matrix
+        waveform_prior_params = None
+        if waveform_prior_summary is not None:
+            waveform_prior_params = construct_waveform_prior_params(waveform_prior_summary,
+                                                                    initialized_basis_vectors)
 
         # amplitudes has shape (batch, n_observations, n_basis_waveforms))
         # waveforms has shape (batch, n_basis_waveforms, n_timepoints)
         amplitudes, waveforms, delays, mse = batch_shifted_fourier_nmf_iterative_optimization4(
-            padded_channels_sufficient_magnitude,
+            batched_data_mat,
             is_valid_mat,
             batched_basis_waveforms,
             regularization_type,
@@ -2168,9 +2283,11 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
             max_batch_size=grid_search_batch_size,
             use_scaled_mse_penalty=use_scaled_mse_penalty,
             use_scaled_regularization_terms=use_scaled_regularization_terms,
+            waveform_prior_params=waveform_prior_params,
+            realign_basis_time_per_iter=realign_basis_time_per_iter,
+            realign_basis_sample_num=realign_basis_sample_num,
             group_sel_matrix=make_group_sparse_mat_from_group_list(grouped_l1l2_groups,
                                                                    initialized_basis_vectors.shape[0]),
-            sobolev_lambda=sobolev_reg,
         )
 
         wip_decomp_list.append((amplitudes, delays, waveforms))

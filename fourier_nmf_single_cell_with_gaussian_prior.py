@@ -3,20 +3,17 @@ import torch
 import pickle
 import argparse
 
-from lib.batch_ei_decomposition_v2 import RegularizationType, batch_two_step_decompose_cells_by_fitted_compartments2, \
-    WaveformPriorParams
-from lib.optim.optim_base import ProxGradSolverParams, ProxFISTASolverParams
+import lib.batch_ei_decomposition_v2 as batch_ei_decomp2
+from lib.optim.prox_optim import ProxFISTASolverParams
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         'Fit EI decomposition with previously initialized basis waveforms. Separate basis waveforms for each cell')
 
     parser.add_argument('ei_pickle', type=str, help='path to EI pickle')
-    parser.add_argument('basis_pickle', type=str, help='path to input pickle file')
+    parser.add_argument('basis_prior_pickle', type=str, help='path to input pickle file')
     parser.add_argument('output_pickle', type=str, help='path to output pickle file')
-    parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--maxiter', '-m', type=int, default=10, help='maximum number of iterations to run')
-    parser.add_argument('--inneropt_iter', '-i', type=int, default=15, help='maximum number of FISTA iterations for inner solver steps')
     parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
                         help='L1 regularization lambda for amplitudes')
     parser.add_argument('--grid_step', type=int, default=5, help='step size for grid search')
@@ -30,16 +27,14 @@ if __name__ == '__main__':
                         help='renormalize data waveforms')
     parser.add_argument('--group', '-g', action='store_true', default=False,
                         help='whether or not to use group L1L2 regularization')
+    parser.add_argument('--prior_weight', '-pw', default=1.0, type=float,
+                        help='Lambda for Gaussian prior regularization term')
+    parser.add_argument('--prior_width', '-psigma', default=5.0, type=float,
+                        help='Distance parameter for prior kernel')
     parser.add_argument('--eps_cutoff', '-e', type=float, default=1e-3,
-                        help='converge epsilon. Default uses comparison to t^2 |G_t|^2, which is robust but does not guarantee bounds on convergence')
-    parser.add_argument('--shape_prior', '-s', action='store_true', default=False,
-                        help='use waveform shape prior in waveform optimization step')
-    parser.add_argument('--shape_kernel', type=float, default=5.0,
-                        help='width of shape Gaussian kernel for waveform covariance')
-    parser.add_argument('--shape_weight_reg', type=float, default=1.0,
-                        help='weight of the waveform shape prior regularization term')
-    parser.add_argument('--shape_take_mean', action='store_true', default=False,
-                        help='take mean over the electrodes when computing the waveform shape optimization')
+                        help='converge epsilon. Default 1e-3')
+    parser.add_argument('--opt_iter', '-o', type=int, default=10,
+                        help='Maximum iters for inner FISTA solver')
 
     args = parser.parse_args()
 
@@ -51,42 +46,42 @@ if __name__ == '__main__':
         eis_by_cell_id = x['eis_by_cell_id']
 
     print("Loading initial bases")
-    with open(args.basis_pickle, 'rb') as pfile:
+    with open(args.basis_prior_pickle, 'rb') as pfile:
         basis_dict = pickle.load(pfile)
     initial_basis = basis_dict['basis']
 
     shift_tuple = (-basis_dict['before'], basis_dict['after'])
     upsample_factor = basis_dict['upsample']
-    snr_thresh = basis_dict['thresh']
 
     group_assignments = None
-    regularization_type = RegularizationType.L1_SPARSE_REG
     if args.group:
         group_assignments = basis_dict['group_assignments']
-        regularization_type = RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED
 
-    shape_regularization_params = None
-    if args.shape_prior:
-        shape_regularization_params = WaveformPriorParams()
+    waveform_prior_params = None
+    if args.prior_weight != 0.0:
+        waveform_prior_params = batch_ei_decomp2.WaveformPriorSummary(args.prior_width,
+                                                                      args.prior_weight)
 
-    decomposition_dict = batch_two_step_decompose_cells_by_fitted_compartments2(
+    decomposition_dict = batch_ei_decomp2.batch_two_step_decompose_cells_by_fitted_compartments2(
         eis_by_cell_id,
         initial_basis,
-        regularization_type,
-        ProxFISTASolverParams(1.0, args.inneropt_iter, args.eps_cutoff, 0.5),
+        batch_ei_decomp2.RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED,
+        ProxFISTASolverParams(initial_learning_rate=1.0,
+                              max_iter=args.opt_iter,
+                              converge_epsilon=args.eps_cutoff),
         compute_device,
-        maxiter_decomp=args.maxiter,
         l1_regularize_lambda=args.weight_reg,
+        snr_abs_threshold=args.thresh,
         shifts=shift_tuple,
-        supersample_factor=upsample_factor,
-        snr_abs_threshold=snr_thresh,
         grid_search_step=args.grid_step,
         grid_search_top_n=args.grid_top_n,
         fine_search_width=args.fine_search_width,
         grid_search_batch_size=args.grid_batch_size,
+        maxiter_decomp=args.maxiter,
+        waveform_prior_summary=waveform_prior_params,
+        grouped_l1l2_groups=group_assignments,
         use_scaled_mse_penalty=args.renormalize_loss,
         use_scaled_regularization_terms=args.renormalize_penalty,
-        grouped_l1l2_groups=group_assignments
     )
 
     with open(args.output_pickle, 'wb') as joint_fit_file:
@@ -95,12 +90,14 @@ if __name__ == '__main__':
             'maxiter': args.maxiter,
             'padding': shift_tuple,
             'upsample': upsample_factor,
-            'thresh': snr_thresh,
+            'thresh': args.thresh,
             'scale_mse_for_waveforms': args.renormalize_loss,
             'scale_regularization_terms': args.renormalize_penalty,
             'use_grouped_l1l2_norm': args.group,
             'group_assignments': group_assignments,
-            'sobolev_reg': args.sobolev_reg
+            'initial_basis_mean': initial_basis,
+            'GP_prior_weight': args.prior_weight,
+            'GP_length': args.prior_width,
         }
 
         pickle_dict = {
