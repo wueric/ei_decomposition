@@ -27,9 +27,9 @@ if __name__ == '__main__':
                         help='renormalize data waveforms')
     parser.add_argument('--group', '-g', action='store_true', default=False,
                         help='whether or not to use group L1L2 regularization')
-    parser.add_argument('--prior_weight', '-pw', default=1.0,
+    parser.add_argument('--prior_weight', '-pw', default=1.0, type=float,
                         help='Lambda for Gaussian prior regularization term')
-    parser.add_argument('--prior_width', '-psigma', default=5.0,
+    parser.add_argument('--prior_width', '-psigma', default=5.0, type=float,
                         help='Distance parameter for prior kernel')
     parser.add_argument('--eps_cutoff', '-e', type=float, default=1e-3,
                         help='converge epsilon. Default 1e-3')
@@ -60,14 +60,13 @@ if __name__ == '__main__':
     waveform_prior_params = None
     if args.prior_weight != 0.0:
         waveform_prior_params = batch_ei_decomp2.WaveformPriorSummary(args.prior_width,
-                                                                      args.prior_weight,
-                                                                      True)
+                                                                      args.prior_weight)
 
     decomposition_dict = batch_ei_decomp2.batch_two_step_decompose_cells_by_fitted_compartments2(
         eis_by_cell_id,
         initial_basis,
         batch_ei_decomp2.RegularizationType.L12_GROUP_SPARSE_REG_CONSTRAINED,
-        ProxFISTASolverParams(initial_learning_rate=0.0,
+        ProxFISTASolverParams(initial_learning_rate=1.0,
                               max_iter=args.opt_iter,
                               converge_epsilon=args.eps_cutoff),
         compute_device,
@@ -96,7 +95,6 @@ if __name__ == '__main__':
             'scale_regularization_terms': args.renormalize_penalty,
             'use_grouped_l1l2_norm': args.group,
             'group_assignments': group_assignments,
-            'use_basis_weighted_l1': args.l1_comp_weights,
             'initial_basis_mean': initial_basis,
             'GP_prior_weight': args.prior_weight,
             'GP_length': args.prior_width,

@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.gaussian_process.kernels import RBF
 
 from lib.frequency_domain_optimization import batch_fourier_complex_least_square_optimize3, \
-    batch_fourier_complex_least_square_with_prior_optimize, construct_rfft_covariance_matrix
+    batch_fourier_complex_least_square_with_prior_optimize, construct_rfft_covariance_matrix, _pack_complex_to_real_imag
 from lib.losseval import batch_evaluate_mse_flat
 from lib.optim.optim_base import BatchedMultiProxProblem, \
     ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, \
@@ -1901,8 +1901,8 @@ def make_group_sparse_mat_from_group_list(group_list: List[np.ndarray],
 @dataclass
 class WaveformPriorParams:
     waveform_cov_mat_time_domain: np.ndarray
-    waveform_regularization_lambda: Union[float, np.ndarray]
-    waveform_prior_take_mean: bool
+    wavefrom_mean_time_domain: np.ndarray
+    waveform_regularization_lambda: np.ndarray
 
 
 def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: np.ndarray,
@@ -1966,6 +1966,12 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
     :param n_iter: number of iteration steps
     :param device:
     :param l1_regularization_lambda: weight for L1 regularization
+    :param waveform_prior_params: optional parameters for the waveform shape Gaussian prior
+        If specified, we drop the L2 renormalization step for the waveforms, since the Gaussian prior
+        should constrain the norm of the waveforms to a value near 1.
+
+        This function parameter summarizes the time-domain covariance matrix and mean for each of the
+        basis waveforms
     :return:
     '''
 
@@ -1998,8 +2004,13 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
 
     use_prior_waveform_optim = waveform_prior_params is not None
     if use_prior_waveform_optim:
-        # shape (batch, n_basis, n_rfft_freqs)
-        waveform_prior_mean_rfft = np.fft.rfft(initialized_basis_waveforms, axis=2)
+        # shape (n_basis, n_rfft_freqs)
+        waveform_prior_mean_rfft = np.fft.rfft(waveform_prior_params.wavefrom_mean_time_domain,
+                                               axis=1)
+
+        waveform_prior_mean_rfft_stacked = _pack_complex_to_real_imag(waveform_prior_mean_rfft,
+                                                                      n_samples,
+                                                                      axis=1)
 
         # convert the time-domain waveform covariance matrices to Fourier domain
         # shape (n_basis, n_rfft_freqs, n_rfft_freqs)
@@ -2008,6 +2019,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
 
         # shape (n_basis, n_rfft_freqs, n_rfft_freqs)
         waveform_inv_cov_matrices = np.linalg.inv(waveform_cov_mat_rfft_domain)
+
 
     pbar = tqdm.tqdm(total=n_iter, desc='Overall optimization', leave=False)
     for iter_count in range(n_iter):
@@ -2047,7 +2059,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
                 observations_fourier_transform,
                 is_valid_matrix,
                 waveform_inv_cov_matrices,
-                waveform_prior_mean_rfft,
+                waveform_prior_mean_rfft_stacked,
                 n_frequencies_not_rfft,
                 waveform_prior_params.waveform_regularization_lambda,
                 device,
@@ -2077,16 +2089,17 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
                                                                                          realign_basis_sample_num)
             iter_basis_waveform_ft = np.fft.rfft(iter_basis_waveform_td)
 
-        # real valued np.ndarray, shape (batch, n_canonical_waveforms, 1)
-        raw_optimized_waveform_magnitude = np.linalg.norm(iter_basis_waveform_td, axis=2, keepdims=True)
-        # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
-        iter_basis_waveform_ft = iter_basis_waveform_ft / raw_optimized_waveform_magnitude
-        # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_samples)
-        iter_basis_waveform_td = iter_basis_waveform_td / raw_optimized_waveform_magnitude
+        if not use_prior_waveform_optim:
+            # real valued np.ndarray, shape (batch, n_canonical_waveforms, 1)
+            raw_optimized_waveform_magnitude = np.linalg.norm(iter_basis_waveform_td, axis=2, keepdims=True)
+            # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_rfft_frequencies)
+            iter_basis_waveform_ft = iter_basis_waveform_ft / raw_optimized_waveform_magnitude
+            # real valued np.ndarray, shape (batch, n_canonical_waveforms, n_samples)
+            iter_basis_waveform_td = iter_basis_waveform_td / raw_optimized_waveform_magnitude
 
-        # shape (batch, n_observations, n_basis_waveforms) * (batch, 1, n_basis_waveforms)
-        # -> (batch, n_observations, n_basis_waveforms)
-        iter_real_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude.transpose((0, 2, 1))
+            # shape (batch, n_observations, n_basis_waveforms) * (batch, 1, n_basis_waveforms)
+            # -> (batch, n_observations, n_basis_waveforms)
+            iter_real_amplitudes = iter_real_amplitudes * raw_optimized_waveform_magnitude.transpose((0, 2, 1))
 
         orig_MSE = batch_evaluate_mse_flat(observations_fourier_transform,
                                            iter_real_amplitudes,
@@ -2138,9 +2151,49 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
 
 @dataclass
 class WaveformPriorSummary:
-    gaussian_width_samples: float
+    gaussian_width_samples: Union[float, np.ndarray]
     waveform_regularization_lambda: Union[float, np.ndarray]
-    waveform_prior_take_mean: bool
+
+
+def construct_waveform_prior_params(waveform_prior_summary: WaveformPriorSummary,
+                                    waveform_prior_mean: np.ndarray) \
+        -> WaveformPriorParams:
+
+    n_basis, n_timepoints = waveform_prior_mean.shape
+    
+    t_time = np.r_[0:n_timepoints]
+    t_diff = t_time[:, None] - t_time[None, :]
+
+    # by default use the same covariance matrix for everybody
+    gaussian_prior_width = waveform_prior_summary.gaussian_width_samples
+    cov_matrix_per_basis = np.zeros((n_basis, n_timepoints, n_timepoints), 
+                                     dtype=np.float32)
+    if isinstance(gaussian_prior_width, np.ndarray):
+        if gaussian_prior_width.shape[0] != n_basis:
+            raise ValueError(
+                f'waveform_prior_summary shape must match n_basis, got {waveform_prior_summary.shape[0]}, expected {n_basis}')
+
+        for ii, gp_width in enumerate(gaussian_prior_width):
+            initial_basis_covariance = RBF(length_scale=gp_width)
+            time_cov_matrix = initial_basis_covariance(t_diff)
+            cov_matrix_per_basis[ii, ...] = time_cov_matrix
+
+    else:
+        initial_basis_covariance = RBF(length_scale=gaussian_prior_width)
+        time_cov_matrix = initial_basis_covariance(t_diff)
+        cov_matrix_per_basis[...] = time_cov_matrix[None, :, :]
+
+    specified_lambda = waveform_prior_summary.waveform_regularization_lambda
+    if isinstance(specified_lambda, np.ndarray):
+        if specified_lambda.shape[0] != n_basis:
+            raise ValueError(
+                f'specified lambda shape must match n_basis, got {specified_lambda.shape[0]}, expected {n_basis}')
+    else:
+        specified_lambda = specified_lambda * np.ones((n_basis, ), dtype=np.float32)
+
+    return WaveformPriorParams(cov_matrix_per_basis,
+                               waveform_prior_mean,
+                               specified_lambda)
 
 
 def batch_two_step_decompose_cells_by_fitted_compartments2(
@@ -2155,8 +2208,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         grid_search_step: int = 5,
         grid_search_top_n: int = 4,
         fine_search_width: int = 2,
-        grid_search_batch_size: int = 1024,
-        maxiter_decomp: int = 25,
+        grid_search_batch_size: int = 8192,
+        maxiter_decomp: int = 3,
         waveform_prior_summary: Optional[WaveformPriorSummary] = None,
         realign_basis_time_per_iter: bool = False,
         realign_basis_sample_num: int = 20,
@@ -2208,25 +2261,8 @@ def batch_two_step_decompose_cells_by_fitted_compartments2(
         # if we are using the waveform prior, construct the covariance matrix
         waveform_prior_params = None
         if waveform_prior_summary is not None:
-            idx_vec = np.r_[0:n_timepoints]
-            diff_time = idx_vec[:, None] - idx_vec[None, :]
-
-            # by default use the same covariance matrix for everybody
-            gaussian_prior_width = waveform_prior_summary.gaussian_width_samples
-
-            initial_basis_covariance = RBF(length_scale=gaussian_prior_width)
-            t_time = np.r_[0:n_timepoints]
-            t_diff = t_time[:, None] - t_time[None, :]
-
-            time_cov_matrix = initial_basis_covariance(t_diff)
-
-            # by default use the same covariance matrix for everybody
-            # shape (n_basis, n_timepoints, n_timepoints)
-            cov_matrix_per_basis = np.tile(time_cov_matrix, (n_basis, 1, 1))
-
-            waveform_prior_params = WaveformPriorParams(cov_matrix_per_basis,
-                                                        waveform_prior_summary.waveform_regularization_lambda,
-                                                        waveform_prior_summary.waveform_prior_take_mean)
+            waveform_prior_params = construct_waveform_prior_params(waveform_prior_summary,
+                                                                    initialized_basis_vectors)
 
         # amplitudes has shape (batch, n_observations, n_basis_waveforms))
         # waveforms has shape (batch, n_basis_waveforms, n_timepoints)

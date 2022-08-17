@@ -325,8 +325,6 @@ def _pack_complex_to_real_imag(complex_valued_matrix: np.ndarray,
     expanded_real_indices_shape = [1 for _ in orig_shape]
     expanded_real_indices_shape[axis] = real_indices_flat.shape[0]
     real_indices = real_indices_flat.reshape(expanded_real_indices_shape)
-    print('n_timepoints', n_timepoints)
-    print(real_imag_matrix.shape, real_indices.shape, real_values.shape, axis)
     np.put_along_axis(real_imag_matrix, real_indices, real_values, axis=axis)
 
     # handle the imaginary component
@@ -1085,7 +1083,7 @@ def batch_fourier_complex_least_square_with_prior_optimize(
         ri_stack_ft_domain_cov_matrix: np.ndarray,
         ri_stack_basis_prior_mean_ft: np.ndarray,
         n_true_frequencies: int,
-        regularization_lambda: Union[np.ndarray, float],
+        regularization_lambda: np.ndarray,
         device: torch.device,
         observation_loss_weight: Optional[np.ndarray] = None) -> np.ndarray:
     '''
@@ -1117,8 +1115,8 @@ def batch_fourier_complex_least_square_with_prior_optimize(
     :param batched_valid_mat: boolean matrix marking which entries of the above matrices correspond to real data,
         and which entries correspond to padding.
         shape (batch, n_observations), boolean valued
-    :param ri_stack_ft_domain_inv_cov_matrix: shape (N = n_timepoints, N = n_timepoints)
-    :param ri_stack_basis_prior_mean_ft: shape (n_basis_waveforms, N = n_timepoints)
+    :param ri_stack_ft_domain_inv_cov_matrix: shape (n_basis, N = n_timepoints, N = n_timepoints)
+    :param ri_stack_basis_prior_mean_ft: shape (n_basis, N = n_timepoints)
     :param regularization_lambda: float, lambda scale factor for the waveform, or np.array, shape (batch, n_basis)
         if we want to specify a different regularization coefficient for each basis (for example, if we're
         much more certain about one type of basis waveform vs another)
@@ -1129,9 +1127,6 @@ def batch_fourier_complex_least_square_with_prior_optimize(
 
     batch, n_observations, n_basis = batched_amplitudes_real.shape
     _, _, n_rfft_frequencies = batched_ft_observations.shape
-
-    if isinstance(regularization_lambda, float):
-        regularization_lambda = np.ones((n_basis,), dtype=np.float32) * regularization_lambda
 
     # coefficient assembly strategy (i.e. how do we compute and arrange the coefficients of the linear system to
     # avoid confusing ourselves?)
