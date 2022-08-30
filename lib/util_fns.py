@@ -765,3 +765,18 @@ def shift_waveform_peaks_and_adjust_shifts(waveform_matrix_td: np.ndarray,
     adjusted_phase_delays = phase_delays + delays
 
     return aligned_waveforms, adjusted_phase_delays
+
+
+def parse_ignore_electrodes(ignored_electrodes_line) -> np.ndarray:
+
+    indices = np.array(list(map(lambda x: int(x), ignored_electrodes_line.strip('\n').split(','))),
+                       dtype=np.int64)
+    return indices
+
+
+def invert_electrode_sel(ignored_electrodes: np.ndarray,
+                         total_n_electrodes: int) -> np.ndarray:
+
+    all_electrodes = np.ones((total_n_electrodes, ), dtype=bool)
+    all_electrodes[ignored_electrodes] = False
+    return all_electrodes
