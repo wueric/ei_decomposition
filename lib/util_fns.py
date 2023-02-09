@@ -545,6 +545,20 @@ def auto_unbatch_unpack_significant_electrodes(batched_amplitude_phase_list : Li
     return decomp_dict
 
 
+def unpad_basis_post_decomp(decomp_dict: Dict[int, Dict[str, np.ndarray]],
+                            before_pad: int,
+                            after_pad: int) -> Dict[int, Dict[str, np.ndarray]]:
+
+    output_dict = {}
+    for cell_id, decomp_dict in decomp_dict.items():
+        output_dict[cell_id] = {
+            'amplitudes': decomp_dict['amplitudes'],
+            'shifts': decomp_dict['shifts'],
+            'basis': decomp_dict['basis'][:, before_pad:-after_pad]
+        }
+    return output_dict
+
+
 def batched_pack_significant_electrodes(eis_by_cell_id: Dict[int, np.ndarray],
                                         cell_order: List[int],
                                         snr_abs_threshold: Union[float, int]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -735,6 +749,49 @@ def shift_align_abs_peak(normalized_data_matrix: np.ndarray,
     aligned_data = np.real(np.fft.irfft(data_ft * shift_matrix, axis=1, n=n_samples))
 
     return aligned_data
+
+
+def shift_align_abs_peak_noncirc(normalized_data_matrix: np.ndarray,
+                                 abs_peak_alignment_point: int) -> np.ndarray:
+    '''
+
+    This is the no-padding version of shift_align_abs_peak, where instead
+        of doing a circular shift and relying on the padding to make sure
+        nothing stupid happens, we just shift the data and fill in missing
+        timepoints with zeros.
+
+    @param normalized_data_matrix: shape (n_waveforms, n_samples)
+    @param abs_peak_alignment_point:
+    @return:
+    '''
+    n_waveforms, n_samples = normalized_data_matrix.shape
+    max_point = np.argmax(np.abs(normalized_data_matrix), axis=1)
+    delays = abs_peak_alignment_point - max_point
+
+    shifted_matrix = np.zeros_like(normalized_data_matrix)
+    for wv in range(n_waveforms):
+
+        # case 1: need to forward shift
+        delay = delays[wv]
+        if delay < 0:
+            # this means that the maximum point is before the alignment
+            write_low = -delay
+            write_high = n_samples
+
+            read_low = 0
+            read_high = n_samples + delay
+
+        else:
+            # case 2: need to backward shift
+            write_low = 0
+            write_high = n_samples - delay
+
+            read_low = delay
+            read_high = n_samples
+
+        shifted_matrix[wv, write_low:write_high] = normalized_data_matrix[wv, read_low:read_high]
+
+    return shifted_matrix
 
 
 def shift_waveform_peaks_and_adjust_shifts(waveform_matrix_td: np.ndarray,

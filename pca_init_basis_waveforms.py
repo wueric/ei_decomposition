@@ -1,5 +1,6 @@
 import numpy as np
-from lib.util_fns import pack_significant_electrodes_into_matrix, shift_align_abs_peak, bspline_upsample_waveforms
+from lib.util_fns import pack_significant_electrodes_into_matrix, shift_align_abs_peak, bspline_upsample_waveforms, \
+    shift_align_abs_peak_noncirc
 
 import pickle
 import argparse
@@ -42,7 +43,7 @@ if __name__ == '__main__':
     padded_magnitude = np.linalg.norm(padded_channels_sufficient_magnitude, axis=1)
     padded_channels_normed = padded_channels_sufficient_magnitude / padded_magnitude[:, None]
 
-    aligned_data = shift_align_abs_peak(padded_channels_normed, args.alignment_sample)
+    aligned_data = shift_align_abs_peak_noncirc(padded_channels_normed, args.alignment_sample)
     n_waveforms, n_timepoints = aligned_data.shape
 
     u, s, vh = np.linalg.svd(aligned_data, full_matrices=False)
@@ -66,8 +67,6 @@ if __name__ == '__main__':
     pickle_dict = {
         'basis': cluster_means,
         'alignment_sample': args.alignment_sample,
-        'before': preprocessed_dict['before'],
-        'after': preprocessed_dict['after'],
         'upsample': preprocessed_dict['upsample']
     }
 
