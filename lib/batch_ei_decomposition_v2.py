@@ -2090,6 +2090,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             # shape (batch, n_canonical_waveforms, n_samples), real-valued float
             # and shape (batch, n_canonical_waveforms), integer
             iter_basis_waveform_td, iter_delays = shift_waveform_peaks_and_adjust_shifts(iter_basis_waveform_td,
+                                                                                         iter_delays,
                                                                                          realign_basis_sample_num)
             iter_basis_waveform_ft = np.fft.rfft(iter_basis_waveform_td)
 
