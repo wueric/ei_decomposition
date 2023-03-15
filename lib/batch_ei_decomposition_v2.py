@@ -525,8 +525,10 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
 
         self.lambda_is_tensor = isinstance(l12_lambda, np.ndarray)
         if self.lambda_is_tensor:
-            if l12_lambda.shape != (temp_batch, n_electrodes, n_phase_shifts):
-                raise ValueError(f"l12_lambda must have shape {(temp_batch, n_electrodes, n_phase_shifts)}")
+            if l12_lambda.shape != (temp_batch, n_electrodes):
+                raise ValueError(f"l12_lambda must have shape {(temp_batch, n_electrodes)}, got {l12_lambda.shape}")
+
+            l12_lambda = np.tile(l12_lambda[:, :, None], (1, 1, n_phase_shifts))
 
             # we will flatten this tensor to have
             # shape (batch, n_electrodes * n_shifts)
@@ -1209,8 +1211,10 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
 
         self.lambda_is_tensor = isinstance(l12_lambda, np.ndarray)
         if self.lambda_is_tensor:
-            if l12_lambda.shape != (batch, n_electrodes, n_shifts):
-                raise ValueError(f"l12_lambda must have shape {(batch, n_electrodes, n_shifts)}")
+            if l12_lambda.shape != (batch, n_electrodes):
+                raise ValueError(f"l12_lambda must have shape {(batch, n_electrodes)}, got {l12_lambda.shape}")
+
+            l12_lambda = np.tile(l12_lambda[:, :, None], (1, 1, n_shifts))
 
             # we will flatten this tensor to have
             # shape (batch, n_electrodes * n_shifts)

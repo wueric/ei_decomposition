@@ -773,20 +773,20 @@ def shift_align_abs_peak_noncirc(normalized_data_matrix: np.ndarray,
 
         # case 1: need to forward shift
         delay = delays[wv]
-        if delay < 0:
+        if delay >= 0:
             # this means that the maximum point is before the alignment
-            write_low = -delay
+            write_low = delay
             write_high = n_samples
 
             read_low = 0
-            read_high = n_samples + delay
+            read_high = n_samples - delay
 
         else:
             # case 2: need to backward shift
             write_low = 0
-            write_high = n_samples - delay
+            write_high = n_samples + delay
 
-            read_low = delay
+            read_low = -delay
             read_high = n_samples
 
         shifted_matrix[wv, write_low:write_high] = normalized_data_matrix[wv, read_low:read_high]
