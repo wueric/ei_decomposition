@@ -252,103 +252,6 @@ def unpack_flat_into_by_cell(flat_matrix: np.ndarray,
     return waveforms_padded_by_cell
 
 
-def get_neighborhood_indices_from_adj_mat_dfs(by_cell_adj_mat: np.ndarray,
-                                              center_electrode_idx: int,
-                                              search_depth: int) -> np.ndarray:
-    '''
-    Get the indices of the nearest neighbors of a center electrode, as well as their nearest
-        neighbors from the included-electrodes-only adjacency matrix representation
-
-    Indices in the adjacency list correspond to the indices of the included-electrode-only adjacency matrix
-    :param by_cell_adj_mat:
-    :param center_electrode_idx:
-    :param search_depth: depth in the DFS for which we search the neighborhood
-    :return: shape (n_cells, ?) ragged np.ndarray of integer
-    '''
-
-    def iterative_dfs_helper(adj_mat: np.ndarray,
-                             root_vert: int,
-                             depth: int) -> List[int]:
-
-        dfs_stack = [(root_vert, depth), ]
-        visited = set()
-        neighborhood_list = []
-
-        while len(dfs_stack) != 0:
-
-            # visit the node
-            current_node, current_depth = dfs_stack.pop()
-            visited.add(current_node)
-            neighborhood_list.append(current_node)
-
-            if current_depth != 0:
-                neighbor_els, = np.nonzero(adj_mat[current_node, :])
-                for neighbor_el in neighbor_els:
-                    if neighbor_el not in visited:
-                        dfs_stack.append((neighbor_el, current_depth - 1))
-
-        return neighborhood_list
-
-    n_cells = by_cell_adj_mat.shape[0]
-    output_adj_lists = np.empty((n_cells,), dtype=np.object)
-
-    for cell_idx in range(n_cells):
-        neighborhood_list = iterative_dfs_helper(by_cell_adj_mat[cell_idx, :, :], center_electrode_idx, search_depth)
-        output_adj_lists[cell_idx] = neighborhood_list
-
-    return output_adj_lists
-
-
-def make_spatial_neighbors_mean_matrix(raw_adjacency_mat: np.ndarray,
-                                       included_in_padded_ei: np.ndarray,
-                                       last_valid_indices: np.ndarray) -> np.ndarray:
-    '''
-    Converts adjacency list into a series of adjacency mean matrices, each corresponding
-        to a particular cell
-
-    Rules for dealing with edges and excluded electrodes:
-        (1) If an electrode is at the edge of a cell (i.e. at least one of its neighboring electrodes is excluded
-            in the optimization calculation because its amplitude is insufficient), we still include those excluded
-            neighbors in the denominator for the mean calculation because zero is still a meaningful signal
-        (2) Edges of the array will not be included in the mean calculation (i.e. if an electrode has fewer neighbors
-            than typical because it is located at the edge of the electrode array, the number of neighbors is
-            the number of existing real neighbors rather than the number of typical neighbors)
-
-    :param raw_adjacency_mat: adjacency list, shape (n_electrodes, ?), ragged np.ndarray
-    :param included_in_padded_ei: shape (n_cells, n_max_electrodes), electrode order for each padded ei
-        where disused electrodes are marked with -1
-    :param last_valid_indices: shape (n_cells, ), integer, corresponding to the last valid col
-        of included_in_padd_ei for each cell
-    :return: np.ndarray, shape (n_cells, n_max_electrodes, n_max_electrodes), corresponding to the neighbor
-        mean matrix
-    '''
-
-    n_cells, n_max_electrodes = included_in_padded_ei.shape
-
-    # first build the adjacency matrix for the full electrode map
-    # from that then calculate the mean matrix for the full electrode map
-    # then we take submatrices from the full mean matrix for each cell
-    full_matrix_n_electrodes = raw_adjacency_mat.shape[0]
-    full_adj_mat = np.zeros((full_matrix_n_electrodes, full_matrix_n_electrodes), dtype=np.float32)
-    for center_idx in range(full_matrix_n_electrodes):
-        nn_indices = raw_adjacency_mat[center_idx]
-        full_adj_mat[center_idx, nn_indices] = 1.0
-
-    # the mean matrix is calculated by dividing by columnwise sums
-    adj_mat_csums = np.sum(full_adj_mat, axis=0)  # shape (full_matrix_n_electrodes, full_matrix_n_electrodes)
-    full_mean_mat = full_adj_mat / adj_mat_csums[None, :]  # shape (full_matrix_n_electrodes, full_matrix_n_electrodes)
-
-    cell_mean_matrix = np.zeros((n_cells, n_max_electrodes, n_max_electrodes), dtype=np.float32)
-    for cell_idx in range(n_cells):
-        n_valid_electrodes_cell = last_valid_indices[cell_idx]
-
-        relevant_electrodes_indices = included_in_padded_ei[cell_idx][:n_valid_electrodes_cell]
-        relevant_submatrix = full_mean_mat[np.ix_(relevant_electrodes_indices, relevant_electrodes_indices)]
-        cell_mean_matrix[cell_idx, :n_valid_electrodes_cell, :n_valid_electrodes_cell] = relevant_submatrix
-
-    return cell_mean_matrix
-
-
 def generate_fourier_phase_shift_matrices(sample_delays: np.ndarray,
                                           n_frequencies: int) -> np.ndarray:
     '''
@@ -773,20 +676,20 @@ def shift_align_abs_peak_noncirc(normalized_data_matrix: np.ndarray,
 
         # case 1: need to forward shift
         delay = delays[wv]
-        if delay < 0:
+        if delay >= 0:
             # this means that the maximum point is before the alignment
-            write_low = -delay
+            write_low = delay
             write_high = n_samples
 
             read_low = 0
-            read_high = n_samples + delay
+            read_high = n_samples - delay
 
         else:
             # case 2: need to backward shift
             write_low = 0
-            write_high = n_samples - delay
+            write_high = n_samples + delay
 
-            read_low = delay
+            read_low = -delay
             read_high = n_samples
 
         shifted_matrix[wv, write_low:write_high] = normalized_data_matrix[wv, read_low:read_high]

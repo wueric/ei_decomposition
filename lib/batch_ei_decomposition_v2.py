@@ -9,8 +9,7 @@ from lib.frequency_domain_optimization import batch_fourier_complex_least_square
     batch_fourier_complex_least_square_with_prior_optimize, construct_rfft_covariance_matrix, _pack_complex_to_real_imag
 from lib.losseval import batch_evaluate_mse_flat
 from lib.optim.optim_base import BatchedMultiProxProblem, \
-    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, \
-    ProxGradSolverParams
+    ManualGradBatchMultiProxProblem, ProxSolverParams
 from lib.optim.prox_optim import batch_multiproblem_parallel_prox_solve
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector
@@ -525,8 +524,10 @@ class SharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedShif
 
         self.lambda_is_tensor = isinstance(l12_lambda, np.ndarray)
         if self.lambda_is_tensor:
-            if l12_lambda.shape != (temp_batch, n_electrodes, n_phase_shifts):
-                raise ValueError(f"l12_lambda must have shape {(temp_batch, n_electrodes, n_phase_shifts)}")
+            if l12_lambda.shape != (temp_batch, n_electrodes):
+                raise ValueError(f"l12_lambda must have shape {(temp_batch, n_electrodes)}, got {l12_lambda.shape}")
+
+            l12_lambda = np.tile(l12_lambda[:, :, None], (1, 1, n_phase_shifts))
 
             # we will flatten this tensor to have
             # shape (batch, n_electrodes * n_shifts)
@@ -1209,8 +1210,10 @@ class UnsharedShiftsGroupSparseProxGradSolver(BatchedMultiProxProblem, BatchedSh
 
         self.lambda_is_tensor = isinstance(l12_lambda, np.ndarray)
         if self.lambda_is_tensor:
-            if l12_lambda.shape != (batch, n_electrodes, n_shifts):
-                raise ValueError(f"l12_lambda must have shape {(batch, n_electrodes, n_shifts)}")
+            if l12_lambda.shape != (batch, n_electrodes):
+                raise ValueError(f"l12_lambda must have shape {(batch, n_electrodes)}, got {l12_lambda.shape}")
+
+            l12_lambda = np.tile(l12_lambda[:, :, None], (1, 1, n_shifts))
 
             # we will flatten this tensor to have
             # shape (batch, n_electrodes * n_shifts)
@@ -2086,6 +2089,7 @@ def batch_shifted_fourier_nmf_iterative_optimization4(raw_waveform_data_matrix: 
             # shape (batch, n_canonical_waveforms, n_samples), real-valued float
             # and shape (batch, n_canonical_waveforms), integer
             iter_basis_waveform_td, iter_delays = shift_waveform_peaks_and_adjust_shifts(iter_basis_waveform_td,
+                                                                                         iter_delays,
                                                                                          realign_basis_sample_num)
             iter_basis_waveform_ft = np.fft.rfft(iter_basis_waveform_td)
 

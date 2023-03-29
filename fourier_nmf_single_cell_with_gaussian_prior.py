@@ -15,8 +15,8 @@ if __name__ == '__main__':
     parser.add_argument('ei_pickle', type=str, help='path to EI pickle')
     parser.add_argument('basis_prior_pickle', type=str, help='path to input pickle file')
     parser.add_argument('output_pickle', type=str, help='path to output pickle file')
-    parser.add_argument('--maxiter', '-m', type=int, default=10, help='maximum number of iterations to run')
-    parser.add_argument('--weight_reg', '-w', type=float, default=7.5e-2,
+    parser.add_argument('--maxiter', '-m', type=int, default=3, help='maximum number of iterations to run')
+    parser.add_argument('--weight_reg', '-w', type=float, default=1e-1,
                         help='L1 regularization lambda for amplitudes')
     parser.add_argument('-b', '--before', type=int, default=40, help='amount to pad/shift before EI')
     parser.add_argument('-a', '--after', type=int, default=40, help='amount to pad/shift after EI')
