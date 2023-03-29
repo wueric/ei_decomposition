@@ -9,8 +9,7 @@ from lib.frequency_domain_optimization import batch_fourier_complex_least_square
     batch_fourier_complex_least_square_with_prior_optimize, construct_rfft_covariance_matrix, _pack_complex_to_real_imag
 from lib.losseval import batch_evaluate_mse_flat
 from lib.optim.optim_base import BatchedMultiProxProblem, \
-    ManualGradBatchMultiProxProblem, ProxSolverParams, ProxFISTASolverParams, ProxFixedStepSizeSolverParams, \
-    ProxGradSolverParams
+    ManualGradBatchMultiProxProblem, ProxSolverParams
 from lib.optim.prox_optim import batch_multiproblem_parallel_prox_solve
 from lib.batch_joint_amplitude_time_opt import batched_build_at_a_matrix, batched_build_at_b_vector, \
     batched_build_unshared_at_a_matrix, batched_build_unshared_at_b_vector

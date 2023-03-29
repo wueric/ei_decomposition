@@ -16,7 +16,7 @@ if __name__ == '__main__':
     parser.add_argument('basis_pickle', type=str, help='path to output pickle file')
     parser.add_argument('--thresh', '-t', type=float, default=5.0, help='EI amplitude cutoff')
     parser.add_argument('--alignment_sample', '-l', type=int, default=60,
-                        help='sample to align peak at, in units of upsampled + padded samples')
+                        help='sample to align peak at, in units of upsampled samples')
     parser.add_argument('--nbasis', '-n', type=int, default=3, help='number of basis waveforms')
     parser.add_argument('--n_pca_components', '-p', type=int, default=5,
                         help='number of PCA components to use for clustering')
