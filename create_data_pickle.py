@@ -4,8 +4,6 @@ import pickle
 import visionloader as vl
 from lib.util_fns import bspline_upsample_waveforms, parse_ignore_electrodes
 
-import numpy as np
-
 DESCRIPTION = "Extracts EIs from Vision and puts them into a pickle file, one entry for every cell. Not for publication; " + \
               "this requires Vision datasets and machinery that the outside world does not have"
 
@@ -26,7 +24,6 @@ if __name__ == '__main__':
         with open(args.ignore_el, 'r') as ignore_el_file:
             line = ignore_el_file.readline()
             els_to_ignore = parse_ignore_electrodes(line)
-
 
     print("Loading data")
     dataset = vl.load_vision_data(args.ds_path,
